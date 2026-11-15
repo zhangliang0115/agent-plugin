@@ -2,8 +2,9 @@
  * Admission control for the tool calls of one run_code program. Calls start in
  * submission order. A parallel call starts unless an exclusive call is running;
  * an exclusive call starts only when nothing else is running. Nothing is shared
- * across runs, agents or sessions, and nothing is held while a call waits for a
- * user answer, because only running calls count. @module
+ * across runs, agents or sessions. An exclusive call keeps its slot while it
+ * waits for a user answer, so parallel siblings of the same run queue behind it;
+ * that is the same barrier the native batch scheduler applies. @module
  */
 import { ToolCallError } from '@agent-plugin/code-mode-core';
 
