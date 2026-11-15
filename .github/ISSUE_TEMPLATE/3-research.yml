@@ -1,0 +1,27 @@
+name: 调研 / 待决问题
+description: 需要先调查清楚或做出选择的问题
+title: "[research] "
+labels: ["type:research", "status:idea"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题
+      description: 要回答什么，或要在哪些方案之间做选择。
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响
+      description: 这个问题不解决会卡住什么。
+  - type: textarea
+    id: leads
+    attributes:
+      label: 线索
+      description: 已知的方案、链接、相关文件。
+  - type: textarea
+    id: output
+    attributes:
+      label: 预期产出
+      description: 例如：ADR、docs/hosts/ 更新、一份对比报告。

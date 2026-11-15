@@ -1,0 +1,28 @@
+name: 新宿主 / 宿主支持调整
+description: 新增一个目标宿主，或调整已有宿主的支持（版本、扩展点）
+title: "[host] "
+labels: ["type:host", "status:idea"]
+body:
+  - type: input
+    id: host
+    attributes:
+      label: 宿主
+      placeholder: 例如 Codex、Gemini CLI，或已有的 dsh
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么要支持 / 调整
+    validations:
+      required: true
+  - type: textarea
+    id: refs
+    attributes:
+      label: 官方文档与扩展机制
+      description: 插件形态、加载方式、打包分发方式的链接。
+  - type: textarea
+    id: done
+    attributes:
+      label: 完成标准
+      description: 默认包括 docs/hosts/<host>.md、ADR、已有插件的 meta 更新（见 docs/conventions.md「新增一个宿主」）。

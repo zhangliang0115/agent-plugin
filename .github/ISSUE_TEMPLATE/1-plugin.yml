@@ -1,0 +1,35 @@
+name: 新插件 / 插件功能
+description: 提出一个新插件，或给已有插件加功能
+title: "[plugin] "
+labels: ["type:plugin", "status:idea"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 这个插件要解决什么问题，给谁用。
+    validations:
+      required: true
+  - type: checkboxes
+    id: hosts
+    attributes:
+      label: 目标宿主
+      options:
+        - label: Claude Code
+        - label: DSH
+        - label: Pi
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围
+      description: 要做什么、明确不做什么。
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 已知约束与参考
+      description: 宿主限制、相关链接、类似实现。
+  - type: textarea
+    id: done
+    attributes:
+      label: 完成标准
+      description: 可验证的条目。调研阶段可以先空着，ready 之前补全。

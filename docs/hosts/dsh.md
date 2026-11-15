@@ -61,7 +61,7 @@ dsh --profile demo --dump-config           # 看行是否进入组合树
 ## 本项目约定
 
 - adapter 目录 `plugins/<name>/dsh/` 是一个独立 workspace 包。
-- 锁定的 DSH 版本：**待定**（见 [open-questions](../open-questions.md)）。
+- 锁定的 DSH 版本：**待定**（见 [#2](https://github.com/zhangliang0115/agent-plugin/issues/2)）。
 
 ## 已知问题
 

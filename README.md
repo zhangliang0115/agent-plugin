@@ -21,7 +21,7 @@ pnpm test
 
 - 规范：[docs/conventions.md](docs/conventions.md)
 - 决策记录：[docs/decisions/](docs/decisions/)
-- 未决问题：[docs/open-questions.md](docs/open-questions.md)
+- 需求、问题反馈、待决问题：[GitHub Issues](https://github.com/zhangliang0115/agent-plugin/issues)，规则见 [docs/issues.md](docs/issues.md)
 - 能力矩阵：[docs/capability-matrix.md](docs/capability-matrix.md)
 
 ## 状态

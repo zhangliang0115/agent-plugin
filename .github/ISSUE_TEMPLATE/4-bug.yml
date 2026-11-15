@@ -1,0 +1,39 @@
+name: 问题反馈
+description: 插件、脚本或规范的行为与预期不符
+title: "[bug] "
+labels: ["type:bug", "status:idea"]
+body:
+  - type: input
+    id: where
+    attributes:
+      label: 涉及范围
+      placeholder: 插件 id / 宿主 / 脚本 / 规范文件
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 能复现的命令或操作。
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 贴原文输出，堆栈保留前 20 行。
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 最好附上文档或规范的出处。
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: 环境
+      placeholder: 宿主版本、Node 版本、提交号
