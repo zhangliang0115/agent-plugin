@@ -17,7 +17,7 @@
 | 宿主目录名 | 固定为 `claude-code`、`dsh`、`pi` | |
 | 工具名（给模型看） | snake_case，跨宿主一致 | `run_code` |
 
-对外发布的 npm 包名和 scope 在第一次发布时决定（见 [open-questions](open-questions.md)）。
+对外发布的 npm 包名和 scope 在第一次发布时决定（见 [issue #4](https://github.com/zhangliang0115/agent-plugin/issues/4)）。
 
 ## 版本
 
@@ -49,7 +49,7 @@
 | 在方案之间做了选择 | `docs/decisions/NNNN-*.md`（规则见 [decisions/README](decisions/README.md)） |
 | 宿主 API 的事实 | `docs/hosts/<host>.md` |
 | 宿主/工具行为与预期不符、规则不好用 | `friction.md` |
-| 尚未决定的问题 | `docs/open-questions.md`；决定后删掉该条，结论写进 ADR 或对应文档 |
+| 需求、调研、问题反馈、尚未决定的问题 | GitHub issue（规则见 [issues.md](issues.md)）；决定后结论写进 ADR 或对应文档，issue 里放链接 |
 | 插件的用法、限制 | `plugins/<id>/README.md` |
 | 插件在每个宿主上的安装步骤（给 agent 执行） | `plugins/<id>/INSTALL.md`（规则见下面「安装文档」） |
 | 开发本仓库的可复用操作步骤 | `.kiro/skills/<name>/SKILL.md`（规则见下面「Skills」） |

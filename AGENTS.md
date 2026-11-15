@@ -13,7 +13,7 @@
 | `docs/conventions.md` | 工具链、命名、版本、提交、依赖安全、文档职责 |
 | `docs/hosts/` | 每个宿主的扩展机制事实和本地验证命令 |
 | `docs/decisions/` | 决策记录（ADR） |
-| `docs/open-questions.md` | 未决问题 |
+| `docs/issues.md` | 用 GitHub Issues 管理需求、调研、问题反馈的规则 |
 | `docs/capability-matrix.md` | 插件 × 宿主矩阵（生成物） |
 | `friction.md` | 宿主、工具、规则的摩擦记录 |
 | `.kiro/skills/` | 开发本仓库用的 skill（Kiro 与 Claude Code 共用；`.claude/skills` 是指向它的软链接） |
@@ -55,7 +55,8 @@ git status && git diff
 
 - 方案选择 → 新 ADR（`docs/decisions/`），并更新索引
 - 宿主 API 事实 → `docs/hosts/<host>.md`，带来源和核对日期
-- 还没决定的事 → `docs/open-questions.md`
+- 需求、问题反馈、还没决定的事 → GitHub issue（`gh issue create`，规则见 `docs/issues.md`）。用户提到但没说现在做的事，直接建 issue 记下来
+- 开发某个 issue 前，它必须是 `status:ready`（只由用户设置）；提交信息写 `Refs #n` / `Closes #n`
 - 踩坑 → `friction.md`
 
 ## 禁令
