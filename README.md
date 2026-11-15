@@ -1,37 +1,29 @@
 # agent-plugin
 
-跨 coding agent 的插件集。第一个插件是 **Code Mode**：模型不再逐个发工具调用，而是写一段 JavaScript，由插件在本地执行，代码里通过工具绑定调用宿主工具。
+给多个 coding agent 开发插件的仓库。目标宿主：
 
-当前只做 Code Mode，不复制旧 `ai-plugin` 仓库的内容。
+| 宿主 | 插件形态 |
+|---|---|
+| [Claude Code](docs/hosts/claude-code.md) | 声明式插件目录；代码跑在 MCP server / hook / `bin/` |
+| [DSH（DeepSeek Harness）](docs/hosts/dsh.md) | 进程内 Cordis 插件 |
+| [Pi](docs/hosts/pi.md) | 进程内 TypeScript 扩展 |
 
-## 结构
+每个插件拆成宿主无关的 `core/` 和每个宿主一个薄 adapter，见 [架构](docs/architecture.md)。
 
-```text
-agent-plugin/
-├── src/
-│   └── code-mode/          # 平台无关 core
-├── code-mode/
-│   ├── claude-code/        # Claude Code adapter（MCP server + plugin）
-│   └── dsh/                # DeepSeek Harness adapter（dsh bundle）
-├── scripts/                # core 镜像 / drift check
-└── test/                   # conformance
+## 开发
+
+需要 Node `>=22.19` 和 pnpm。
+
+```bash
+pnpm install
+pnpm test
 ```
 
-## 边界
-
-- `src/code-mode/` 不知道宿主：只依赖 `{ callTool, listTools, session, log, sandbox }`。
-- 每个 adapter 只做宿主集成：Claude Code 用 MCP，DSH 用 `ctx.tools` + `tools/pre-execute` 流水线。
-- 提示词只写一份，adapter 只追加宿主特定段落。
-
-## 安装
-
-- Claude Code：`/plugin marketplace add zhangliang0115/agent-plugin`，再 `/plugin install code-mode@agent-plugin`。
-- DSH：`dsh plugin --profile <profile> add "github:zhangliang0115/agent-plugin#path:/code-mode/dsh"`。
+- 规范：[docs/conventions.md](docs/conventions.md)
+- 决策记录：[docs/decisions/](docs/decisions/)
+- 未决问题：[docs/open-questions.md](docs/open-questions.md)
+- 能力矩阵：[docs/capability-matrix.md](docs/capability-matrix.md)
 
 ## 状态
 
-骨架阶段。core 和两个 adapter 还没有实现。
-
-## 旧项目
-
-`~/workspace/personal/ai-plugin` 已废弃，保持原样不动。
+只有基础设施和规范，还没有插件。

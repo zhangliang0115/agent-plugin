@@ -1,0 +1,6 @@
+packages:
+  - packages/*
+  - plugins/*/core
+  - plugins/*/claude-code
+  - plugins/*/dsh
+  - plugins/*/pi

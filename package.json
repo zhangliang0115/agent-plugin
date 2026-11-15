@@ -3,11 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Cross-agent plugins, starting with Code Mode for Claude Code and DeepSeek Harness.",
+  "description": "Plugins for multiple coding agents: Claude Code, DSH, Pi.",
+  "packageManager": "pnpm@10.6.3",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck"
   }
 }
