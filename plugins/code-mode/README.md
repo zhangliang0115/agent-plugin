@@ -132,9 +132,9 @@ a.totalLines + b.totalLines
 ```bash
 pnpm install
 pnpm test               # 含 core 与 dsh 的测试
-pnpm --filter @agent-plugin/code-mode-core typecheck
-pnpm --filter @agent-plugin/code-mode-dsh typecheck
-pnpm --filter @agent-plugin/code-mode-dsh build   # 生成 dist/index.js，用于打包
+pnpm --filter @zhangliang0115/code-mode-core typecheck
+pnpm --filter @zhangliang0115/code-mode-dsh typecheck
+pnpm --filter @zhangliang0115/code-mode-dsh build   # 生成 dist/index.js，用于打包
 ```
 
 - core 的测试不依赖 DSH。`no-host-deps.test.ts` 检查 core 不 import `@deepseek-ai/*` 与 `cordis`。

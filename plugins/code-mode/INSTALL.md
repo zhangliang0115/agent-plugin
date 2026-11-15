@@ -31,7 +31,7 @@ pnpm run build
 mkdir -p /tmp/code-mode-pkg && pnpm pack --pack-destination /tmp/code-mode-pkg
 ```
 
-预期：`/tmp/code-mode-pkg/agent-plugin-code-mode-dsh-0.1.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
+预期：`/tmp/code-mode-pkg/zhangliang0115-code-mode-dsh-0.1.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
 
 如果 profile 目录 `~/.dsh/profiles/<profile>` 不存在，在任意目录执行一次（用于创建 profile，使用 DSH 的 headless 模板）：
 
@@ -79,7 +79,15 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 "<dsh>" plugin --profile <profile> add <tgz>
 ```
 
-预期输出包含 `+ @agent-plugin/code-mode-dsh 0.1.0`。
+预期输出包含 `+ @zhangliang0115/code-mode-dsh 0.1.0`。
+
+包发布到 npm 之后，可以省掉本地构建，直接从 npm 安装：
+
+```bash
+"<dsh>" plugin --profile <profile> add @zhangliang0115/code-mode-dsh
+```
+
+包名与 scope 的决策见 `docs/decisions/0005-npm-scope-and-package-names.md`。
 
 插件的 `cordis.patch.yml` 会禁用 `tool-executor-native`，`tool-executor-ptc` 在 headless 模板中也是禁用的。这一步不需要手动操作。
 
@@ -120,10 +128,10 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 ### 卸载
 
 ```bash
-"<dsh>" plugin --profile <profile> remove @agent-plugin/code-mode-dsh
+"<dsh>" plugin --profile <profile> remove @zhangliang0115/code-mode-dsh
 ```
 
-预期输出包含 `- @agent-plugin/code-mode-dsh`。
+预期输出包含 `- @zhangliang0115/code-mode-dsh`。
 
 如果 `<profile>` 只为本插件建立，并且要删除它：
 
@@ -136,7 +144,7 @@ rm -rf ~/.dsh/profiles/<profile>
 ### 常见问题
 
 - 现象：`"<dsh>" --profile <profile> headless "..."` 没有输出，进程挂住。原因：`headless` 是模板名，DSH 把它当作任务文本。处理：去掉 `headless`，用 `"<dsh>" --profile <profile> --json "<task>"`。
-- 现象：`--dump-config` 中没有 `code-mode-dsh`。原因：`plugin add` 没有成功，或 `<tgz>` 路径错误。处理：重跑安装步骤；检查 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 中是否有 `@agent-plugin/code-mode-dsh`。
+- 现象：`--dump-config` 中没有 `code-mode-dsh`。原因：`plugin add` 没有成功，或 `<tgz>` 路径错误。处理：重跑安装步骤；检查 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 中是否有 `@zhangliang0115/code-mode-dsh`。
 - 现象：`dump-config` 中 `agent-default-model` 的 `provider` 是 `deepseek-official`，回答来自官方 API。原因：没有写入网关路由。处理：完成安装步骤里的网关路由。
 - 现象：`Only one tool executor may be registered in each scope`。原因：`tool-executor-native` 没有被禁用，或另一个插件也注册了 executor。处理：检查 `--dump-config`，确认 native 为 `disabled: true`。
 - 现象：`pnpm` 警告 `linked in dependency will not resolve the peer dependencies`。原因：用了目录安装。处理：改用 `pnpm pack` 得到的 tgz。

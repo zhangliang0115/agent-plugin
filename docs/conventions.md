@@ -13,11 +13,11 @@
 | 对象 | 规则 | 例子 |
 |---|---|---|
 | 插件 id / 目录名 | kebab-case；不以 `claude-`、`anthropic-` 开头 | `code-mode` |
-| workspace 包名 | `@agent-plugin/<id>-<host>`，core 为 `@agent-plugin/<id>-core` | `@agent-plugin/code-mode-dsh` |
+| 包名 | `@zhangliang0115/<id>-<host>`，core 为 `@zhangliang0115/<id>-core`；workspace 内部名与发布名一致 | `@zhangliang0115/code-mode-dsh` |
 | 宿主目录名 | 固定为 `claude-code`、`dsh`、`pi` | |
 | 工具名（给模型看） | snake_case，跨宿主一致 | `run_code` |
 
-对外发布的 npm 包名和 scope 在第一次发布时决定（见 [issue #4](https://github.com/zhangliang0115/agent-plugin/issues/4)）。
+只发布宿主 adapter，core 保持 `private` 并被打包进 adapter 的 `dist`。决策见 [ADR 0005](decisions/0005-npm-scope-and-package-names.md)。
 
 ## 版本
 

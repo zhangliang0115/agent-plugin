@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { CodeMode } from '@agent-plugin/code-mode-core';
+import { CodeMode } from '@zhangliang0115/code-mode-core';
 import { CodeModeExecutor } from '../src/executor.ts';
 import { fakeAgent, fakeContext, readTool } from './fake-context.ts';
 

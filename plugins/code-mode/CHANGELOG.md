@@ -27,6 +27,8 @@
 - 去掉进程级的串行锁。此前一个 agent 的审批等待会挡住所有 agent 的 `run_code`。现在每次运行有自己的调度器。
 - 同一次运行内，`exclusive` 的工具（写文件、bash 等）在 `Promise.all` 中按提交顺序串行执行，与原生一致；`parallel` 的工具仍然并行。
 ### 变更
+- 包名改为 `@zhangliang0115/code-mode-dsh` 与 `@zhangliang0115/code-mode-core`。只发布 dsh adapter（`private` 已移除，`publishConfig.access` 为 `public`），core 保持 private 并被打包进 adapter 的 `dist`。决策见 ADR 0005。从 tgz 安装的命令不变；`pnpm pack` 的产物名变为 `zhangliang0115-code-mode-dsh-0.1.0.tgz`。
+- 支持顶层的 `return <value>`：它的值就是运行结果，并结束程序。此前模型写 `return` 会得到 `SyntaxError: 'return' outside of function`。提示词同时说明了这一点。
 - 工具签名后显示返回形状（`-> { ... }`），来自 DSH 工具的输出 schema。最多两层，超过 240 字符截断。模型不再需要先试错才知道返回值结构。
 - `<error>` 包含出错的用户代码行号和该行原文。行号与用户代码一致，即使程序前面有 hoist 的声明或跨行语句。
 

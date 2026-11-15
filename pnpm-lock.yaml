@@ -33,7 +33,7 @@ importers:
         specifier: 0.32.0
         version: 0.32.0
     devDependencies:
-      '@agent-plugin/code-mode-core':
+      '@zhangliang0115/code-mode-core':
         specifier: workspace:*
         version: link:../core
       '@deepseek-ai/cordis':

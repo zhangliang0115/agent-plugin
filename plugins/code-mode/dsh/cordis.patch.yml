@@ -6,4 +6,4 @@
   disabled: true
 - insert:
     - id: code-mode-dsh
-      name: '@agent-plugin/code-mode-dsh'
+      name: '@zhangliang0115/code-mode-dsh'

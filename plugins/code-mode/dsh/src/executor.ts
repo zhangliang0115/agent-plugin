@@ -22,7 +22,7 @@ import {
   type ToolRunContext,
 } from '@deepseek-ai/dsh-tools';
 import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline';
-import { CodeMode, ToolCallError, renderInstructions, toolCallExample, toolReturns, toolSignature, type CallControl, type ToolDescriptor } from '@agent-plugin/code-mode-core';
+import { CodeMode, ToolCallError, renderInstructions, toolCallExample, toolReturns, toolSignature, type CallControl, type ToolDescriptor } from '@zhangliang0115/code-mode-core';
 import { DispatchLog } from './dispatch-log.ts';
 import { RunScheduler } from './run-scheduler.ts';
 

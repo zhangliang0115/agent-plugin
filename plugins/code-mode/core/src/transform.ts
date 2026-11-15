@@ -123,7 +123,9 @@ export function transformProgram(code: string): TransformedProgram {
       ecmaVersion: 'latest',
       sourceType: 'script',
       allowAwaitOutsideFunction: true,
-      allowReturnOutsideFunction: false,
+      // The program runs inside an async function, so a top-level `return` is legal and natural
+      // for a model to write. Its value becomes the result (see `hasResult` below).
+      allowReturnOutsideFunction: true,
     }) as unknown as AnyNode;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -145,8 +147,13 @@ export function transformProgram(code: string): TransformedProgram {
 
   // A `var` inside a block is function-scoped in plain JavaScript, so it must still reach `globalThis`
   // to persist across runs. Only declarations outside functions and classes qualify.
+  // A top-level `return` with a value also makes the run produce a result.
   const declaredAtTop = new Set<AnyNode>(statements);
   walkNodes(program, (node, parent) => {
+    if (node.type === 'ReturnStatement' && node.argument !== null) {
+      hasResult = true;
+      return;
+    }
     if (node.type !== 'VariableDeclaration' || (node.kind as string) !== 'var' || declaredAtTop.has(node)) return;
     if (parent !== undefined) edits.push(nestedVarEdit(node, parent, source));
   });

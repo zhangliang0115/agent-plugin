@@ -6,7 +6,7 @@
  * waits for a user answer, so parallel siblings of the same run queue behind it;
  * that is the same barrier the native batch scheduler applies. @module
  */
-import { ToolCallError } from '@agent-plugin/code-mode-core';
+import { ToolCallError } from '@zhangliang0115/code-mode-core';
 
 /** How a call may overlap with the others of its run. */
 export type CallMode = 'parallel' | 'exclusive';

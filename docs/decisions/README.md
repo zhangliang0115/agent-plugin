@@ -49,3 +49,4 @@
 | [0002](0002-portable-core-host-adapters.md) | 可移植核心 + 宿主薄 adapter | 已接受 |
 | [0003](0003-scripts-toolchain.md) | 仓库脚本用 TypeScript 直接运行，不加构建步骤 | 已接受 |
 | [0004](0004-code-mode-dsh-design.md) | DSH 的 Code Mode：run_code、sealed QuickJS 沙箱、子调用走流水线 | 已接受 |
+| [0005](0005-npm-scope-and-package-names.md) | 对外发布的 npm scope 与包名 | 已接受 |

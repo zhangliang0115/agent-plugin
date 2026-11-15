@@ -6,6 +6,7 @@ const RULES = `Use run_code to run JavaScript that calls the tools below. Use it
 
 - import, require or process are not available; call the listed tools instead, for files, shell commands and network access.
 - The value of the program's last expression is returned as the result. Values that are not the last expression are not returned. Use self.log(...) to return anything else.
+- A top-level \`return <value>\` is also returned as the result and ends the program there.
 - Each tool is an async function that takes one object argument, with the fields shown in the list below. Call it with await, for example \`const result = await <tool>({ ...args });\`, using a name from the list. Results are usually objects, not strings: read their fields from the type shown after \`->\` , which describes the shape the tool resolves to. A failed tool call throws; catch it with try/catch when a failure is expected.
 - Top-level const, let, var, function and class declarations persist across run_code calls in this session.
 - Console output stays out of the result. Read recent console entries with console.tail(n). Use preview(value, n = 2000) to print a long value in bounded size.

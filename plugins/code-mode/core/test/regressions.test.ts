@@ -116,6 +116,32 @@ test('a leading use strict survives a hoisted function', async () => {
   mode.dispose();
 });
 
+test('a top-level return value is the result and ends the program', async () => {
+  const mode = newMode();
+  const value = parseEnvelope(await mode.run({}, { code: 'return 5 * 2', ...noTools, signal: signal() }));
+  assert.equal(value.result, '10');
+  const early = parseEnvelope(await mode.run({}, { code: 'if (true) return 7;\nself.log("after")', ...noTools, signal: signal() }));
+  assert.equal(early.result, '7');
+  assert.equal(early.log, undefined, 'code after return did not run');
+  mode.dispose();
+});
+
+test('a return without a value produces no result element', async () => {
+  const mode = newMode();
+  const out = parseEnvelope(await mode.run({}, { code: 'return;', ...noTools, signal: signal() }));
+  assert.equal(out.error, undefined);
+  assert.equal(out.result, undefined);
+  mode.dispose();
+});
+
+test('a return inside a function does not make the run return a result', async () => {
+  const mode = newMode();
+  const out = parseEnvelope(await mode.run({}, { code: 'function f() { return 1; }\nf', ...noTools, signal: signal() }));
+  // The last expression is `f`, so the result is the function, not the inner return.
+  assert.match(out.result ?? '', /Function f/);
+  mode.dispose();
+});
+
 test('escaping happens before truncation, so the limit applies to what the model sees', () => {
   const escaped = escapeAndTruncate('&'.repeat(20), 10);
   assert.ok(escaped.startsWith('&amp;&amp;'), escaped);

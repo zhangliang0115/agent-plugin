@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { CodeMode } from '@agent-plugin/code-mode-core';
+import { CodeMode } from '@zhangliang0115/code-mode-core';
 import { CodeModeExecutor } from '../src/executor.ts';
 import { fakeAgent, fakeContext, type FakeContext } from './fake-context.ts';
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

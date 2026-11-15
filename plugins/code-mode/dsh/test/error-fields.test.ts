@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
 import { ToolNotFoundError, defineTool } from '@deepseek-ai/dsh-tools';
-import { ToolCallError } from '@agent-plugin/code-mode-core';
+import { ToolCallError } from '@zhangliang0115/code-mode-core';
 import { CodeModeExecutor } from '../src/executor.ts';
 import { RunScheduler } from '../src/run-scheduler.ts';
 import { fakeAgent, fakeContext, readTool } from './fake-context.ts';

@@ -1,8 +1,10 @@
 {
-  "name": "@agent-plugin/code-mode-dsh",
+  "name": "@zhangliang0115/code-mode-dsh",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Code Mode for DeepSeek Harness: run_code executes JavaScript that calls DSH tools through the guarded pipeline.",
   "main": "./dist/index.js",
   "exports": {
@@ -41,7 +43,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3"
   },
   "devDependencies": {
-    "@agent-plugin/code-mode-core": "workspace:*",
+    "@zhangliang0115/code-mode-core": "workspace:*",
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
