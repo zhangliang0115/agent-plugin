@@ -22,8 +22,11 @@
 
 ```bash
 pnpm install
-pnpm test          # 所有包的测试
-pnpm typecheck     # 所有包的类型检查
+pnpm test          # 仓库脚本测试（node --test）+ 所有 workspace 包的测试
+pnpm typecheck     # tsconfig.json（scripts/）+ 所有 workspace 包的类型检查
+pnpm validate      # 校验 plugins/*/plugin.meta.json
+pnpm matrix        # 从 plugin.meta.json 重新生成 docs/capability-matrix.md
+pnpm matrix:check  # 矩阵与提交内容不一致时非零退出
 git status && git diff
 ```
 

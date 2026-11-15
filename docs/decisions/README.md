@@ -47,3 +47,4 @@
 |---|---|---|
 | [0001](0001-base-framework.md) | 先做宿主无关的基础框架 | 已被 0002 取代 |
 | [0002](0002-portable-core-host-adapters.md) | 可移植核心 + 宿主薄 adapter | 已接受 |
+| [0003](0003-scripts-toolchain.md) | 仓库脚本用 TypeScript 直接运行，不加构建步骤 | 已接受 |

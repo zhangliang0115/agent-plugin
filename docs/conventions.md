@@ -5,6 +5,7 @@
 - Node `>=22.19`，pnpm（版本见根 `package.json` 的 `packageManager`）。
 - TypeScript，ESM（`"type": "module"`）。
 - 测试用 `node --test`（Node 原生支持 TS 类型擦除）。
+- 仓库脚本（`scripts/*.ts`）用 `node` 直接运行，不加构建步骤。只用可擦除的 TS 语法（`erasableSyntaxOnly`：不用 enum、namespace、参数属性）。
 - 构建工具（发布 npm 需要产出 JS）随第一个要发布的包一起决定，写 ADR。
 
 ## 命名

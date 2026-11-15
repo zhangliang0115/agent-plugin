@@ -58,12 +58,13 @@ plugins/<name>/
 
 ## 能力矩阵
 
-`docs/capability-matrix.md` 是生成物，由脚本从所有 `plugin.meta.json` 生成，不手改。CI 校验生成结果与提交内容一致（脚本随第一个插件一起实现）。
+`docs/capability-matrix.md` 是生成物，由 `pnpm matrix` 从所有 `plugin.meta.json` 生成，不手改。`pnpm matrix:check` 检查生成结果与提交内容一致。仓库目前没有 CI，需要手动运行。
 
 ## 测试分层
 
 | 层 | 测什么 | 怎么跑 |
 |---|---|---|
 | core 单元测试 | 业务逻辑 | `node --test`，不依赖宿主 |
+| 仓库脚本测试 | `validate`、`matrix` 的校验规则、生成内容、`--check` 行为 | `node --test`，fixture 在 `scripts/test/fixtures/` |
 | adapter 契约测试 | 注册了什么、参数/结果转换是否正确 | 用该宿主 API 的最小 fake，不启动宿主 |
 | 宿主冒烟 | 真实宿主能加载并调用 | 按 `docs/hosts/<host>.md` 的本地验证命令，结果贴进 PR 或交付说明 |

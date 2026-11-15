@@ -1,0 +1,10 @@
+{
+  "id": "demo",
+  "version": "0.1.0",
+  "description": "演示插件",
+  "hosts": {
+    "claude-code": { "status": "supported", "components": ["skill", "mcp"] },
+    "dsh": { "status": "experimental", "components": ["tool"] },
+    "pi": { "status": "unsupported", "reason": "没有对应扩展点 | 含管道符" }
+  }
+}

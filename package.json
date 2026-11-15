@@ -9,7 +9,14 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "test": "node --test \"scripts/test/*.test.ts\" && pnpm -r --if-present test",
+    "typecheck": "tsc -p tsconfig.json && pnpm -r --if-present typecheck",
+    "validate": "node scripts/validate.ts",
+    "matrix": "node scripts/matrix.ts",
+    "matrix:check": "node scripts/matrix.ts --check"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.21",
+    "typescript": "7.0.2"
   }
 }

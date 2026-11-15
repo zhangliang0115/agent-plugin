@@ -1,0 +1,9 @@
+{
+  "id": "other-name",
+  "version": "0.1.0",
+  "description": "id 与目录名不一致",
+  "hosts": {
+    "dsh": { "status": "supported", "components": ["tool"] },
+    "pi": { "status": "unsupported" }
+  }
+}
