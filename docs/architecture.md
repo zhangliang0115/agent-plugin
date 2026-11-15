@@ -21,7 +21,8 @@ scripts/         validate、matrix 等仓库脚本
 
 ```text
 plugins/<name>/
-  README.md            做什么、支持哪些宿主、每个宿主怎么安装
+  README.md            做什么、支持哪些宿主、限制；安装部分只链接到 INSTALL.md
+  INSTALL.md           每个支持的宿主一节，给 agent 逐条执行（规则见 conventions.md「安装文档」）
   CHANGELOG.md
   plugin.meta.json     元数据，矩阵和校验脚本读它
   core/                package.json + src/ + test/
