@@ -51,6 +51,7 @@
 | 尚未决定的问题 | `docs/open-questions.md`；决定后删掉该条，结论写进 ADR 或对应文档 |
 | 插件的用法、限制 | `plugins/<id>/README.md` |
 | 插件在每个宿主上的安装步骤（给 agent 执行） | `plugins/<id>/INSTALL.md`（规则见下面「安装文档」） |
+| 开发本仓库的可复用操作步骤 | `.kiro/skills/<name>/SKILL.md`（规则见下面「Skills」） |
 | 插件的版本变更 | `plugins/<id>/CHANGELOG.md` |
 | agent 需要遵守的规则 | `AGENTS.md`（唯一来源） |
 
@@ -60,7 +61,33 @@
 2. 写 core 和它的失败测试，再写实现。
 3. 每个支持的宿主：写 adapter 契约测试 → 实现 → 按宿主笔记做一次冒烟。
 4. 写 `INSTALL.md`，并在每个支持的宿主上按它从头装一遍、跑一遍验证命令。
-5. 更新 CHANGELOG，重新生成能力矩阵。
+5. 如果这是某个宿主的第一个 adapter，在同一个任务里写 `write-<host>-adapter` skill（见「Skills」）。
+6. 更新 CHANGELOG，重新生成能力矩阵。
+
+## Skills
+
+开发本仓库用的 skill（给 Kiro 和 Claude Code 共用），不是插件对外提供的 skill。
+
+### 位置
+
+- 真实文件放在 `.kiro/skills/<name>/SKILL.md`，格式遵循 Agent Skills 标准（YAML frontmatter 的 `name`、`description` + Markdown 正文）。
+- `.claude/skills` 是指向 `../.kiro/skills` 的软链接，不要改成真实目录，也不要在里面单独加文件。
+- 原因：Kiro 不跟随软链接，Claude Code 跟随（2026-11-15 实测，见 `friction.md`）。
+- Kiro 只在工作区被设为可信后才加载 `.kiro/skills/`。
+
+### 什么时候写
+
+- 某个宿主的第一个 adapter 跑通后，同一个任务里写 `write-<host>-adapter`，内容是这次实际走通的步骤。
+- 同一类操作第二次出现、并且步骤可以固定时（例如新建插件骨架、宿主升级后的重新核对）。
+- 不为还没做过的操作写 skill。
+
+### 写法
+
+- `name` 用 kebab-case，等于目录名。`description` 写清楚做什么、什么时候用，包含用户会说的关键词。
+- 正文只写操作顺序和每一步的检查点（跑什么命令、预期看到什么）。
+- 宿主事实引用 `docs/hosts/<host>.md`，规范引用 `docs/conventions.md`，不复制内容。
+- 确定性的步骤（生成文件、校验）写成脚本放在 skill 的 `scripts/` 下，或者调用 `scripts/` 里的仓库脚本。
+- 用 skill 时发现步骤错了或过期了，先记 `friction.md`，同一个任务里修好 skill。
 
 ## 安装文档
 
@@ -120,3 +147,4 @@
 1. 按模板写 `docs/hosts/<host>.md`，并在 `docs/hosts/README.md` 登记。
 2. 写 ADR，说明为什么支持、锁定哪个版本。
 3. 在每个已有插件的 `plugin.meta.json` 里加上该宿主（`supported` 或 `unsupported` + 原因）。
+4. 该宿主的第一个 adapter 跑通后，写 `write-<host>-adapter` skill（见「Skills」）。

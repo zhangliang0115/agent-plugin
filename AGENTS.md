@@ -16,6 +16,7 @@
 | `docs/open-questions.md` | 未决问题 |
 | `docs/capability-matrix.md` | 插件 × 宿主矩阵（生成物） |
 | `friction.md` | 宿主、工具、规则的摩擦记录 |
+| `.kiro/skills/` | 开发本仓库用的 skill（Kiro 与 Claude Code 共用；`.claude/skills` 是指向它的软链接） |
 
 ## 命令
 
