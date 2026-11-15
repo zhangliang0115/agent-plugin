@@ -1,0 +1,19 @@
+{
+  "id": "code-mode",
+  "version": "0.1.0",
+  "description": "Code Mode：模型用 run_code 执行 JavaScript 调用工具，只把结果和日志返回给模型",
+  "hosts": {
+    "claude-code": {
+      "status": "unsupported",
+      "reason": "Claude Code 的 Code Mode 是宿主内置功能（REPL 工具），本插件面向 DSH 的 tool executor 扩展点"
+    },
+    "dsh": {
+      "status": "experimental",
+      "components": ["tool", "tool-executor"]
+    },
+    "pi": {
+      "status": "unsupported",
+      "reason": "尚未实现，Pi 的扩展点还未调研"
+    }
+  }
+}

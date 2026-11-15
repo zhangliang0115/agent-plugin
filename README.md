@@ -26,4 +26,8 @@ pnpm test
 
 ## 状态
 
-只有基础设施和规范，还没有插件。
+插件：
+
+- [code-mode](plugins/code-mode/README.md)：DSH 中的 Code Mode（`run_code`），实验性，0.1.0。
+
+能力矩阵见 [docs/capability-matrix.md](docs/capability-matrix.md)。

@@ -1,0 +1,19 @@
+{
+  "name": "@agent-plugin/code-mode-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-independent Code Mode runtime: sealed QuickJS context, program transform, output envelope.",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "acorn": "8.19.0",
+    "quickjs-emscripten": "0.32.0"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

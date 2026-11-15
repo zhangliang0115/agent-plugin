@@ -1,0 +1,9 @@
+# Code Mode for DSH. Installs run_code as the deployment's tool executor.
+# Only one executor may own the tool scope, so the native and PTC executors are disabled.
+- id: tool-executor-native
+  disabled: true
+- id: tool-executor-ptc
+  disabled: true
+- insert:
+    - id: code-mode-dsh
+      name: '@agent-plugin/code-mode-dsh'
