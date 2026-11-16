@@ -8,7 +8,7 @@
 - DSH 已有内置 PTC（`tool-executor-ptc`），语言是 TypeScript，子进程执行，完成值被丢弃。它的 `run_code` 与本需求同名，两者不能同时挂在同一 scope。
 - `run_code` 是保留名，普通 `register()` 拒绝；同一 scope 只能有一个 executor。
 - `node:vm` 不是安全边界。
-- 参考资料（`docs/features/code-mode/`）与调研（`.agents/tasks/code-mode-dsh/plan.md`）中的部分行为与 DSH 不匹配，逐条见 `plugins/code-mode/README.md` 的「与参考资料和原生执行器的差异」。
+- 参考资料（`docs/features/code-mode/`）与调研记录中的部分行为与 DSH 不匹配，逐条见 `plugins/code-mode/README.md` 的「与参考资料和原生执行器的差异」。
 实施时做了 spike（`quickjs-emscripten@0.32.0`，在仓库外）。原计划用 asyncify（`newAsyncifiedFunction`）桥接异步工具，结果：调用异步宿主函数时 `evalCode` 报 `Function unexpectedly returned a Promise`，改用 `evalCodeAsync` 后，asyncify 的同一时间只能挂起一次宿主调用（库文档写明 asyncified 函数不能再调用其他 asyncified 函数），无法满足 `Promise.all` 并行。因此改设计。
 ## 决策
 1. **对模型只暴露 `run_code`。** 执行器是 deployment 级 `ToolExecutor`，用 `ctx.tools.setExecutor` 注册。`describe` 只返回 `run_code` 的 schema，参数只有 `code`。插件的 `cordis.patch.yml` 禁用 `tool-executor-native`；`tool-executor-ptc` 在基础 profile 中已禁用。
@@ -30,8 +30,8 @@
 ## 后果
 好的：
 - 沙箱是 sealed 的。程序只能通过注入的 `tools`、`self`、`console`、`preview` 与 DSH 交互，没有 Node 全局。
-- 子调用与模型直接发出的调用走同一条流水线，权限、guard、审计行为一致。真实 DSH 0.2.2-rc.3 上验证过两个并行子调用（见 `.agents/tasks/code-mode-dsh/wf/verification.md`）。
-- 等待审批不再受 120 秒限制，也不再挡住其他 agent；独占工具、大结果、错误码、回合结束与原生一致（真实 DSH 验证见 `.agents/tasks/code-mode-dsh/wf/fix/verify-log.md`）。
+- 子调用与模型直接发出的调用走同一条流水线，权限、guard、审计行为一致。真实 DSH 0.2.2-rc.3 上验证过两个并行子调用（步骤与预期输出见 `plugins/code-mode/INSTALL.md`）。
+- 等待审批不再受 120 秒限制，也不再挡住其他 agent；独占工具、大结果、错误码、回合结束与原生一致（真实 DSH 验证见 `plugins/code-mode/INSTALL.md`）。
 代价与风险：
 - 每个 owner 创建约 65 毫秒（测得：5 个 owner 共 327 毫秒）。OOM 后的运行时无法释放，每次 OOM 会泄露一个模块的线性内存，并在 stderr 打印 `Aborted(...)`。
 - 新增 esbuild 作为构建依赖。

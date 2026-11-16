@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code Mode",
+    "description": "用 run_code 执行 JavaScript 调用 DSH 工具，只把程序结果和 self.log 输出返回模型，中间的工具输出留在程序里；程序里的每次工具调用仍然经过权限、guard 与审批流水线。启用后会替换 native 与 PTC 执行器，工具只能在程序里调用。"
+  }
+}

@@ -58,7 +58,7 @@ a.totalLines + b.totalLines
 
 - 顶层的 `const`、`let`、`var`、`function`、`class` 跨 `run_code` 调用保留。同一 agent 的多次调用共享这些变量。写在顶层块里的 `var`（如 `for`、`if`、`try` 内）也保留，与普通 JavaScript 的函数作用域一致；函数体内的声明只在函数内有效。
 - 不同 agent 的上下文互相隔离。agent 销毁时上下文被释放，之后同名变量不存在。
-- 同一 agent 的运行一次只执行一个，按到达顺序排队。排队只限同一 agent，不同 agent 的运行互不等待，等待审批的运行也不会挡住别的 agent。
+- 同一 agent 的运行一次只执行一个，按到达顺序排队。排队只限同一 agent：等待审批或用户回答的运行不挡别的 agent，不同 agent 的运行可以同时等待、同时调用工具。但沙箱是同步 QuickJS，一段没有 `await` 的程序（例如死循环）会独占宿主线程，直到这次运行的截止时间；期间其它 agent 与界面都会停住，各自的截止时间仍按自己的算。
 
 ## 工具调用与权限
 
@@ -133,7 +133,7 @@ a.totalLines + b.totalLines
 - 无头模式下子 agent 的审批被立即拒绝（实测，见 `friction.md`），所以跨 agent 的审批阻塞无法在无头模式下复现，只由单元测试 `F1a an approval pending in one agent does not block run_code in another agent` 覆盖。
 - 子调用不出现在 `--json` 事件流中；`--json` 只输出外层 `run_code`。
 - 审批面板对子调用只显示 `description` 与 `justification`，不显示命令（差异第 18 项）。
-- 暂停计时依赖 `approval/request` 与 `user-questions/request` 的前置监听。桌面端应答端是远程事件监听，前置监听应当能包住它，但这一点只能在桌面 App 上确认（`.agents/tasks/code-mode-dsh/wf/fix2/desktop-recheck.md`）。
+- 暂停计时依赖 `approval/request` 与 `user-questions/request` 的前置监听。桌面端应答端是远程事件监听，前置监听应当能包住它，但这一点还没有在桌面 App 上实测。
 - 每次运行最多 256 个子调用，原生没有这个上限。
 
 ## 开发
@@ -150,4 +150,4 @@ pnpm --filter @zhangliang0115/code-mode-dsh build   # 生成 dist/index.js，用
 
 - core 的测试不依赖 DSH。`no-host-deps.test.ts` 检查 core 不 import `@deepseek-ai/*` 与 `cordis`。
 - dsh 的测试用真实的 `ToolExecutionPipeline` 和一个最小的 Cordis 替身（`test/fake-context.ts`）。
-- 真实 DSH 冒烟测试的步骤与结果见 [INSTALL.md](INSTALL.md)，以及 `.agents/tasks/code-mode-dsh/wf/verification.md`（不纳入版本库）。
+- 真实 DSH 冒烟测试的步骤与预期输出见 [INSTALL.md](INSTALL.md)。

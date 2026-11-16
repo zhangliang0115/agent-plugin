@@ -138,6 +138,15 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 
    如果输出不是 `3`，看下面的常见问题。
 
+3. 展示元数据（可选）。确认安装后的包里有 locale 与图标：
+
+   ```bash
+   PKG=~/.dsh/profiles/<profile>/node_modules/@zhangliang0115/code-mode-dsh
+   ls "$PKG" && cat "$PKG/locale/zh.json"
+   ```
+
+   预期：目录里有 `dist`、`cordis.patch.yml`、`locale`、`icon.svg`；`zh.json` 的 `meta.title` 是 `Code Mode`。Plugin Manager 的 Bundles 页面显示同样的标题与描述；没有在界面上看过就按未实测处理。
+
 ### 卸载
 
 ```bash

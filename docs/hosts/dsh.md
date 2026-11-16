@@ -54,11 +54,19 @@ export function apply(ctx) {
 
 ## 打包与安装
 - 插件是 npm 包，`package.json` 写 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，`files` 必须包含 `cordis.patch.yml`。
+- 公开包的展示元数据：`locale/en.json`（以及用户语言的 `locale/<lang>.json`）里的 `meta.title` 与 `meta.description`；图标用 `exports["./icon"]` 指向的文件（SVG/PNG/JPEG/WebP，≤256 KiB，36×36 画布），或在 `package.json` 顶层写 `icon` 路径。`files` 要包含 `locale/*.json` 与图标——漏了不报错，面板只是退回包名、`description` 与默认图。（来源：app.asar 内 `dsh-agent-preset/skills/dsh-doc/references/host-plugin.md`，2026-11-16 核对。）
 - `cordis.patch.yml` 的行 `name` 等于包名，`id` 保持稳定、不复用。
 - `main` / `exports` 指向 JS 入口。DSH 的插件加载器不跑 `.ts` 源文件；仓库里用 esbuild 打成单文件 ESM（见 ADR 0004）。
 - `@deepseek-ai/*` 是宿主提供的包：写在 `peerDependencies` 里（精确版本），开发时同版本放在 `devDependencies`，不要放进 `dependencies`。
 - `engines` 写 `"dsh": ">=<版本>"`；keywords 加 `dsh-plugin`。
 - 安装方式：`pnpm pack` 得到 tgz，再 `dsh plugin --profile <name> add <tgz>`。不用 `add <目录>`：pnpm 会把目录链接进来，不解析 peer 依赖，链接包会加载源码目录里的开发副本（见 `friction.md`）。
+
+### 桌面版 GUI 的「添加插件」（2026-11-16 核对，DSH 0.2.2-rc.3）
+- 插件页的「添加插件」等价于 `dsh plugin add <spec>`：CLI 的 `dsh plugin` 只是把余下参数转发给 profile 目录里的 pnpm（`dsh plugin --help`）。对话框接受包名（可带版本）、Git 地址、`.tgz` 压缩包和本地绝对路径；「安装源」只决定 npm registry（默认、npm 官方源、npmmirror、自定义地址），本地目录或 tgz 的 `dependencies`（如 `quickjs-emscripten`、`acorn`）也从这里下载。
+- 包必须声明组合包（`package.json` 的 `dsh.bundle`），否则报「这个包没有声明组合包，无法作为插件安装」；路径无效报「该路径不存在或不是有效的插件包」。已安装的包不提供覆盖安装，对话框要求先卸载再装新版；安装后要重启 DSH 才生效。（来源：app.asar 内 `@deepseek-ai/dsh-client-ui-plugin-manager` 的文档与中文 locale。）
+- 它装进的是桌面版自己的 `desktop` profile。这个 profile 被 Electron 独占：`dsh --profile desktop --dump-config` 报 `error: profile "desktop" is managed exclusively by the Electron application`，所以 GUI 的安装结果不能用 CLI 复现或检查组合树，只能在插件页看「已安装插件」。
+- 因此 desktop 里在用的 executor 与别的 executor 插件互斥：`plugins/code-mode/dsh/cordis.patch.yml` 禁用 `tool-executor-native`、`tool-executor-ptc` 再插入自己的 `run_code`，装到 desktop 会整体替换当前 GUI 的工具执行器（重启后 `run_code` 变成 QuickJS 的 JavaScript 语义）。试装用独立 profile + CLI（`plugins/code-mode/INSTALL.md`）。
+- 仓库根不是插件包：`agent-plugin/package.json` 是 workspace 根，没有 `dsh.bundle`，GUI 的 Git 地址方式预期会被判成「没有声明组合包」（未实测）。要用 Git 地址或包名分发，得把 adapter 发布到 npm（ADR 0005）或拆成独立仓库。
 
 ## 自定义执行器要补的行为（2026-11-15 实测，DSH 0.2.2-rc.3）
 原生批次（`executeToolBatch`）替执行器做了几件事，自定义执行器要自己补，否则子调用与原生有差异（`plugins/code-mode/README.md`）：

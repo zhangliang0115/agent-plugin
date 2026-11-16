@@ -2,6 +2,7 @@
 
 ## 未发布
 ### 新增
+- DSH 插件面板的展示元数据：`locale/en.json` 与 `locale/zh.json` 的标题、描述，以及 `icon.svg`；`exports` 与 `files` 已包含它们。
 - 插件配置：`Config` 暴露运行超时、内存、子调用数、并行数、输出上限，可在 profile 的 `cordis.patch.yml` 的 `config:` 里覆盖；未写的字段用 `CodeLimits` 的默认值，非法值在激活时失败并指出字段。
 - 子调用写 `tool/ptc-dispatch-start` 与 `tool/ptc-dispatch` 会话事件，trajectory、user-questions 投影、auto-review、todo 历史能识别子调用。子调用 id 由 `<callId>/<n>` 改为 `<callId>:ptc:<n>`。
 - 程序中捕获的子调用错误多出 `code` 与 `errorName`（如 `TOOL_TIMEOUT`、`APPROVAL_UNAVAILABLE`、`ABORTED_BEFORE_DISPATCH`）。`name` 与 `message` 不变。

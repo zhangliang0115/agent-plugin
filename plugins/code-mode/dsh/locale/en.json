@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code Mode",
+    "description": "Runs JavaScript programs whose tool calls go through DSH's guarded pipeline: the model sees one tool, run_code, and only the program's result and self.log output come back to it. Loading this bundle replaces the native and PTC executors, so tools become callable only from inside a program."
+  }
+}
