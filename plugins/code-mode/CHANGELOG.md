@@ -10,6 +10,12 @@
 - 子调用返回图片时，图片作为一条 user 消息交给模型（与 PTC 的 `commit()` 相同）。此前 `run_code` 内调用的截图、看图工具，模型看不到图。
 - 子调用的 `tools/post-execute` 与会话事件按提交顺序结束，即使后提交的调用先完成；审批面板和审计顺序与原生一致。
 ### 修复
+- `for (var { a } of xs)` 与 `for (var { a } in obj)` 不再报 `SyntaxError: invalid for in/of left hand-side`。此前 for-in/of 头的对象解构被加上括号，而括号化的对象解构不是合法的左值。
+- 块内的 `var`（`if`、`for`、`try`、`switch` 里）在程序开头声明一次，块没执行时读到的也是 `undefined`。此前 `try { 1 } catch { var e = … }` 之后直接读 `e` 会抛 `ReferenceError`，与 README 承诺的函数作用域语义不符。
+- 截断不再切断转义实体。此前 `<result>` 的切点落在 `&amp;` 中间时，模型会读到 `&a` 这类残片；截断标注里的字符数现在按实际删去的量计算。
+- `<result>` 是否溢出改为按转义后的长度判断。此前 6000 个 `&`（原始 6000 字符、转义后 30000）会被截断却拿不到 spill 路径。
+- 子调用带上绑定的工具 schema，Auto 权限预设下 auto-review 不再以 `the pending PTC binding schema is missing or inconsistent` 拒绝每个子调用。
+- 子调用在拿到调度槽位之前失败（守卫、运行已结束）也会推进完成顺序，同一运行里后面的子调用不会等到超时。
 - 永不 resolve 的 `tools/pre-execute` 钩子不再让 `run_code` 无限挂起。此前执行器在 `prepare` 期间暂停计时，钩子不返回时截止时间永远不到。
 - `tools/ptc-dispatch-log` 监听器挂住时，运行在 2 秒后结束并记警告，不再永久 pending。
 - 已取消的运行不再执行工具本体；超时或取消后，晚到的子调用不再执行 post-execute，也不再写会话事件。
@@ -29,7 +35,7 @@
 ### 变更
 - 包名改为 `@zhangliang0115/code-mode-dsh` 与 `@zhangliang0115/code-mode-core`。只发布 dsh adapter（`private` 已移除，`publishConfig.access` 为 `public`），core 保持 private 并被打包进 adapter 的 `dist`。决策见 ADR 0005。从 tgz 安装的命令不变；`pnpm pack` 的产物名变为 `zhangliang0115-code-mode-dsh-0.1.0.tgz`。
 - 支持顶层的 `return <value>`：它的值就是运行结果，并结束程序。此前模型写 `return` 会得到 `SyntaxError: 'return' outside of function`。提示词同时说明了这一点。
-- 工具签名后显示返回形状（`-> { ... }`），来自 DSH 工具的输出 schema。最多两层，超过 240 字符截断。模型不再需要先试错才知道返回值结构。
+- 工具签名后显示返回形状（`-> { ... }`），来自 DSH 工具的输出 schema。最多两层，超过 600 字符截断（`MAX_RETURN_CHARS`）。模型不再需要先试错才知道返回值结构。
 - `<error>` 包含出错的用户代码行号和该行原文。行号与用户代码一致，即使程序前面有 hoist 的声明或跨行语句。
 
 ## 0.1.0（2026-11-15）

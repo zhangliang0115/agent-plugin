@@ -62,6 +62,7 @@ export function apply(ctx) {
 - 会话事件：原生写 `tool/call`、`tool/result`；PTC 写 `tool/ptc-dispatch-start`、`tool/ptc-dispatch`。trajectory、user-questions 投影、auto-review、todo 历史按 PTC 事件建模。
 - 回合结束：`ToolExecutionResult.concludesTurn` 要转发给 `exec.concludeTurn()`，否则 `exit_plan_mode` 驳回后回合不结束。
 - 错误身份：`result.error.info` 带 `code` 与 `name`（如 `TOOL_TIMEOUT`、`APPROVAL_UNAVAILABLE`），不转发时调用方只剩 message。
+- 子调用的 `schema`：`ToolExecutionInput.schema` 要带上绑定时可见的工具 schema（`ctx.tools.schemas()` 的投影，PTC 用 `deepFreeze` 把同一份传进去）。`dsh-experimental-auto-review` 的 `ptcAction` 要求 `exec.schema !== undefined && exec.schema.name === exec.name`，缺了会把每个子调用判成 `AUTO_REVIEW_FAILED` 并拒绝工具本体（`src/index.ts:382`，2026-11-16 核对）。
 - 大输出：`ctx.get('spillStore').saveText(...)` 保存全文，返回的路径形如 `$TMPDIR/dsh-spill-*/session-*/<id>-run_code.txt`；原生靠 `dsh-spill-policy` 在 `tools/post-execute` 做，只处理超过 12500 token 的内容。
 - 审批等待：`approval/request` 没有应答端时无头返回 `unavailable`；有应答端时一直等到回答。执行器不要在审批期间持有会阻塞其他会话的锁，也不要让整体超时覆盖等待。
 - 审批和提问不只来自流水线的 `ask`。bash、pwsh、write、edit 在工具本体里为 `sandbox_permissions` 调用 `ctx.approval.request`（`dsh-sandbox/src/escalation.ts` 的 `approveEscalation`），请求的 `callId` 是子调用自己的 id，发生在 `tools/execute` 之后，不经过 `tools/pre-execute`。`ask_user_question`、`exit_plan_mode`、computer-use 工具调用 `user-questions/request`，请求里没有子调用 id。两个事件都是 waterfall，应答端返回结果、不调用 `next()`。插件要观察等待，用 `ctx.on(event, listener, { prepend: true })`；`prepend` 是 Cordis 的监听选项，`dsh-experimental-auto-review` 也用它。（来源：app.asar 内 `@deepseek-ai/*` 源码，DSH 0.2.2-rc.3，核对于 2026-11-15。）
