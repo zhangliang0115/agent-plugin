@@ -92,9 +92,11 @@ function nestedVarEdit(node: AnyNode, parent: AnyNode, source: (node: AnyNode) =
   const declarations = node.declarations as AnyNode[];
   const forInOrOf = parent.type === 'ForInStatement' || parent.type === 'ForOfStatement';
   if (forInOrOf) {
+    // A for-in/of head takes the assignment pattern directly. Parenthesizing it (needed when a
+    // pattern starts a statement) makes the left-hand side invalid: `for (({ a }) of xs)` is a
+    // SyntaxError, so an object pattern must stay unparenthesized here.
     const id = (declarations[0] as AnyNode).id as AnyNode;
-    const target = patternText(id, source);
-    return { start: node.start, end: node.end, text: id.type === 'ObjectPattern' ? `(${target})` : target };
+    return { start: node.start, end: node.end, text: patternText(id, source) };
   }
   if (parent.type === 'ForStatement' && parent.init === node) {
     const parts = declarations.map((declarator) => {
@@ -149,12 +151,16 @@ export function transformProgram(code: string): TransformedProgram {
   // to persist across runs. Only declarations outside functions and classes qualify.
   // A top-level `return` with a value also makes the run produce a result.
   const declaredAtTop = new Set<AnyNode>(statements);
+  const blockVars = new Set<string>();
   walkNodes(program, (node, parent) => {
     if (node.type === 'ReturnStatement' && node.argument !== null) {
       hasResult = true;
       return;
     }
     if (node.type !== 'VariableDeclaration' || (node.kind as string) !== 'var' || declaredAtTop.has(node)) return;
+    for (const declarator of node.declarations as AnyNode[]) {
+      for (const name of patternNames(declarator.id as AnyNode)) blockVars.add(name);
+    }
     if (parent !== undefined) edits.push(nestedVarEdit(node, parent, source));
   });
 
@@ -221,6 +227,12 @@ export function transformProgram(code: string): TransformedProgram {
     cursor = edit.end;
   }
   userBody += code.slice(cursor);
+  // A block-level `var` is function-scoped in plain JavaScript, so a block that never runs still
+  // declares its names as `undefined`. Declaring them once at the top keeps that meaning; the
+  // declaration preserves a value left by an earlier run, like `var x;` at the top level.
+  for (const name of [...blockVars].sort()) {
+    hoisted.push(`if (!(${JSON.stringify(name)} in globalThis)) globalThis.${name} = undefined;`);
+  }
   // Hoisted declarations go first, each on its own line, followed by a line break before the user's code.
   const prefix = hoisted.length === 0 ? '' : `${hoisted.join('\n')}\n`;
   // A leading `'use strict'` must stay in the directive prologue, so it moves ahead of the hoisted prefix.

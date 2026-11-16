@@ -147,3 +147,28 @@ test('escaping happens before truncation, so the limit applies to what the model
   assert.ok(escaped.startsWith('&amp;&amp;'), escaped);
   assert.ok(escaped.length <= 10 + '\n[truncated: 90 more characters]'.length, escaped);
 });
+
+test('a var destructured in a for-of head binds the name after the loop', async () => {
+  const mode = newMode();
+  const owner = {};
+  const loop = parseEnvelope(await mode.run(owner, { code: 'for (var { a } of [{ a: 1 }]) {}', ...noTools, signal: signal() }));
+  assert.equal(loop.error, undefined);
+  const after = parseEnvelope(await mode.run(owner, { code: 'a', ...noTools, signal: signal() }));
+  assert.equal(after.result, '1');
+  mode.dispose();
+});
+
+test('a var inside a block that never runs is still declared, as in plain JavaScript', async () => {
+  const mode = newMode();
+  const guard = parseEnvelope(await mode.run({}, { code: 'if (false) { var never = 1 }\nnever', ...noTools, signal: signal() }));
+  assert.equal(guard.error, undefined);
+  assert.equal(guard.result, 'undefined');
+  const caught = parseEnvelope(await mode.run({}, {
+    code: 'try { 1 } catch (e) { var caught = e }\ncaught',
+    ...noTools,
+    signal: signal(),
+  }));
+  assert.equal(caught.error, undefined);
+  assert.equal(caught.result, 'undefined');
+  mode.dispose();
+});

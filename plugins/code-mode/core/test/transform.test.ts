@@ -62,3 +62,18 @@ test('syntax errors surface as SyntaxError', () => {
 test('a dynamic import is rejected with the listed-tools message', () => {
   assert.throws(() => transformProgram('await import("node:fs");'), /import is not available in Code Mode; use the listed tools/);
 });
+
+test('a var destructured in a for-of or for-in head stays a valid left-hand side', () => {
+  const of = transformProgram('for (var { a } of xs) {}');
+  assert.doesNotMatch(of.body, /\(\(\{/, 'a parenthesized object pattern is not a for-of left-hand side');
+  assert.match(of.body, /for \(\{ a: globalThis\.a \} of xs\)/);
+  const inHead = transformProgram('for (var { b } in obj) {}');
+  assert.doesNotMatch(inHead.body, /\(\(\{/);
+  assert.match(inHead.body, /for \(\{ b: globalThis\.b \} in obj\)/);
+});
+
+test('a var inside a block is declared in the prefix, so it exists before the block runs', () => {
+  const { body, prefixLines } = transformProgram('if (false) { var never = 1 }\nnever');
+  assert.match(body, /if \(!\("never" in globalThis\)\) globalThis\.never = undefined;/);
+  assert.equal(prefixLines, 1);
+});
