@@ -1,0 +1,23 @@
+{
+  "id": "mcp-ui",
+  "version": "0.2.0",
+  "description": "MCP 设置页：管理 MCP 服务器（实时状态、工具列表、增删改启停、重启）并设置每个工具是否支持并行",
+  "hosts": {
+    "claude-code": {
+      "status": "unsupported",
+      "reason": "设置页是 DSH 桌面版的客户端扩展点，Claude Code 没有对应的界面"
+    },
+    "dsh": {
+      "status": "experimental",
+      "components": [
+        "settings-page",
+        "client-bundle",
+        "service"
+      ]
+    },
+    "pi": {
+      "status": "unsupported",
+      "reason": "尚未调研 Pi 是否有可注册的设置页扩展点"
+    }
+  }
+}

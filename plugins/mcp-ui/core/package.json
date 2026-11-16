@@ -1,0 +1,15 @@
+{
+  "name": "@zhangliang0115/mcp-ui-core",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-independent model for the MCP management page: server entry rules, parallel tool list, tool-name helpers.",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

@@ -67,6 +67,29 @@ importers:
         specifier: 0.28.2
         version: 0.28.2
 
+  plugins/mcp-ui/core: {}
+
+  plugins/mcp-ui/dsh:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.1.0
+        version: 4.1.0
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
+      '@deepseek-ai/schemastery':
+        specifier: 3.19.0
+        version: 3.19.0
+      '@zhangliang0115/mcp-ui-core':
+        specifier: workspace:*
+        version: link:../core
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
 packages:
 
   '@deepseek-ai/cordis@4.1.0':

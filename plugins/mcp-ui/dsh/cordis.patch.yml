@@ -1,0 +1,6 @@
+# Deployment-level row for the MCP management page. It sits at deployment scope, not inside an
+# agent preset, so its client bundle is scanned and loaded by the desktop shell. Its settings
+# namespace is the row id `mcp-ui`.
+- insert:
+    - id: mcp-ui
+      name: '@zhangliang0115/mcp-ui'

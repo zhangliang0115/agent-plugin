@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP Servers",
+    "description": "Manage MCP servers from the settings page: live status and tools, add, edit, enable, restart, and a per-tool parallel setting that only applies under the Code Mode preset."
+  }
+}
