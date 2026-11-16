@@ -48,6 +48,10 @@ export function apply(ctx) {
 - `ToolExecutionInput.parent` 是外层调用的 token（`contracts.ts` 约第 196–197 行）。设置后，PTC 语义下才允许直接调用原生工具名。
 - 公开 API 仍是 pre-stable，升级时用契约测试检查（见 `plugins/code-mode/dsh/test/invoker.test.ts`）。
 
+## 插件配置
+- 有配置的插件导出 `export const Config = z.object({...})`（`@deepseek-ai/schemastery`，3.19.0）。Cordis 在激活前用它校验 profile 行里的 `config` 并填默认值，`apply(ctx, config)` 收到的是解析后的对象；行配置整体替换、不深合并（`dsh-app-boot/README.md`：profile 的 `cordis.patch.yml` 在所有组合包层之后应用，所以能按 id 覆盖已安装包插入的条目）。
+- 校验失败时插件激活失败，错误信息带字段路径（例如 `$.timeoutMs expected number >= 1 but got 0`）。字段注释会被 `dsh/docs/config-catalog.md` 的生成器读走，接口上的 JSDoc 就是文档。（来源：app.asar 内 `@deepseek-ai/cordis` 与 `dsh-tool-executor-ptc/src/config.ts`，2026-11-16 核对。）
+
 ## 打包与安装
 - 插件是 npm 包，`package.json` 写 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，`files` 必须包含 `cordis.patch.yml`。
 - `cordis.patch.yml` 的行 `name` 等于包名，`id` 保持稳定、不复用。

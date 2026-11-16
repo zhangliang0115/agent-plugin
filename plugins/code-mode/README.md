@@ -79,7 +79,7 @@ a.totalLines + b.totalLines
 
 | 项目 | 默认值 | 说明 |
 |---|---|---|
-| 运行超时 | 120 秒 | 部署配置，上限 600 秒。模型不能指定。等待审批和用户回答的时间不计入，与 DSH 自带 `run_code` 的「含嵌套工具与审批等待」不同 |
+| 运行超时 | 120 秒 | 插件配置 `timeoutMs`，不能超过 `maxTimeoutMs`（默认 600 秒）。模型不能指定。等待审批和用户回答的时间不计入，与 DSH 自带 `run_code` 的「含嵌套工具与审批等待」不同 |
 | 每次运行的工具调用数 | 256 | 超过后，多出的调用在程序中抛出错误 |
 | 同时执行的工具调用数 | 10 | 一次运行内 `Promise.all` 的并行上限，只约束 `parallel` 的工具；`exclusive` 的工具一次一个 |
 | 内存 | 64 MiB | 每个 agent 的沙箱 |
@@ -87,11 +87,22 @@ a.totalLines + b.totalLines
 | `<error>` 字符数 | 2000 | 超出截断 |
 | 控制台缓冲 | 200 条 | 每个 agent |
 
-这些数值在 `CodeLimits`（`plugins/code-mode/core/src/types.ts`）中定义。
-
 - 不支持后台运行。每次运行都同步等待，超时即失败。
 - 子调用的工具输出只在程序中可见。结果是否返回模型，由程序决定。
 - 进程重启或 agent 重建后，之前的变量不保留。上下文只存在于内存中。
+
+这些数值的默认值在 `CodeLimits`（`plugins/code-mode/core/src/types.ts`）中定义。除 `consoleRingSize` 与 `drainGraceMs` 外，其余字段可以在插件配置里覆盖，未写的字段用默认值。在 profile 的 `cordis.patch.yml` 里给已挂载的 `code-mode-dsh` 行补 `config`：
+
+```yaml
+- id: code-mode-dsh
+  name: '@zhangliang0115/code-mode-dsh'
+  config:
+    timeoutMs: 300000
+    maxTimeoutMs: 300000
+    maxParallelSubCalls: 4
+```
+
+可配置字段：`timeoutMs`、`maxTimeoutMs`、`memoryBytes`、`maxSubCallsPerRun`、`maxParallelSubCalls`、`resultChars`、`logChars`、`errorChars`。值必须是正整数；非法值让插件激活失败，错误里带字段路径（例如 `$.timeoutMs expected number >= 1 but got 0`）。`timeoutMs` 大于 `maxTimeoutMs` 也会让激活失败。
 
 ## 与参考资料和原生执行器的差异
 

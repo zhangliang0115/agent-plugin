@@ -102,6 +102,19 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 
 插件本身没有环境变量。
 
+插件限额（可选）。在 profile 的 `cordis.patch.yml` 里给 `code-mode-dsh` 行补 `config`，未写的字段用默认值（默认值见 [README](README.md) 的限制表）：
+
+```yaml
+- id: code-mode-dsh
+  name: '@zhangliang0115/code-mode-dsh'
+  config:
+    timeoutMs: 300000
+    maxTimeoutMs: 300000
+    maxParallelSubCalls: 4
+```
+
+可配置字段：`timeoutMs`、`maxTimeoutMs`、`memoryBytes`、`maxSubCallsPerRun`、`maxParallelSubCalls`、`resultChars`、`logChars`、`errorChars`。值必须是正整数；写错时插件激活失败，错误里带字段路径（例如 `$.timeoutMs expected number >= 1 but got 0`）。
+
 ### 验证
 
 1. 检查组合树：

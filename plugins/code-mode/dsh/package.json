@@ -40,7 +40,8 @@
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
     "@deepseek-ai/dsh-scope": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.3"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
+    "@deepseek-ai/schemastery": "3.19.0"
   },
   "devDependencies": {
     "@zhangliang0115/code-mode-core": "workspace:*",
@@ -52,6 +53,7 @@
     "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
     "@deepseek-ai/dsh-user-approval": "0.2.2-rc.3",
+    "@deepseek-ai/schemastery": "3.19.0",
     "esbuild": "0.28.2"
   },
   "engines": {
