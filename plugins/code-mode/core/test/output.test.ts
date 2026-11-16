@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderEnvelope, truncateText, escapeText } from '../src/output.ts';
+import { escapeAndTruncate, renderEnvelope, truncateText, escapeText } from '../src/output.ts';
 
 const limits = { resultChars: 20, logChars: 20, errorChars: 10 };
 
@@ -27,4 +27,13 @@ test('oversized sections are truncated and marked with the removed character cou
 test('error text uses the smaller error limit', () => {
   const out = renderEnvelope({ evalIndex: 2, error: 'e'.repeat(12) }, limits);
   assert.equal(out, '<repl-output eval="2"><error>' + 'e'.repeat(10) + '\n[truncated: 2 more characters]</error></repl-output>');
+});
+
+test('truncation never leaves a partial escape entity for the model to read', () => {
+  for (const tail of ['&', '<', '>']) {
+    const escaped = escapeAndTruncate('a'.repeat(9_998) + tail + 'b'.repeat(100), 10_000);
+    const kept = escaped.slice(0, escaped.indexOf('\n[truncated:'));
+    assert.ok(kept.length <= 10_000, kept.length.toString());
+    assert.doesNotMatch(kept, /&[a-zA-Z#]*$/, `cut inside an entity: ${JSON.stringify(kept.slice(-12))}`);
+  }
 });

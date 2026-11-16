@@ -1,6 +1,6 @@
 /** Public entry point: runs a program for an owner and returns the model-facing envelope. @module */
 import { CodeSandbox } from './sandbox.ts';
-import { renderEnvelope } from './output.ts';
+import { escapeText, renderEnvelope } from './output.ts';
 import { DEFAULT_LIMITS, type CodeLimits, type ToolDescriptor, type ToolInvoker } from './types.ts';
 
 export interface RunRequest {
@@ -11,8 +11,10 @@ export interface RunRequest {
   /** Deadline for this run. Capped at `maxTimeoutMs`. */
   readonly timeoutMs?: number;
   /**
-   * Called with the full result text when it exceeds `resultChars`. A returned string is added to the
-   * truncation marker (for example where the full text was saved). Undefined or a failure keeps the plain marker.
+   * Called with the full result text when the escaped text the model would receive exceeds
+   * `resultChars`, so every truncated result has a path to its full text. A returned string is added
+   * to the truncation marker (for example where the full text was saved). Undefined or a failure
+   * keeps the plain marker.
    */
   readonly onResultOverflow?: (text: string) => Promise<string | undefined>;
 }
@@ -44,7 +46,11 @@ export class CodeMode {
       timeoutMs,
     });
     let overflow: string | undefined;
-    if (outcome.value !== undefined && outcome.value.length > this.limits.resultChars && request.onResultOverflow !== undefined) {
+    // The limit applies to the escaped text, so the trigger must too: a result of 6000 `&` is
+    // truncated to a third of its length even though its raw length is under the limit.
+    if (outcome.value !== undefined
+      && escapeText(outcome.value).length > this.limits.resultChars
+      && request.onResultOverflow !== undefined) {
       try {
         overflow = await request.onResultOverflow(outcome.value);
       } catch {

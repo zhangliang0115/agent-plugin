@@ -29,3 +29,14 @@ test('F6 a callback that returns undefined or throws keeps the default marker', 
     assert.ok(out.result!.endsWith('\n[truncated: 50000 more characters]'), out.result!.slice(-80));
   }
 });
+
+test('F6 a result that only exceeds the limit after escaping is still spilled', async () => {
+  const seen: string[] = [];
+  const out = parseEnvelope(await newMode({ resultChars: 10_000 }).run({}, {
+    code: '"&".repeat(6000)', ...noTools, signal: signal(),
+    onResultOverflow: async (text: string) => { seen.push(text); return 'Full result stored at: /x/run_code.txt'; },
+  } as never));
+  assert.equal(seen.length, 1, 'the full raw text is saved even though only the escaped text is too long');
+  assert.equal(seen[0]!.length, 6_000);
+  assert.match(out.result!, /Full result stored at: \/x\/run_code\.txt/, out.result!.slice(-120));
+});
