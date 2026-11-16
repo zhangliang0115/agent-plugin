@@ -6,7 +6,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm';
+import { ToolCallId, createUserMessage, type ToolSchema } from '@deepseek-ai/dsh-llm';
 import {
   RUN_CODE_NAME,
   ToolNotFoundError,
@@ -61,6 +61,8 @@ interface SpillStoreLike {
 interface RunState {
   readonly scheduler: RunScheduler;
   readonly log: DispatchLog;
+  /** The step's visible tool schemas, so a sub-call carries its binding schema the way PTC does. */
+  readonly schemas: ReadonlyMap<string, ToolSchema>;
   /**
    * complete calls finish in submission order, however out of order their bodies do. Post-execute
    * and its session events therefore reach the approval panel and audit trail in model order.
@@ -254,12 +256,12 @@ export class CodeModeExecutor implements ToolExecutor {
     const agent = exec.agent;
     const owner: object = agent ?? {};
     if (agent !== undefined) this.registerRelease(agent);
-    const tools = this.ctx.tools.schemas(agent, exec.toolSet)
-      .filter((schema) => schema.name !== RUN_CODE_NAME)
-      .map((schema) => ({ name: schema.name, description: schema.description, inputSchema: schema.parameters }));
+    const schemas = this.ctx.tools.schemas(agent, exec.toolSet).filter((schema) => schema.name !== RUN_CODE_NAME);
+    const tools = schemas.map((schema) => ({ name: schema.name, description: schema.description, inputSchema: schema.parameters }));
     const run: RunState = {
       scheduler: new RunScheduler(),
       log: new DispatchLog(this.ctx, exec),
+      schemas: new Map(schemas.map((schema) => [schema.name, schema])),
       completeGate: new OrderedGate(),
       subCalls: 0,
     };
@@ -323,68 +325,75 @@ export class CodeModeExecutor implements ToolExecutor {
     signal: AbortSignal,
     control: CallControl,
   ): Promise<unknown> {
-    if (name === RUN_CODE_NAME) throw new Error(`${RUN_CODE_NAME} cannot be called from inside a program`);
-    const subCallId = `${exec.callId}:ptc:${index}`;
-    const input: ToolExecutionInput = {
-      callId: ToolCallId(subCallId),
-      rootCallId: exec.rootCallId,
-      name,
-      arguments: args,
-      agent: exec.agent,
-      toolSet: exec.toolSet,
-      parent: exec.token,
-      signal,
-    };
-    const release = await run.scheduler.acquire(() => this.pipeline.executionMode(input).kind, signal);
-    const forgetCall = this.trackSubCall(exec.agent, subCallId, control);
     const order = index - 1;
     let advanced = false;
-    /** Advances the settle order once, whether this call completed or failed. */
+    /**
+     * Advances the settle order once, whether this call completed or failed. It runs in the outermost
+     * `finally`: a call that throws before taking a scheduler slot (the guard below, a rejected
+     * `acquire`) must not keep later calls waiting for this index until the run deadline.
+     */
     const advance = (): void => {
       if (advanced) return;
       advanced = true;
       run.completeGate.advance(order);
     };
     try {
-      run.log.start(subCallId, name, args);
-      // No deadline hold around prepare: an approval or a user question holds the deadline itself,
-      // through `watchUserWaits`. Holding the whole prepare would also pause it for a hook that
-      // never resolves, and `run_code` would hang instead of running into its deadline.
-      const prepared = await this.pipeline.prepare(input);
-      let outcome;
-      if (prepared.kind === 'dispatch') {
-        const unholdDispatch = this.userWaitTools.has(name) ? control.holdDeadline() : undefined;
-        try {
-          outcome = await this.pipeline.dispatch(prepared.exec);
-        } finally {
-          unholdDispatch?.();
-        }
-      } else {
-        outcome = prepared;
-      }
-      // After a timeout or abort the sandbox stops waiting; skip post-execute rather than emit
-      // events for a run that already reported its result.
-      if (signal.aborted) throw runOverError();
-      await run.completeGate.wait(order, signal);
-      let result;
+      // Defense in depth: run_code is not bound inside a program, so the guest reports it as
+      // undefined before reaching this point.
+      if (name === RUN_CODE_NAME) throw new Error(`${RUN_CODE_NAME} cannot be called from inside a program`);
+      const subCallId = `${exec.callId}:ptc:${index}`;
+      const schema = run.schemas.get(name);
+      const input: ToolExecutionInput = {
+        callId: ToolCallId(subCallId),
+        rootCallId: exec.rootCallId,
+        name,
+        // PTC passes the binding schema; a PTC-aware reviewer (auto-review) requires it.
+        ...schema === undefined ? {} : { schema },
+        arguments: args,
+        agent: exec.agent,
+        toolSet: exec.toolSet,
+        parent: exec.token,
+        signal,
+      };
+      const release = await run.scheduler.acquire(() => this.pipeline.executionMode(input).kind, signal);
+      const forgetCall = this.trackSubCall(exec.agent, subCallId, control);
       try {
-        result = await this.pipeline.complete(prepared.exec, outcome);
+        run.log.start(subCallId, name, args);
+        // No deadline hold around prepare: an approval or a user question holds the deadline itself,
+        // through `watchUserWaits`. Holding the whole prepare would also pause it for a hook that
+        // never resolves, and `run_code` would hang instead of running into its deadline.
+        const prepared = await this.pipeline.prepare(input);
+        let outcome;
+        if (prepared.kind === 'dispatch') {
+          const unholdDispatch = this.userWaitTools.has(name) ? control.holdDeadline() : undefined;
+          try {
+            outcome = await this.pipeline.dispatch(prepared.exec);
+          } finally {
+            unholdDispatch?.();
+          }
+        } else {
+          outcome = prepared;
+        }
+        // After a timeout or abort the sandbox stops waiting; skip post-execute rather than emit
+        // events for a run that already reported its result.
+        if (signal.aborted) throw runOverError();
+        await run.completeGate.wait(order, signal);
+        const result = await this.pipeline.complete(prepared.exec, outcome);
+        // An image cannot travel through JSON into the program, so the model would never see it.
+        // Defer it as a user message, the way the built-in PTC executor does.
+        if (!result.isError && result.content.some((block) => block.type === 'image')) {
+          exec.deferContext(createUserMessage({ content: result.content, source: { kind: 'ptc-mode' } }));
+        }
+        for (const context of result.additionalContexts ?? []) exec.deferContext(context);
+        if (result.concludesTurn) exec.concludeTurn();
+        run.log.settle(subCallId, name, args, result);
+        if (result.isError) throw new ToolCallError(result.error.message, { code: result.error.info?.code, name: result.error.info?.name });
+        return result.value;
       } finally {
-        advance();
+        forgetCall();
+        release();
       }
-      // An image cannot travel through JSON into the program, so the model would never see it.
-      // Defer it as a user message, the way the built-in PTC executor does.
-      if (!result.isError && result.content.some((block) => block.type === 'image')) {
-        exec.deferContext(createUserMessage({ content: result.content, source: { kind: 'ptc-mode' } }));
-      }
-      for (const context of result.additionalContexts ?? []) exec.deferContext(context);
-      if (result.concludesTurn) exec.concludeTurn();
-      run.log.settle(subCallId, name, args, result);
-      if (result.isError) throw new ToolCallError(result.error.message, { code: result.error.info?.code, name: result.error.info?.name });
-      return result.value;
     } finally {
-      forgetCall();
-      release();
       // A call that failed before its turn must not block the calls submitted after it.
       advance();
     }

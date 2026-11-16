@@ -72,10 +72,28 @@ test('a guard denial is also surfaced inside the program and stops the body', as
   assert.ok(!fake.trace.includes('body:Read'));
 });
 
-test('run_code cannot be called from inside a program', async () => {
+test('run_code is not bound inside a program, so calling it fails in the guest', async () => {
   const fake = fakeContext();
   const executor = new CodeModeExecutor(fake.ctx);
-  const code = 'let out; try { await run_code({ code: "1" }); out = "ran"; } catch (e) { out = "refused"; } out';
+  const code = 'let out; try { await run_code({ code: "1" }); out = "ran"; } catch (e) { out = "failed: " + e.message; } out';
   const batch = await executor.execute({ calls: [runCodeCall(code)], signal: new AbortController().signal });
-  assert.match(envelopeOf(batch), /refused/);
+  // runProgram filters run_code out of the program's bindings, so the guest reports it as undefined.
+  assert.match(envelopeOf(batch), /failed: 'run_code' is not defined/);
+});
+
+test('an in-code call carries the binding schema a PTC-aware reviewer needs', async () => {
+  const fake = fakeContext();
+  const seen: Array<{ name: string; schema: unknown }> = [];
+  fake.addHook('tools/pre-execute', (payload, next) => {
+    seen.push({ name: payload.name, schema: payload.schema });
+    return next();
+  });
+  const executor = new CodeModeExecutor(fake.ctx);
+  await executor.execute({ calls: [runCodeCall('await Read({ path: "a" })')], signal: new AbortController().signal });
+  const child = seen.find((entry) => entry.name === 'Read');
+  assert.ok(child !== undefined);
+  const schema = child.schema as { name?: string; parameters?: { properties?: Record<string, unknown> } } | undefined;
+  assert.ok(schema !== undefined, 'the sub-call carries the binding schema');
+  assert.equal(schema.name, 'Read');
+  assert.ok(Object.keys(schema.parameters?.properties ?? {}).includes('path'));
 });
