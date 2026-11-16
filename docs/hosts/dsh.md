@@ -93,6 +93,20 @@ dsh --profile <name> --json "<task>"          # profile 含 dsh-headless 时：�
 - 自建 headless profile：`dsh --profile <name> --from-default-profile headless --dump-config` 从模板建立，然后再 `plugin add`。模板的默认模型是 DeepSeek 官方 API（`deepseek-official`），如要用本机网关，要在 profile 的 `cordis.patch.yml` 里写 provider 与 `agent-default-model`。
 - 插件加载了但没反应时，先跑 `--dump-config`：行不在说明是组合问题，行在说明是代码问题。
 
+## MCP 管理与设置页扩展（2026-11-16 核对，DSH 0.2.2-rc.3）
+来源：`DeepSeek Harness.app/Contents/Resources/app.asar` 内 `@deepseek-ai/*` 包的源码与 README，以及桌面版实测。不要读 `~/.npm/_npx` 里的缓存，那是旧的 0.1.x。
+- `dsh-web-app` 的 `cordis.patch.yml` 默认挂载 `mcp-manager`（`@deepseek-ai/dsh-mcp-manager`），桌面版里状态是已启用。设置页原本没有 MCP 界面。
+- `mcp-manager`：`watch(signal)`（流式推送完整列表）、`restart(name)`、`probe(name, signal)`。状态只有 `toolCount`，工具名只能从 `probe` 的 `toolNames` 拿（原始名，不带 `mcp__<server>__` 前缀；默认最多 512 个）。探测失败时 `message` 在结果的顶层，不在 `error` 里。服务器配置在设置命名空间 `mcp-manager`（行 id）的 `servers`，经 `ctx.remote.settings.mutate(ns, ops, revision)` 写入。改服务器配置会重建实例，期间工具短暂消失。
+- 设置命名空间：命名空间 id 就是 profile 里该行的 `id`，插件的 `Config` 至少有一个 `.volatile()` 字段才会出现；数据存在 profile 的 `cordis.patch.yml` 对应行的 `config` 里。`ctx.settingsScope.bind` 在这个版本的源码里不存在，用 `ctx.remote.settings.describe/mutate`。
+- 客户端 bundle：`package.json` 的 `dsh.client`（`platform: 'web'`），导出 `./client`，格式 `window.__ModuleLoader__.load({ id, factory(require) })`，`id` 必须等于包名。浏览器端取服务要在返回的 `inject` 里列出，用到 `ctx.remote.mcpManager` 就要写 `remote.mcpManager`，漏了页面报 `cannot get property "remote.mcpManager" without inject`。
+- **客户端 bundle 只在部署层的插件行里被加载。** 同一个包的行放在 agent preset 的 `plugins` 里时，bundle 不会被扫描（对照实验）。要加界面就用独立的包，行直接挂在部署层。
+- 第三方远程命名空间：浏览器端 `ctx.remote.<ns>` 来自 `dsh-api-remotes` 里写死的清单，第三方插件用 `ctx.remote.$mount(info)` 自己挂（`info` 来自 `createTypertRemoteInfo`，`@deepseek-ai/dsh-typert-protocol/remote-info`）；宿主端包导出 `./typert`（`TYPERT`：`package`、`face: 'host'`、`schemas`、`invocations`、`model.{services,events,objects}`）由 typert-loader 注册；服务用 `ctx.provide('<ns>', ...)`，流式方法的描述 `mode: 'stream'`、`cancellation: { parameter: 'signal' }`。工具描述在宿主工具注册表里，`ctx.tools.definitions()` 可读，变化事件 `tools/change`，管理器状态事件 `mcp-manager/status`。（描述文件被运行时接受、挂载成功：见桌面版实测记录，未实测前不要依赖。）
+- 设置页左侧栏目：`ctx.slots.inject('settings.section', ...)`（`id`、`order`、`label`），图标用 `settings.section.icon`（`id` 相同，组件收到 `{ size, active }`）。「内置插件」页里的标签用 `settings.plugins.tab`。
+- 并行判定：`ToolExecutionPipeline.executionMode` 仅当 `tool.isConcurrencySafe(args) === true` 才并行（`dsh-tools/src/pipeline.ts`）。`dsh-mcp-client` 注册的工具不声明它。`code-mode` 的执行器在自己的流水线 `get` 里按名单补上；该 preset 下所有工具调用都经过这条流水线。
+- 拒绝单个工具：`ctx.on('tools/pre-execute', (exec, next) => ..., { prepend: true })`，命中时返回 `{ kind: 'deny', reason }`，模型看到 `Error: <reason>`；`ToolExecutionPipeline.prepare` 对原生调用和 `run_code` 子调用都会跑这个事件，拒绝发生在审批之前（命令行 profile 实测：子调用得到预期的拒绝文本）。对模型隐藏单个工具：`ctx.tools.register(def, { when })` 的 `when` 每个模型步骤求值一次，但 `dsh-mcp-client` 注册 MCP 工具时不传选项，第三方插件拿不到；`ctx.tools.restrict` 只能在 agent 作用域调用。Code Mode 自己组装说明文字和 `run_code` 描述，每个模型步骤都会重新组装（读源码，`dsh-tools` 的 `systemPrompt.tools` 钩子和 section 回调每次渲染都调 `definitions()`），所以可以在那里过滤。
+- 桌面版进程：`quit` 后马上 `open` 可能留下两个进程，窗口读不到界面信息；等旧进程退出再启动。
+- `agent-desktop` 在 zsh 里写 `$R:e10` 会被当成 `:e` 修饰符展开，ref 要写成 `${R}:e10`。
+
 ## 本项目约定
 - adapter 目录 `plugins/<name>/dsh/` 是一个独立 workspace 包。
 - 锁定的 DSH 版本：`0.2.2-rc.3`（精确版本写在 `plugins/*/dsh/package.json` 的 `peerDependencies` 与 `devDependencies` 中）。

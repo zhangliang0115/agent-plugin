@@ -50,3 +50,4 @@
 | [0003](0003-scripts-toolchain.md) | 仓库脚本用 TypeScript 直接运行，不加构建步骤 | 已接受 |
 | [0004](0004-code-mode-dsh-design.md) | DSH 的 Code Mode：run_code、sealed QuickJS 沙箱、子调用走流水线 | 已接受 |
 | [0005](0005-npm-scope-and-package-names.md) | 对外发布的 npm scope 与包名 | 已接受 |
+| [0006](0006-dsh-mcp-ui.md) | DSH 的 MCP 管理界面：独立 UI 插件 + 逐工具并行勾选 | 已接受 |

@@ -113,3 +113,20 @@
 - 现象：`run_code` 内 `bash` 的审批面板只有「允许本次操作使用 workspace-write 权限：approval test」，上方一行「正在运行命令 · touch marker」，没有命令本身。会话日志里 `tool/ptc-dispatch-start` 带 `arguments.command`，`approval/asked` 带子调用 id，事件不缺。`ApprovalCommand.tsx` 只在对话根节点里按 `callId` 查找，子调用挂在父节点下，查不到。
 - 期望：子调用的审批与原生调用一样显示命令。
 - 处理：记入 README「限制」与差异第 18 项。DSH 自带 PTC 执行器同样受影响（来自源码，未运行）。不在插件里改写 `displayReason`：那会改变用户看到的内容并修改其他监听也读取的请求，需要产品决定。
+
+## 2026-11-16 客户端 bundle 放在 preset 内的包里不会被加载
+- 状态：已规避（界面拆成独立的部署层包 `mcp-ui`，见 ADR 0006）
+- 现象：同一个包既声明 `dsh.client` 又被挂在 `preset-code-mode` 里，设置页没有出现注册的标签页；同样的 bundle 放进挂在部署层的独立包，立即出现。
+- 原因：客户端模块系统只扫描宿主 Loader 的条目（`dsh-client-modules` 的 `ctx.loader.entries()`），preset 内的行不在其中。这是根据源码和对照实验的推断，没有文档明说。
+- 处理：浏览器端界面一律放在独立包里，行挂在部署层。
+
+## 2026-11-16 cordis 4.1.0 没有 optional inject
+- 状态：已规避
+- 现象：想让 `code-mode-dsh` 在没有 `mcpParallel` 服务时也能激活。`fiber.ts` 的 `_refresh` 要求 `inject` 列出的每个服务都存在，否则插件不激活，`registry.ts` 没有 optional 标记。
+- 处理：不把 `mcpParallel` 写进 `inject`，每次判定时用 `ctx.get('mcpParallel')` 查找，没有就当不并行。
+
+## 2026-11-16 普通 preset 下无法对模型隐藏被禁用的 MCP 工具
+- 状态：未解决（宿主限制，已在界面和文档里写明）
+- 现象：`mcp-ui` 可以拒绝对被禁用工具的调用（`tools/pre-execute`），Code Mode 下还能在 `code-mode` 里把它从说明文字里去掉；DSH 自带执行器的 preset 下，模型仍会在工具列表里看到它，调用时才被拒绝。
+- 原因：DSH 隐藏单个工具的支持机制是注册时的 `when` 条件，MCP 工具由 `dsh-mcp-client` 注册，不传任何选项；`tools.restrict` 只能在 agent 作用域调用，部署层插件用不了。
+- 处理：只拒绝不隐藏。要完整支持，需要 `dsh-mcp-client` 给注册开放 `when`，或 DSH 提供全局的工具可见性过滤。
