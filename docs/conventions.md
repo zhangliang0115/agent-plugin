@@ -21,8 +21,25 @@
 
 ## 版本
 
-- 每个插件一个 semver 版本，`plugin.meta.json`、各宿主 manifest 和包的 `package.json` 保持一致。
-- 0.x 阶段允许破坏性变更，但要写进 CHANGELOG。
+每个插件一个 semver 版本，`plugin.meta.json`、各宿主 manifest 和包的 `package.json` 保持一致。
+
+**每次改动插件行为都升版本，同一次改动只升一次。** 这是发布产物的身份：`pnpm pack` 的 tgz 文件名带版本号，profile 的 `package.json` 也记录版本；不升版本，重装同一个 tgz 与装新构建无法区分，缓存也可能直接复用旧包。
+
+| 改动 | 升哪一位 | 例子 |
+|---|---|---|
+| 破坏性变更：安装形态、配置字段、工具参数、宿主要求 | minor（0.x 阶段） | 安装方式从替换执行器改为 agent preset |
+| 新增能力，向后兼容 | minor（0.x 阶段） | 新增配置项、新增输出字段 |
+| 修复，不改接口 | patch | 修正截断边界、修正错误文案 |
+| 只改文档、测试、注释，不动发布产物 | 不升 | 改 README 措辞 |
+
+规则：
+
+- 版本在**打包或发布之前**升，不是发布之后补。
+- 一次改动涉及多处文件时，同一次只升一次，不按文件累加。
+- 0.x 阶段：破坏性变更与新增都升 minor；1.0 之后按常规 semver。
+- 升版本要同步三处：`plugin.meta.json`、插件根 `README.md` 标明的宿主版本、adapter 的 `package.json`；然后跑 `pnpm matrix`（矩阵含版本号，不同步会让 `pnpm matrix:check` 失败）。
+- 在 `CHANGELOG.md` 里新建 `## <version>（<日期>）` 小节，把该版本的改动写进去；不要改动已发布版本的条目。
+- 已经装到用户 profile 的旧版本不自动升级；交付时给出装新 tgz 的命令。
 - 改了某个宿主的锁定版本，同时更新 `docs/hosts/<host>.md` 的核对版本。
 
 ## 提交
