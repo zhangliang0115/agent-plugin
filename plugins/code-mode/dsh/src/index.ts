@@ -15,7 +15,10 @@ export const inject = ['tools', 'systemPrompt'];
 
 /** Register the executor with the deployment's limits and release its sandboxes when the plugin is disposed. */
 export function setupCodeModeExecutor(ctx: Context, config: Partial<Config> = {}): CodeModeExecutor {
-  const executor = new CodeModeExecutor(ctx, { mode: new CodeMode(codeLimits(config)) });
+  const executor = new CodeModeExecutor(ctx, {
+    mode: new CodeMode(codeLimits(config)),
+    concurrentTools: config.concurrentTools ?? [],
+  });
   ctx.tools.setExecutor(executor);
   ctx.effect(() => () => executor.dispose(), 'Code Mode sandboxes');
   return executor;

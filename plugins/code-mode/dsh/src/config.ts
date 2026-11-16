@@ -24,6 +24,16 @@ export interface Config {
   logChars: number;
   /** Characters kept in `<error>`. */
   errorChars: number;
+  /**
+   * Tools a program may run concurrently even though the tool itself declares no
+   * concurrency safety. Names match exactly; a trailing `*` matches a prefix
+   * (`mcp__jev__*`). Empty by default: omitting a tool keeps DSH's fail-closed
+   * behavior, where only tools with `isConcurrencySafe() === true` overlap.
+   *
+   * Only list calls that are safe to run at the same time. Listing a stateful tool
+   * lets two of its calls interleave and can corrupt their shared state.
+   */
+  concurrentTools: string[];
 }
 
 /** Validated limits; an omitted field takes the core default. */
@@ -36,6 +46,7 @@ export const Config: z<Partial<Config>, Config> = z.object({
   resultChars: z.natural().min(1).default(DEFAULT_LIMITS.resultChars),
   logChars: z.natural().min(1).default(DEFAULT_LIMITS.logChars),
   errorChars: z.natural().min(1).default(DEFAULT_LIMITS.errorChars),
+  concurrentTools: z.array(z.string()).default([]),
 });
 
 /**
@@ -45,5 +56,19 @@ export const Config: z<Partial<Config>, Config> = z.object({
  * @returns limits for `new CodeMode(limits)`.
  */
 export function codeLimits(config: Partial<Config> = {}): Partial<CodeLimits> {
-  return Config(config);
+  const { concurrentTools: _concurrentTools, ...limits } = Config(config);
+  return limits;
+}
+
+/**
+ * True when `name` belongs to the deployment's concurrency allowlist. Exact names match
+ * literally; a pattern ending in `*` matches every name with that prefix.
+ * @param name - the model-facing tool name of a sub-call.
+ * @param patterns - the deployment's `concurrentTools` value.
+ */
+export function allowsConcurrency(name: string, patterns: readonly string[]): boolean {
+  for (const pattern of patterns) {
+    if (pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern) return true;
+  }
+  return false;
 }

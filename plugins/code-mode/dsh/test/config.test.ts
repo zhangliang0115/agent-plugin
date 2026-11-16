@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { ToolCallId } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DEFAULT_LIMITS } from '@zhangliang0115/code-mode-core';
-import { Config } from '../src/config.ts';
+import { Config, codeLimits } from '../src/config.ts';
 import { apply, setupCodeModeExecutor } from '../src/index.ts';
 import { fakeContext } from './fake-context.ts';
 
@@ -37,7 +37,13 @@ test('an empty config resolves to the core defaults', () => {
     resultChars: DEFAULT_LIMITS.resultChars,
     logChars: DEFAULT_LIMITS.logChars,
     errorChars: DEFAULT_LIMITS.errorChars,
+    concurrentTools: [],
   });
+});
+
+test('concurrentTools defaults to empty and never reaches the sandbox limits', () => {
+  assert.deepEqual(Config({}).concurrentTools, []);
+  assert.equal('concurrentTools' in codeLimits({}), false, 'the sandbox has no scheduling allowlist');
 });
 
 test('a deployment config overrides only the fields it names', () => {

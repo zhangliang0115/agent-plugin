@@ -1,0 +1,13 @@
+# Deployment-level Code Mode for profiles without an agent-preset registry (for example the
+# headless template). Inserting the plugin at the deployment scope replaces the native and PTC
+# executors, so both are disabled here: one scope owns exactly one executor.
+#
+# Apply it as an extra overlay: `dsh --profile <name> --patch <path to this file> ...`, or copy
+# these rows into the profile's `cordis.patch.yml`.
+- id: tool-executor-native
+  disabled: true
+- id: tool-executor-ptc
+  disabled: true
+- insert:
+    - id: code-mode-dsh
+      name: '@zhangliang0115/code-mode-dsh'

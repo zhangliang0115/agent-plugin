@@ -1,6 +1,6 @@
 {
   "name": "@zhangliang0115/code-mode-dsh",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -10,6 +10,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./cordis.headless.patch.yml": "./cordis.headless.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./package.json": "./package.json"
@@ -17,6 +18,7 @@
   "files": [
     "dist",
     "cordis.patch.yml",
+    "cordis.headless.patch.yml",
     "locale/*.json",
     "icon.svg"
   ],

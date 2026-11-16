@@ -1,6 +1,6 @@
 {
   "id": "code-mode",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Code Mode：模型用 run_code 执行 JavaScript 调用工具，只把结果和日志返回给模型",
   "hosts": {
     "claude-code": {
@@ -9,7 +9,10 @@
     },
     "dsh": {
       "status": "experimental",
-      "components": ["tool", "tool-executor"]
+      "components": [
+        "tool",
+        "tool-executor"
+      ]
     },
     "pi": {
       "status": "unsupported",

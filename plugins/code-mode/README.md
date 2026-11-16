@@ -2,7 +2,7 @@
 
 让模型写一段 JavaScript 调用工具，插件执行后只把结果和日志返回给模型。中间的工具输出留在程序里，不进入模型上下文。
 
-- 支持的宿主：[DSH](../../docs/hosts/dsh.md)（`dsh`，实验性，0.1.0）。Claude Code 与 Pi 未支持，见 `plugin.meta.json`。
+- 支持的宿主：[DSH](../../docs/hosts/dsh.md)（`dsh`，实验性，0.3.0）。Claude Code 与 Pi 未支持，见 `plugin.meta.json`。
 - 安装：见 [INSTALL.md](INSTALL.md)。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)。
 - 设计决策：[ADR 0004](../../docs/decisions/0004-code-mode-dsh-design.md)。
@@ -102,7 +102,33 @@ a.totalLines + b.totalLines
     maxParallelSubCalls: 4
 ```
 
-可配置字段：`timeoutMs`、`maxTimeoutMs`、`memoryBytes`、`maxSubCallsPerRun`、`maxParallelSubCalls`、`resultChars`、`logChars`、`errorChars`。值必须是正整数；非法值让插件激活失败，错误里带字段路径（例如 `$.timeoutMs expected number >= 1 but got 0`）。`timeoutMs` 大于 `maxTimeoutMs` 也会让激活失败。
+可配置字段：`timeoutMs`、`maxTimeoutMs`、`memoryBytes`、`maxSubCallsPerRun`、`maxParallelSubCalls`、`resultChars`、`logChars`、`errorChars`、`concurrentTools`。前八个必须是正整数；非法值让插件激活失败，错误里带字段路径（例如 `$.timeoutMs expected number >= 1 but got 0`）。`timeoutMs` 大于 `maxTimeoutMs` 也会让激活失败。
+
+### concurrentTools：让未声明并发安全的工具并行
+
+DSH 的调度器只让 `isConcurrencySafe(args) === true` 的工具并行，其余一律独占。MCP 工具由 `dsh-mcp-client` 注册，定义里没有这个字段，所以**所有 MCP 调用都串行**——即使那台服务器只提供只读查询。`dsh-mcp-client` 也不读 MCP 协议的 `annotations.readOnlyHint`（`dsh-mcp-client/lib/index.js` 中 `annotations`、`readOnlyHint` 零次出现）。
+
+`concurrentTools` 是部署方的显式放行名单：
+
+preset 形态下，插件行在 preset 内部，profile 的 patch 覆盖不到它；配置要写进 preset 的那一行。最省事的做法是覆盖整个 preset 行（`config` 整体替换，必须重写全部字段），或者直接用 `cordis.patch.yml` 里那一行的位置改包内文件。headless overlay 形态下插件在 deployment 层，直接写 `- id: code-mode-dsh` 加 `config` 即可。
+
+```yaml
+# headless overlay 形态
+- id: code-mode-dsh
+  name: '@zhangliang0115/code-mode-dsh'
+  config:
+    concurrentTools:
+      - mcp__jev__jev_classify
+      - 'mcp__jev__*'
+```
+
+- 名字精确匹配；结尾的 `*` 表示前缀匹配（`mcp__jev__*` 覆盖整台服务器）。
+- 默认空数组，省略即保持 DSH 的 fail-closed 行为。
+- 只影响调度分类：子调用仍然走 `prepare`、guard、审批、`post-execute`，事件与审计不变。
+- **不能覆盖工具自己的拒绝**：工具声明了 `isConcurrencySafe: () => false` 时，名单不生效。
+- 名单内的工具与名单外的工具之间仍然互相独占（屏障保留）。
+
+**风险**：名单写错会让两个本应串行的调用重叠。只列真正无副作用的调用（只读查询、幂等接口）。写操作、有共享可变状态的工具不要列。MCP 的 `readOnlyHint` 是提示不是保证，协议注释明确写了客户端不应基于它做决策，所以这里要求部署方自己确认，而不是信任服务器自述。
 
 ## 与参考资料和原生执行器的差异
 
@@ -129,7 +155,8 @@ a.totalLines + b.totalLines
 18. **审批面板不显示子调用的命令，这是 DSH 界面的行为。** 面板标题来自 `justification`，上方一行是子调用的 `description`。命令行由 `ApprovalCommand` 组件按 `callId` 在对话根节点里查找，子调用挂在父节点下，查不到，所以不显示（DSH 0.2.2-rc.3 源码，`dsh-client-ui-chat/src/client/chat/ApprovalCommand.tsx`）。插件已经写出 `tool/ptc-dispatch-start`（含 `arguments.command`）和带子调用 id 的 `approval/asked`，事件没有缺失；DSH 自带的 PTC 执行器有同样的缺口。需要把命令写进 `justification` 才能在面板里看到。
 
 ## 仍然存在的差异
-- 与 DSH 内置 PTC preset 互斥：一个 profile 只能有一个 tool executor，装入本插件会关掉 `tool-executor-native` 与 `tool-executor-ptc`，依赖这两者的 preset（`standard`、`cordis`、`ptc`）会被关掉。
+- **与 DSH 内置 PTC preset 共存，不再互斥。** 插件以 `code-mode` agent preset 的形式安装，执行器注册在该 preset 的 agent scope 里；DSH 的限制是「一个 scope 只能有一个 tool executor」，deployment scope 的 `tool-executor-native` 与 `tool-executor-ptc` 保持启用，`standard`、`ptc`、`minimal`、`cordis` 与本 preset 都可选。依据：`dsh-tools` 的 `setExecutor` 按 `scopeOf(ctx)` 分别存储在 `scoped` map 与 `root` 两处；实测（2026-11-16）在 web profile 装入本 preset 后 `--dump-config` 通过、服务启动正常，未出现 `Only one tool executor may be registered in each scope`。对照：在 deployment scope 同时启用两个执行器会在启动时直接报该错误。
+- 无 preset 注册表的 profile（`headless` 模板）无法承载 preset，需用 `dsh/cordis.headless.patch.yml` 作为 overlay，此时才禁用 native 与 PTC、在 deployment scope 挂载插件。
 - 无头模式下子 agent 的审批被立即拒绝（实测，见 `friction.md`），所以跨 agent 的审批阻塞无法在无头模式下复现，只由单元测试 `F1a an approval pending in one agent does not block run_code in another agent` 覆盖。
 - 子调用不出现在 `--json` 事件流中；`--json` 只输出外层 `run_code`。
 - 审批面板对子调用只显示 `description` 与 `justification`，不显示命令（差异第 18 项）。

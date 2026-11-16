@@ -1,6 +1,18 @@
 # 变更记录
 
-## 未发布
+## 0.3.0（2026-11-16）
+### 新增
+- **`concurrentTools` 配置项**：让未声明 `isConcurrencySafe` 的工具并行。MCP 工具由 `dsh-mcp-client` 注册时没有并发安全声明，全部独占；名单里的名字（精确或 `prefix*`）在 `pipeline` 的 `get` 回调解包一层 `isConcurrencySafe: () => true`，只改调度分类，执行仍走 prepare、guard、审批、post-execute。默认空，保持 DSH 的 fail-closed 行为；工具自己声明 `false` 时名单不生效。
+  - 依据：`dsh-mcp-client/lib/index.js` 中 `isConcurrencySafe`、`annotations`、`readOnlyHint` 均零次出现；MCP 协议注释要求客户端不基于 `ToolAnnotations` 做决策，因此用部署方显式名单而不是服务器自述。
+  - 测试：`test/concurrent-tools.test.ts` 6 条（精确/通配匹配、名单内并行、名单外串行、显式 false 优先、通配覆盖命名空间、名单内与名单外互为屏障）。
+
+### 变更
+- **安装形态改为 agent preset，不再替换 deployment 执行器。** `cordis.patch.yml` 声明 `preset-code-mode`，插件行在 preset 的 `plugins` 内，执行器注册在该 preset 的 agent scope。deployment 层的 `tool-executor-native` 与 `tool-executor-ptc` 不再被禁用，DSH 自带的 `standard`、`ptc`、`minimal`、`cordis` preset 仍可选。
+  - 依据：`dsh-tools` 的 `setExecutor` 按 `scopeOf(ctx)` 分别写入 `scoped` map 与 `root`，两个 scope 互不冲突（DSH 0.2.2-rc.3 源码）。
+  - 实测：web profile 安装后 `--dump-config` 通过、服务启动无 `Only one tool executor may be registered in each scope`；headless profile 用 overlay 形式跑通 `run_code`（`<repl-output eval="1"><result>42</result></repl-output>`）。
+  - 对照：在 deployment scope 同时启用 native 与 code-mode 会在启动时报该错误（实测）。
+- 无 preset 注册表的 profile（`headless` 模板）改用新增的 `cordis.headless.patch.yml` 作为 `--patch` overlay：它禁用两个 deployment 执行器并在 deployment scope 挂载插件。
+- 新增 `test/bundle-patch.test.ts`，断言两个 patch 文件的形态（preset 内部挂载、headless overlay 才禁用执行器）。
 ### 新增
 - DSH 插件面板的展示元数据：`locale/en.json` 与 `locale/zh.json` 的标题、描述，以及 `icon.svg`；`exports` 与 `files` 已包含它们。
 - 插件配置：`Config` 暴露运行超时、内存、子调用数、并行数、输出上限，可在 profile 的 `cordis.patch.yml` 的 `config:` 里覆盖；未写的字段用 `CodeLimits` 的默认值，非法值在激活时失败并指出字段。

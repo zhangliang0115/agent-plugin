@@ -31,7 +31,7 @@ pnpm run build
 mkdir -p /tmp/code-mode-pkg && pnpm pack --pack-destination /tmp/code-mode-pkg
 ```
 
-预期：`/tmp/code-mode-pkg/zhangliang0115-code-mode-dsh-0.1.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
+预期：`/tmp/code-mode-pkg/zhangliang0115-code-mode-dsh-0.3.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
 
 如果 profile 目录 `~/.dsh/profiles/<profile>` 不存在，在任意目录执行一次（用于创建 profile，使用 DSH 的 headless 模板）：
 
@@ -79,7 +79,7 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 "<dsh>" plugin --profile <profile> add <tgz>
 ```
 
-预期输出包含 `+ @zhangliang0115/code-mode-dsh 0.1.0`。
+预期输出包含 `+ @zhangliang0115/code-mode-dsh 0.3.0`。
 
 包发布到 npm 之后，可以省掉本地构建，直接从 npm 安装：
 
@@ -89,7 +89,9 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 
 包名与 scope 的决策见 `docs/decisions/0005-npm-scope-and-package-names.md`。
 
-插件的 `cordis.patch.yml` 会禁用 `tool-executor-native`，`tool-executor-ptc` 在 headless 模板中也是禁用的。这一步不需要手动操作。
+插件的 `cordis.patch.yml` 不再禁用任何执行器：它声明一个 `code-mode` agent preset，插件行在 preset 内部，执行器注册在该 preset 的 agent scope 里。deployment scope 的 `tool-executor-native` 与 `tool-executor-ptc` 保持启用，DSH 自带的其他 preset 仍可选。
+
+无 preset 注册表的 profile（`headless` 模板）无法承载 preset，需要用一并安装的 `cordis.headless.patch.yml` 作为 overlay：它禁用 native 与 PTC 并在 deployment scope 挂载插件。用法见「验证」中的「headless」一节。
 
 ### 配置
 
@@ -125,7 +127,9 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
    grep -n -A2 "id: tool-executor-native" /tmp/<profile>-config.txt
    ```
 
-   预期：第一条 `grep` 输出包含 `- id: code-mode-dsh`。第二条输出中，`tool-executor-native` 之后两行内有 `disabled: true`（中间一行是 `name`）。
+   预期（preset 形态）：第一条 `grep` 输出包含 `- id: code-mode-dsh`，它在 `preset-code-mode` 的 `plugins` 列表内。第二条输出中 `tool-executor-native` **没有** `disabled` 行——preset 形态不禁用任何执行器。
+
+   若改用 headless overlay，预期相反：`- id: code-mode-dsh` 出现在 deployment 层（不在任何 `plugins:` 缩进内），且 `tool-executor-native` 之后两行内有 `disabled: true`。
 
 2. 冒烟任务。准备一个三行的夹具文件，然后运行一次：
 

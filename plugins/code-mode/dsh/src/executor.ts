@@ -23,6 +23,7 @@ import {
 } from '@deepseek-ai/dsh-tools';
 import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline';
 import { CodeMode, ToolCallError, renderInstructions, toolCallExample, toolReturns, toolSignature, type CallControl, type ToolDescriptor } from '@zhangliang0115/code-mode-core';
+import { allowsConcurrency } from './config.ts';
 import { DispatchLog } from './dispatch-log.ts';
 import { RunScheduler } from './run-scheduler.ts';
 
@@ -46,6 +47,11 @@ export interface ExecutorOptions {
    * elapse while one of them runs. Defaults to `ask_user_question` and `exit_plan_mode`.
    */
   readonly userWaitTools?: readonly string[];
+  /**
+   * Tool names a program may overlap even though the tool declares no concurrency safety.
+   * Exact names, or a trailing `*` for a prefix. Empty keeps DSH's fail-closed scheduling.
+   */
+  readonly concurrentTools?: readonly string[];
 }
 
 /** The part of the host spill store this plugin calls. */
@@ -156,6 +162,8 @@ export class CodeModeExecutor implements ToolExecutor {
   private readonly maxParallel: number;
   private readonly registeredAgents = new WeakSet<Agent>();
   private readonly userWaitTools: ReadonlySet<string>;
+  /** Allowlist of tool names that may overlap despite declaring no concurrency safety. */
+  private readonly concurrentTools: readonly string[];
   /** Sub-calls in flight, by agent and then sub-call id, with the control of the run each belongs to. */
   private readonly activeSubCalls = new Map<unknown, Map<string, CallControl>>();
   private readonly listenerDisposers: Array<() => void> = [];
@@ -169,6 +177,7 @@ export class CodeModeExecutor implements ToolExecutor {
     const requested = options.maxParallel ?? 10;
     this.maxParallel = Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 1;
     this.userWaitTools = new Set(options.userWaitTools ?? DEFAULT_USER_WAIT_TOOLS);
+    this.concurrentTools = options.concurrentTools ?? [];
     this.runCodeTool = this.runCodeFor([]);
     const tools = ctx.tools;
     this.sections = [{
@@ -178,7 +187,16 @@ export class CodeModeExecutor implements ToolExecutor {
       interpolate: false,
     }];
     this.pipeline = new ToolExecutionPipeline(ctx, {
-      get: (name, scope, toolSet) => (name === RUN_CODE_NAME ? this.runCodeTool : tools.executable(name, scope, toolSet)),
+      get: (name, scope, toolSet) => {
+        if (name === RUN_CODE_NAME) return this.runCodeTool;
+        const tool = tools.executable(name, scope, toolSet);
+        // DSH schedules a call concurrently only when the tool opts in. A deployment can list a
+        // tool here to overlap calls the tool itself does not mark safe (read-only MCP helpers, for
+        // example). Execution still goes through prepare, guards, approvals and post-execute.
+        if (tool === undefined || tool.isConcurrencySafe !== undefined) return tool;
+        if (!allowsConcurrency(name, this.concurrentTools)) return tool;
+        return { ...tool, isConcurrencySafe: () => true };
+      },
       reject: (name, nested) => (!nested && name !== RUN_CODE_NAME
         ? new ToolNotFoundError(name, `only \`${RUN_CODE_NAME}\` is callable directly; call \`${name}\` from inside a \`${RUN_CODE_NAME}\` program instead`)
         : undefined),
