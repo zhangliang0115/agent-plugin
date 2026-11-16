@@ -1,5 +1,24 @@
 # 变更记录
 
+## 0.5.0（2026-11-16）
+### 新增
+- **隐藏用户禁用的工具**：部署中若存在服务 `mcpDisabled`（`isDisabled(name): boolean`），执行器在每次组装指令、生成 `run_code` 描述时读取它，被禁用的工具不出现在指令文本和 `run_code` 的 `code` 描述中。服务不存在、抛错或返回空时，输出与之前相同。
+  - 只隐藏，不拒绝：拒绝调用由宿主的 `tools/pre-execute` 监听（`mcp-ui`）负责，本插件不增加拒绝分支。
+  - 程序的工具绑定保留被禁用的工具：模型即使按名字调用，调用也会进入流水线，被监听拒绝并得到明确的原因。
+  - 每次组装都重新读取，名单的改动在下一步模型调用生效。
+  - 测试：`test/disabled-tools.test.ts`。
+
+## 0.4.0（2026-11-16）
+### 新增
+- **可选的 `mcpParallel` 服务**：部署中若存在服务 `mcpParallel`（`isParallel(name): boolean`），名单之外的工具也可以因它的回答而并行。名单和服务的回答取并集。服务不存在时插件照常工作。工具自己声明 `isConcurrencySafe` 时（无论 `true` 还是 `false`），两者都不改变它的判定。
+  - 服务按调用时读取，不在 `inject` 中声明：Cordis 的 `inject` 要求依赖全部存在，否则插件不激活。
+  - 测试：`test/live-concurrency.test.ts`。
+
+### 变更
+- **`concurrentTools` 改为 volatile 配置**：执行器每次判定并行时读取名单，不再在构造时复制一次。保存 profile 行后，下一个子调用按新名单调度，不需要重启插件。
+  - 测试：`test/live-concurrency.test.ts` 中「编辑名单」两条，以及「volatile 引用」一条。
+  - 未在 DSH 桌面版上实测「保存即生效」，依据是 Cordis 对 volatile 字段的约定（与 `dsh-agent-loop` 的 `maxParallelToolCalls` 相同）。
+
 ## 0.3.0（2026-11-16）
 ### 新增
 - **`concurrentTools` 配置项**：让未声明 `isConcurrencySafe` 的工具并行。MCP 工具由 `dsh-mcp-client` 注册时没有并发安全声明，全部独占；名单里的名字（精确或 `prefix*`）在 `pipeline` 的 `get` 回调解包一层 `isConcurrencySafe: () => true`，只改调度分类，执行仍走 prepare、guard、审批、post-execute。默认空，保持 DSH 的 fail-closed 行为；工具自己声明 `false` 时名单不生效。

@@ -17,7 +17,12 @@ export const inject = ['tools', 'systemPrompt'];
 export function setupCodeModeExecutor(ctx: Context, config: Partial<Config> = {}): CodeModeExecutor {
   const executor = new CodeModeExecutor(ctx, {
     mode: new CodeMode(codeLimits(config)),
-    concurrentTools: config.concurrentTools ?? [],
+    // Read on every classification: an edit to the profile row applies to the next sub-call.
+    concurrentTools: () => {
+      const live = config.concurrentTools;
+      // Cordis hands over a volatile reference; a plain array (a caller outside Cordis) is read as is.
+      return typeof live?.get === 'function' ? live.get() : Array.isArray(live) ? live : [];
+    },
   });
   ctx.tools.setExecutor(executor);
   ctx.effect(() => () => executor.dispose(), 'Code Mode sandboxes');

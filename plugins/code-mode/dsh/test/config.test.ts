@@ -28,7 +28,8 @@ function slowTool() {
 }
 
 test('an empty config resolves to the core defaults', () => {
-  assert.deepEqual(Config({}), {
+  const { concurrentTools, ...limits } = Config({});
+  assert.deepEqual(limits, {
     timeoutMs: DEFAULT_LIMITS.timeoutMs,
     maxTimeoutMs: DEFAULT_LIMITS.maxTimeoutMs,
     memoryBytes: DEFAULT_LIMITS.memoryBytes,
@@ -37,13 +38,17 @@ test('an empty config resolves to the core defaults', () => {
     resultChars: DEFAULT_LIMITS.resultChars,
     logChars: DEFAULT_LIMITS.logChars,
     errorChars: DEFAULT_LIMITS.errorChars,
-    concurrentTools: [],
   });
+  assert.deepEqual(concurrentTools.get(), []);
 });
 
-test('concurrentTools defaults to empty and never reaches the sandbox limits', () => {
-  assert.deepEqual(Config({}).concurrentTools, []);
+test('concurrentTools is a volatile reference and never reaches the sandbox limits', () => {
+  assert.deepEqual(Config({}).concurrentTools.get(), [], 'defaults to an empty allowlist');
   assert.equal('concurrentTools' in codeLimits({}), false, 'the sandbox has no scheduling allowlist');
+});
+
+test('an invalid concurrentTools entry is rejected with the field name', () => {
+  assert.throws(() => Config({ concurrentTools: 'McpRead' as never }), /concurrentTools/);
 });
 
 test('a deployment config overrides only the fields it names', () => {

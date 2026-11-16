@@ -31,7 +31,7 @@ pnpm run build
 mkdir -p /tmp/code-mode-pkg && pnpm pack --pack-destination /tmp/code-mode-pkg
 ```
 
-预期：`/tmp/code-mode-pkg/zhangliang0115-code-mode-dsh-0.3.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
+预期：`/tmp/code-mode-pkg/zhangliang0115-code-mode-dsh-0.5.0.tgz` 存在。下文用 `<tgz>` 表示这个路径。
 
 如果 profile 目录 `~/.dsh/profiles/<profile>` 不存在，在任意目录执行一次（用于创建 profile，使用 DSH 的 headless 模板）：
 
@@ -79,7 +79,7 @@ headless 模板的默认模型是 DeepSeek 官方 API（`deepseek-official`）�
 "<dsh>" plugin --profile <profile> add <tgz>
 ```
 
-预期输出包含 `+ @zhangliang0115/code-mode-dsh 0.3.0`。
+预期输出包含 `+ @zhangliang0115/code-mode-dsh 0.5.0`。
 
 包发布到 npm 之后，可以省掉本地构建，直接从 npm 安装：
 

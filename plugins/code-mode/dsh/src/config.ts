@@ -1,4 +1,5 @@
 /** Deployment-owned limits for Code Mode. @module */
+import type { Volatile } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { DEFAULT_LIMITS, type CodeLimits } from '@zhangliang0115/code-mode-core';
 
@@ -32,12 +33,17 @@ export interface Config {
    *
    * Only list calls that are safe to run at the same time. Listing a stateful tool
    * lets two of its calls interleave and can corrupt their shared state.
+   *
+   * Volatile: an edit to the profile row applies to the next sub-call, without a plugin restart.
    */
-  concurrentTools: string[];
+  concurrentTools: Volatile<string[]>;
 }
 
+/** Raw input the schema accepts. `concurrentTools` takes a plain array; the schema wraps it as volatile. */
+export type ConfigInput = Partial<Omit<Config, 'concurrentTools'>> & { concurrentTools?: string[] };
+
 /** Validated limits; an omitted field takes the core default. */
-export const Config: z<Partial<Config>, Config> = z.object({
+export const Config: z<ConfigInput, Config> = z.object({
   timeoutMs: z.natural().min(1).default(DEFAULT_LIMITS.timeoutMs),
   maxTimeoutMs: z.natural().min(1).default(DEFAULT_LIMITS.maxTimeoutMs),
   memoryBytes: z.natural().min(1).default(DEFAULT_LIMITS.memoryBytes),
@@ -46,17 +52,20 @@ export const Config: z<Partial<Config>, Config> = z.object({
   resultChars: z.natural().min(1).default(DEFAULT_LIMITS.resultChars),
   logChars: z.natural().min(1).default(DEFAULT_LIMITS.logChars),
   errorChars: z.natural().min(1).default(DEFAULT_LIMITS.errorChars),
-  concurrentTools: z.array(z.string()).default([]),
+  concurrentTools: z.array(z.string()).default([]).volatile(),
 });
 
 /**
  * Resolve a deployment config into sandbox limits. Fields the schema does not expose
- * (`consoleRingSize`, `drainGraceMs`) keep their core defaults.
+ * (`consoleRingSize`, `drainGraceMs`) keep their core defaults. `concurrentTools` is
+ * dropped before parsing: Cordis already parsed it into a volatile reference, and the
+ * schema would reject that reference as an array.
  * @param config - deployment config, possibly partial; Cordis has already validated a mounted row.
  * @returns limits for `new CodeMode(limits)`.
  */
 export function codeLimits(config: Partial<Config> = {}): Partial<CodeLimits> {
-  const { concurrentTools: _concurrentTools, ...limits } = Config(config);
+  const { concurrentTools: _concurrentTools, ...unparsed } = config;
+  const { concurrentTools: _resolved, ...limits } = Config(unparsed);
   return limits;
 }
 

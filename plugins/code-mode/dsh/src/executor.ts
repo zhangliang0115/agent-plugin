@@ -25,6 +25,8 @@ import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/
 import { CodeMode, ToolCallError, renderInstructions, toolCallExample, toolReturns, toolSignature, type CallControl, type ToolDescriptor } from '@zhangliang0115/code-mode-core';
 import { allowsConcurrency } from './config.ts';
 import { DispatchLog } from './dispatch-log.ts';
+import { hiddenToolPredicate } from './disabled.ts';
+import { findParallelClassifier } from './parallel.ts';
 import { RunScheduler } from './run-scheduler.ts';
 
 // The built-in PTC executor declares this source kind for content it defers from a program run.
@@ -49,9 +51,11 @@ export interface ExecutorOptions {
   readonly userWaitTools?: readonly string[];
   /**
    * Tool names a program may overlap even though the tool declares no concurrency safety.
-   * Exact names, or a trailing `*` for a prefix. Empty keeps DSH's fail-closed scheduling.
+   * Exact names, or a trailing `*` for a prefix. Read on every classification, so a
+   * deployment that edits the list applies the change to the next sub-call. Omitted or
+   * empty keeps DSH's fail-closed scheduling.
    */
-  readonly concurrentTools?: readonly string[];
+  readonly concurrentTools?: () => readonly string[];
 }
 
 /** The part of the host spill store this plugin calls. */
@@ -162,8 +166,8 @@ export class CodeModeExecutor implements ToolExecutor {
   private readonly maxParallel: number;
   private readonly registeredAgents = new WeakSet<Agent>();
   private readonly userWaitTools: ReadonlySet<string>;
-  /** Allowlist of tool names that may overlap despite declaring no concurrency safety. */
-  private readonly concurrentTools: readonly string[];
+  /** Reads the allowlist of tool names that may overlap despite declaring no concurrency safety. */
+  private readonly concurrentTools: () => readonly string[];
   /** Sub-calls in flight, by agent and then sub-call id, with the control of the run each belongs to. */
   private readonly activeSubCalls = new Map<unknown, Map<string, CallControl>>();
   private readonly listenerDisposers: Array<() => void> = [];
@@ -177,13 +181,13 @@ export class CodeModeExecutor implements ToolExecutor {
     const requested = options.maxParallel ?? 10;
     this.maxParallel = Number.isFinite(requested) ? Math.max(1, Math.floor(requested)) : 1;
     this.userWaitTools = new Set(options.userWaitTools ?? DEFAULT_USER_WAIT_TOOLS);
-    this.concurrentTools = options.concurrentTools ?? [];
+    this.concurrentTools = options.concurrentTools ?? (() => []);
     this.runCodeTool = this.runCodeFor([]);
     const tools = ctx.tools;
     this.sections = [{
       name: 'code-mode:run_code',
       order: ctx.systemPrompt.getSectionOrder('TOOLS_SDK'),
-      text: (visible) => renderInstructions(visible.map(toDescriptor)),
+      text: (visible) => renderInstructions(this.visibleTools(visible).map(toDescriptor)),
       interpolate: false,
     }];
     this.pipeline = new ToolExecutionPipeline(ctx, {
@@ -191,10 +195,11 @@ export class CodeModeExecutor implements ToolExecutor {
         if (name === RUN_CODE_NAME) return this.runCodeTool;
         const tool = tools.executable(name, scope, toolSet);
         // DSH schedules a call concurrently only when the tool opts in. A deployment can list a
-        // tool here to overlap calls the tool itself does not mark safe (read-only MCP helpers, for
-        // example). Execution still goes through prepare, guards, approvals and post-execute.
+        // tool here, or an outside classifier can, to overlap calls the tool itself does not mark
+        // safe (read-only MCP helpers, for example). Execution still goes through prepare, guards,
+        // approvals and post-execute.
         if (tool === undefined || tool.isConcurrencySafe !== undefined) return tool;
-        if (!allowsConcurrency(name, this.concurrentTools)) return tool;
+        if (!this.allowsParallel(name)) return tool;
         return { ...tool, isConcurrencySafe: () => true };
       },
       reject: (name, nested) => (!nested && name !== RUN_CODE_NAME
@@ -206,7 +211,16 @@ export class CodeModeExecutor implements ToolExecutor {
 
   /** The model sees only run_code. Other tools are reached from inside programs. The code description lists the visible tools. */
   describe(tools: readonly ToolDefinition[]): ToolModelInput {
-    return { schemas: [projectToolSchema(this.runCodeFor(tools.map(toDescriptor)), false)], knownNames: [RUN_CODE_NAME] };
+    return { schemas: [projectToolSchema(this.runCodeFor(this.visibleTools(tools).map(toDescriptor)), false)], knownNames: [RUN_CODE_NAME] };
+  }
+
+  /**
+   * The tools the model may see now: the list without the ones the user disabled. The provider is
+   * read on each call, so the result follows the current disabled list.
+   */
+  private visibleTools<T extends { readonly name: string }>(tools: readonly T[]): T[] {
+    const isHidden = hiddenToolPredicate(this.ctx);
+    return tools.filter((tool) => !isHidden(tool.name));
   }
 
   /** The run_code definition. Its code description names the tools in `tools`. */
@@ -227,6 +241,21 @@ export class CodeModeExecutor implements ToolExecutor {
 
   execute(input: ToolBatchInput): Promise<ToolBatchResult> {
     return executeToolBatch(input, this.pipeline, () => this.maxParallel);
+  }
+
+  /**
+   * True when the deployment's allowlist or the optional `mcpParallel` classifier lets `name`
+   * overlap. Both are read now, so the answer reflects the latest list and the provider present
+   * at this sub-call.
+   */
+  private allowsParallel(name: string): boolean {
+    if (allowsConcurrency(name, this.concurrentTools())) return true;
+    // A misbehaving external classifier must not fail the sub-call: treat it as "not parallel".
+    try {
+      return findParallelClassifier(this.ctx)?.isParallel(name) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Stop the programs running now and release every sandbox. Called when the plugin is disposed. */
@@ -274,6 +303,8 @@ export class CodeModeExecutor implements ToolExecutor {
     const agent = exec.agent;
     const owner: object = agent ?? {};
     if (agent !== undefined) this.registerRelease(agent);
+    // Disabled tools stay bound on purpose: they are hidden from what the model reads, but a call by name
+    // must reach the pipeline, where mcp-ui's tools/pre-execute listener refuses it with a readable reason.
     const schemas = this.ctx.tools.schemas(agent, exec.toolSet).filter((schema) => schema.name !== RUN_CODE_NAME);
     const tools = schemas.map((schema) => ({ name: schema.name, description: schema.description, inputSchema: schema.parameters }));
     const run: RunState = {

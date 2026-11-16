@@ -34,7 +34,7 @@ function runCodeCall(code: string) {
 
 function setup(tools: ToolDefinition[], concurrentTools: readonly string[]) {
   const fake = fakeContext({ tools });
-  return { fake, executor: new CodeModeExecutor(fake.ctx, { concurrentTools }), agent: fakeAgent(fake.trace) };
+  return { fake, executor: new CodeModeExecutor(fake.ctx, { concurrentTools: () => concurrentTools }), agent: fakeAgent(fake.trace) };
 }
 
 async function run(executor: CodeModeExecutor, agent: unknown, code: string): Promise<void> {

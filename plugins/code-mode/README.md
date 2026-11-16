@@ -2,7 +2,7 @@
 
 让模型写一段 JavaScript 调用工具，插件执行后只把结果和日志返回给模型。中间的工具输出留在程序里，不进入模型上下文。
 
-- 支持的宿主：[DSH](../../docs/hosts/dsh.md)（`dsh`，实验性，0.3.0）。Claude Code 与 Pi 未支持，见 `plugin.meta.json`。
+- 支持的宿主：[DSH](../../docs/hosts/dsh.md)（`dsh`，实验性，0.5.0）。Claude Code 与 Pi 未支持，见 `plugin.meta.json`。
 - 安装：见 [INSTALL.md](INSTALL.md)。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)。
 - 设计决策：[ADR 0004](../../docs/decisions/0004-code-mode-dsh-design.md)。
@@ -124,11 +124,24 @@ preset 形态下，插件行在 preset 内部，profile 的 patch 覆盖不到�
 
 - 名字精确匹配；结尾的 `*` 表示前缀匹配（`mcp__jev__*` 覆盖整台服务器）。
 - 默认空数组，省略即保持 DSH 的 fail-closed 行为。
+- **实时生效**：`concurrentTools` 是 volatile 配置。执行器每次判定并行时读取名单，改动后下一个子调用按新名单调度，不需要重启插件。这一点的依据是 Cordis 的 volatile 约定，尚未在 DSH 桌面版上实测。
+- **可选的外部分类器**：部署中若存在服务 `mcpParallel`（`isParallel(name): boolean`），名单之外的工具也可以因它的回答而并行，两者取并集。服务不存在时插件照常工作。计划中的 `@zhangliang0115/mcp-ui` 会提供这个服务，它不是本插件的依赖。
 - 只影响调度分类：子调用仍然走 `prepare`、guard、审批、`post-execute`，事件与审计不变。
 - **不能覆盖工具自己的拒绝**：工具声明了 `isConcurrencySafe: () => false` 时，名单不生效。
 - 名单内的工具与名单外的工具之间仍然互相独占（屏障保留）。
 
 **风险**：名单写错会让两个本应串行的调用重叠。只列真正无副作用的调用（只读查询、幂等接口）。写操作、有共享可变状态的工具不要列。MCP 的 `readOnlyHint` 是提示不是保证，协议注释明确写了客户端不应基于它做决策，所以这里要求部署方自己确认，而不是信任服务器自述。
+
+### 用户禁用的工具：隐藏
+
+部署中若存在服务 `mcpDisabled`（`isDisabled(name): boolean`，由 `mcp-ui` 提供），用户在 MCP 设置里禁用的工具会从模型读到的内容里隐藏：
+
+- 指令文本和 `run_code` 的 `code` 描述不再列出它；
+- 程序的工具绑定仍然保留，所以程序里按名字调用它时，调用会进入流水线，由宿主的 `tools/pre-execute` 监听拒绝，模型得到「工具 <名字> 已被用户在 MCP 设置里禁用。」，而不是一个看不出原因的 `ReferenceError`。
+
+隐藏每次组装指令、每次生成描述时重新读取，名单改动在下一步生效。服务不存在、抛错或名单为空时不隐藏任何工具。
+
+本插件只隐藏，不拒绝；拒绝由 `mcp-ui` 的监听负责，没有它就没有拒绝（只是模型看不到这个工具）。原生执行器没有隐藏的途径，模型调用被禁用的工具时只能走拒绝。
 
 ## 与参考资料和原生执行器的差异
 
