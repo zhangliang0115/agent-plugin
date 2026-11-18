@@ -1,6 +1,6 @@
 # Claude Code
 
-- 核对版本：2.1.325（本机 `claude --version`）
+- 核对版本：2.1.327（本机 `claude --version`）
 - 核对日期：2026-11-15
 - 官方文档：<https://code.claude.com/docs/en/plugins-reference>
 - 稳定性：稳定；manifest 未知顶层字段会被忽略并告警
