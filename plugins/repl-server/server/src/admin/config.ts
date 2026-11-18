@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
+import {
+  canonicalToolDiscovery,
+  parseToolDiscoveryConfig,
+} from '../discovery/config.ts';
+import {
+  DiscoveryConfigError,
+  type ToolDiscoveryConfig,
+} from '../discovery/types.ts';
 import { SecretStoreError, assertSecretName, type SecretStore } from '../secrets/store.ts';
 import {
   assertServerUrl,
@@ -48,6 +56,8 @@ export interface ServerConfigRecord {
   tags?: readonly string[] | null;
   timeoutMs?: number;
   maxConcurrency?: number;
+  /** Decoded discovery config; absent or null means static. */
+  toolDiscovery?: ToolDiscoveryConfig | null;
 }
 
 /** `GET /servers` row: names and placeholders only, never values. */
@@ -68,6 +78,7 @@ export interface ServerView {
   tags: string[];
   timeoutMs: number;
   maxConcurrency: number;
+  toolDiscovery?: ToolDiscoveryConfig;
   missingSecrets: string[];
 }
 
@@ -97,6 +108,8 @@ export interface ConfigServerEntry {
   tags: string[];
   timeoutMs: number;
   maxConcurrency: number;
+  /** Present only for lazy-discovery servers; absent means static. */
+  toolDiscovery?: ToolDiscoveryConfig;
 }
 
 export interface ConfigDocument {
@@ -110,11 +123,21 @@ export interface ConfigDiff {
   removed: string[];
 }
 
+/** One validation finding, including the discovery code when applicable. */
+export interface ConfigImportIssue {
+  path: string;
+  message: string;
+  code?: string;
+  details?: unknown;
+}
+
 export interface ConfigImportDryRun {
   valid: boolean;
   diff: ConfigDiff;
   /** Present only when the document has validation errors. */
   errors?: string[];
+  /** Structured form of `errors` (discovery issues carry their 422 code). */
+  issues?: ConfigImportIssue[];
   /** Referenced secrets without a stored value. Warnings, not blockers. */
   missingSecrets?: string[];
 }
@@ -191,11 +214,13 @@ export interface ConfigAdmin {
 export class ConfigValidationError extends Error {
   readonly code = 'CONFIG_INVALID';
   readonly errors: readonly string[];
+  readonly issues: readonly ConfigImportIssue[];
 
-  constructor(errors: readonly string[]) {
+  constructor(errors: readonly string[], issues: readonly ConfigImportIssue[] = []) {
     super(`config import rejected: ${errors.join('; ')}`);
     this.name = 'ConfigValidationError';
     this.errors = [...errors];
+    this.issues = [...issues];
   }
 }
 
@@ -227,6 +252,7 @@ interface ImportPlan {
   valid: boolean;
   servers: ServerConfigRecord[];
   errors: string[];
+  issues: ConfigImportIssue[];
   diff: ConfigDiff;
   dryRun: ConfigImportDryRun;
 }
@@ -413,6 +439,7 @@ function normalizeArgs(
 function normalizeServerEntry(
   raw: RawServerEntry,
   errors: string[],
+  issues: ConfigImportIssue[],
 ): ServerConfigRecord | null {
   const where = raw.where;
   const value = raw.value;
@@ -506,6 +533,27 @@ function normalizeServerEntry(
     errors,
   );
 
+  // The discovery config must go through the same §2.2 validator as PATCH;
+  // silently dropping it would make export → import lose lazy mode (07 §2.3).
+  let toolDiscovery: ToolDiscoveryConfig | undefined;
+  if (value.toolDiscovery !== undefined && value.toolDiscovery !== null) {
+    try {
+      const parsed = parseToolDiscoveryConfig(value.toolDiscovery, {
+        field: `${where}.toolDiscovery`,
+      });
+      if (parsed !== null) toolDiscovery = parsed;
+    } catch (error) {
+      if (!(error instanceof DiscoveryConfigError)) throw error;
+      errors.push(`${where}.toolDiscovery: ${error.message}`);
+      issues.push({
+        path: `${where}.toolDiscovery`,
+        message: error.message,
+        code: error.code,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      });
+    }
+  }
+
   return {
     id,
     label,
@@ -521,6 +569,7 @@ function normalizeServerEntry(
     summary,
     category,
     tags: readStringArray(value.tags, `${where}.tags`, errors),
+    ...(toolDiscovery === undefined ? {} : { toolDiscovery }),
     timeoutMs: readOptionalInteger(
       value.timeoutMs,
       `${where}.timeoutMs`,
@@ -540,7 +589,11 @@ function normalizeServerEntry(
   };
 }
 
-function normalizeDocument(input: unknown, errors: string[]): ServerConfigRecord[] {
+function normalizeDocument(
+  input: unknown,
+  errors: string[],
+  issues: ConfigImportIssue[],
+): ServerConfigRecord[] {
   if (!isRecord(input)) {
     errors.push('config must be a JSON object');
     return [];
@@ -574,6 +627,7 @@ function normalizeDocument(input: unknown, errors: string[]): ServerConfigRecord
     const server = normalizeServerEntry(
       { key: raw.key, value: raw.value, where: raw.where },
       errors,
+      issues,
     );
     if (server === null) continue;
     if (seen.has(server.id)) {
@@ -625,6 +679,7 @@ function canonicalServer(server: ServerConfigRecord): string {
     tags: [...(server.tags ?? [])].map((tag) => tag.trim()).filter(Boolean).sort(),
     timeoutMs: server.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxConcurrency: server.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+    toolDiscovery: canonicalToolDiscovery(server.toolDiscovery),
   });
 }
 
@@ -665,7 +720,8 @@ async function buildImportPlan(
   secrets: SecretStore,
 ): Promise<ImportPlan> {
   const errors: string[] = [];
-  const servers = normalizeDocument(input, errors);
+  const issues: ConfigImportIssue[] = [];
+  const servers = normalizeDocument(input, errors, issues);
   const diff = diffServers(current, servers);
 
   const referenced = new Set<string>();
@@ -679,9 +735,10 @@ async function buildImportPlan(
 
   const dryRun: ConfigImportDryRun = { valid: errors.length === 0, diff };
   if (errors.length > 0) dryRun.errors = errors;
+  if (issues.length > 0) dryRun.issues = issues;
   if (missingSecrets.length > 0) dryRun.missingSecrets = missingSecrets;
 
-  return { valid: errors.length === 0, servers, errors, diff, dryRun };
+  return { valid: errors.length === 0, servers, errors, issues, diff, dryRun };
 }
 
 function toServerView(
@@ -712,6 +769,9 @@ function toServerView(
   }
   if (server.category !== undefined && server.category !== null) {
     view.category = server.category;
+  }
+  if (server.toolDiscovery !== undefined && server.toolDiscovery !== null) {
+    view.toolDiscovery = server.toolDiscovery;
   }
   return view;
 }
@@ -746,6 +806,9 @@ function toConfigEntry(server: ServerConfigRecord): ConfigServerEntry {
   }
   if (server.category !== undefined && server.category !== null) {
     entry.category = server.category;
+  }
+  if (server.toolDiscovery !== undefined && server.toolDiscovery !== null) {
+    entry.toolDiscovery = server.toolDiscovery;
   }
   return entry;
 }
@@ -842,7 +905,7 @@ export function createConfigAdmin(deps: ConfigAdminDeps): ConfigAdmin {
     ): Promise<ConfigImportDryRun | ConfigImportStarted> {
       const plan = await buildImportPlan(input, await repository.listServers(), secrets);
       if (options.dryRun === true) return plan.dryRun;
-      if (!plan.valid) throw new ConfigValidationError(plan.errors);
+      if (!plan.valid) throw new ConfigValidationError(plan.errors, plan.issues);
 
       const run = async (): Promise<void> => {
         await importTarget.applyImport({

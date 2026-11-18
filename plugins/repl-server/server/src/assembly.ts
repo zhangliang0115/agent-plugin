@@ -11,9 +11,20 @@ import { createAdminServersHandler, createOperationLauncher, type AdminOperation
 import { createAdminSettingsHandler } from './admin/settings.ts';
 import { createAdminToolsHandler } from './admin/tools.ts';
 import { createAdminConfigRoutes, operationStarterFromLauncher } from './admin/config-routes.ts';
+import { createAdminReportsHandler } from './admin/reports.ts';
+import { createAdminAlertsHandler } from './admin/alerts.ts';
+import { createAdminAiHandler } from './admin/ai.ts';
+import { parseCreateServer } from './admin/servers.ts';
 import { createEventHub } from './admin/events.ts';
 import { createAdminSession } from './admin/session.ts';
 import { createAuditRuntime } from './audit/runtime.ts';
+import { createAlertConfigStore } from './alerts/config-store.ts';
+import { createAlertDispatcher } from './alerts/dispatcher.ts';
+import { createAiService } from './ai/index.ts';
+import { createDbReportStore } from './reports/store.ts';
+import { createReportService } from './reports/service.ts';
+import { createDiscoveryService } from './discovery/service.ts';
+import { createAdminDiscoveryHandler } from './discovery/handler.ts';
 import { createFileSecretStore } from './secrets/store.ts';
 import { handleAdminHttp } from './admin/http-adapter.ts';
 import { createSearchPreview, createCatalogService } from './catalog/index.ts';
@@ -160,6 +171,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       });
     },
   };
+  let discoveryService: ReturnType<typeof createDiscoveryService> | null = null;
+  let aiService: ReturnType<typeof createAiService> | null = null;
   const poolRuntime = createPoolRuntime({
     servers: serverStore,
     secrets,
@@ -174,9 +187,18 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     policies: {
       get: async (serverId, toolName) => {
         const tool = await toolStore.get(serverId, toolName);
-        return tool === null ? null : { concurrency: tool.concurrency, enabled: tool.enabled };
+        return tool === null
+          ? null
+          : {
+              concurrency: tool.concurrency,
+              enabled: tool.enabled,
+              discoveredVia: tool.discoveredVia,
+              stale: tool.stale,
+              staleOverride: tool.staleOverride,
+            };
       },
     },
+    prepareProvider: (serverId, toolName) => discoveryService?.prepareProvider(serverId, toolName) ?? null,
     onTools: async (serverId, tools) => {
       for (const tool of tools) {
         upsertTool(db, serverId, {
@@ -186,6 +208,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         });
       }
       catalog.refreshServer(serverId);
+      void aiService?.onToolsIndexed(serverId);
     },
     onStderr: (serverId, chunk) => log(`[pool ${serverId}] stderr ${chunk.length} bytes`),
     log,
@@ -217,21 +240,96 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   };
   const poolStateTimer = setInterval(publishPoolState, 2_000);
   poolStateTimer.unref();
+
+  const auditSink = {
+    write: (event: AuditEvent) => {
+      audit.recordTask({ ...event, ts: event.ts ?? new Date().toISOString() });
+    },
+  };
+  const reportStore = createDbReportStore(db);
+  const alertConfig = createAlertConfigStore({ db, secrets });
+  const alertDispatcher = createAlertDispatcher({
+    store: reportStore,
+    config: alertConfig,
+    audit: auditSink,
+    log,
+  });
+  const reports = createReportService({ store: reportStore, alerts: alertDispatcher, audit: auditSink, log });
+
+  discoveryService = createDiscoveryService({
+    db,
+    servers: serverStore,
+    tools: toolStore,
+    catalog,
+    pool: poolRuntime,
+  });
+
+  aiService = createAiService({
+    db,
+    servers: serverStore,
+    tools: toolStore,
+    catalog,
+    settings: settingsStore,
+    dataDir,
+    parseCreateServer,
+    log,
+    onAiRun: (event) => {
+      audit.recordTask({ ...event, ts: event.ts ?? new Date().toISOString() });
+    },
+  });
+  const ai = aiService;
+
+  // Admin mutations feed the AI annotation pipeline; the AI service keeps its
+  // own direct store for its create path, so hooks are added only here.
+  const adminServerStore = {
+    list: () => serverStore.list(),
+    get: (id: string) => serverStore.get(id),
+    revision: () => serverStore.revision(),
+    create: async (config: Parameters<typeof serverStore.create>[0]) => {
+      const result = await serverStore.create(config);
+      ai.onServerCreated(result.server.id);
+      return result;
+    },
+    update: async (
+      id: string,
+      patch: Parameters<typeof serverStore.update>[1],
+      expectedRevision: number,
+    ) => {
+      const result = await serverStore.update(id, patch, expectedRevision);
+      ai.onServerMutated(id);
+      return result;
+    },
+    remove: async (id: string, expectedRevision: number) => {
+      const result = await serverStore.remove(id, expectedRevision);
+      ai.onServerMutated(id);
+      return result;
+    },
+  };
+
   const adminHandlers = [
-    createAdminServersHandler({ servers: serverStore, pool: poolControl, operations }),
+    createAdminServersHandler({
+      servers: adminServerStore,
+      pool: poolControl,
+      operations,
+      discovery: { demote: (id: string) => discoveryService?.demote(id) ?? 0 },
+    }),
     createAdminToolsHandler({
-      servers: serverStore,
+      servers: adminServerStore,
       tools: toolStore,
       retrieval: createSearchPreview({ db }),
     }),
     createAdminClientsHandler({ bindings: bindingStore, onBindingChanged: async () => 0 }),
     createAdminSettingsHandler({ settings: settingsStore }),
-    createAdminDiscoverHandler({ servers: serverStore }),
+    createAdminDiscoverHandler({ servers: adminServerStore }),
     createAdminConfigRoutes({
       secrets,
-      servers: serverStore,
+      servers: adminServerStore,
       operations: operationStarterFromLauncher(operations),
     }),
+    createAdminReportsHandler({ reports }),
+    createAdminAlertsHandler({ alerts: alertConfig, dispatcher: alertDispatcher }),
+    createAdminDiscoveryHandler({ service: discoveryService }),
+    createAdminAiHandler({ ai }),
     ...audit.handlers(),
   ];
 
@@ -327,6 +425,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     catalog,
     tasks,
     dispatcher,
+    reports,
     log,
     frames: {
       recordIn: (input) => audit.recordFrameIn(input as unknown as Parameters<typeof audit.recordFrameIn>[0]),
@@ -349,6 +448,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     log(`repl-server: pool preload failed: ${(error as Error).message}`);
   });
   publishPoolState();
+  alertDispatcher.start();
 
   return {
     server,
@@ -362,8 +462,9 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       await serveRuntime.disposeAll();
       eventsHub.close();
       auditHub.close();
-      await audit.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await alertDispatcher.close();
+      await audit.close();
       db.close();
     },
   };

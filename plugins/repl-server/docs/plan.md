@@ -43,7 +43,7 @@
 | `srv-10-admin-events-sse` | 管理端 SSE：/admin/api/events、Last-Event-ID 回放与四类事件 | srv-01-http-shell, srv-09-auth-matrix | 1d |
 | `srv-11-pool-lifecycle` | 第三方连接池：懒连接去重、stdio 隔离、健康检查、退避重连与熔断 | srv-00-sdk-spike, srv-01-http-shell | 2d |
 | `srv-12-pool-gates` | 连接池并发：per-server 读写锁、全局 exclusive 准入、binding 轮转与取消隔离 | srv-11-pool-lifecycle | 2d |
-| `srv-13-tool-registry` | 4 个工具注册与 alwaysLoad：冻结 schema、annotations、动态 description | srv-04-discover-methods, srv-18-protocol-doc | 1d |
+| `srv-13-tool-registry` | 5 个工具注册与 alwaysLoad：冻结 schema、annotations、动态 description（含 `report_problem`） | srv-04-discover-methods, srv-18-protocol-doc | 1d |
 | `srv-14-mcp-tasks` | 手写 MCP tasks 层：CreateTaskResult 判定、双 id 空间与 get/cancel/update | srv-04-discover-methods, srv-07-exec-sessions, srv-18-protocol-doc | 2d |
 | `srv-15-tools-call` | tools/call 路由：content-only XML、isError/errorInfo、search/describe/wait_tasks 语义 | srv-07-exec-sessions, srv-09-auth-matrix, srv-13-tool-registry, srv-14-mcp-tasks, srv-18-protocol-doc | 1d |
 | `srv-16-protocol-frames` | 协议帧记录：summary/full、请求响应配对、脱敏、256KB 截断与丢帧统计 | srv-01-http-shell, srv-04-discover-methods | 1d |
@@ -82,7 +82,7 @@
 |---|---|---|---|
 | `RST-T01` | 提交合规的 MCP probe fixture（HTTP：discover/tools/tasks get/cancel/update） | — | 1d |
 | `RST-T02` | 测试基座：隔离环境、子进程生命周期与 Streamable HTTP/stdio JSON-RPC 客户端 | — | 1d |
-| `RST-T03` | 协议契约测试：server/discover、4 工具面与 MCP tasks 方法 | RST-T02, 外部实现：/mcp Streamable HTTP transport 与手写 discover/tasks 方法表 | 2d |
+| `RST-T03` | 协议契约测试：server/discover、5 工具面与 MCP tasks 方法 | RST-T02, 外部实现：/mcp Streamable HTTP transport 与手写 discover/tasks 方法表 | 2d |
 | `RST-T04` | 结果契约测试：content only、repl-output XML 与 wait_tasks | RST-T02, 外部实现：run_script 执行器、XML renderer、wait_tasks 队列 | 1d |
 | `RST-T05` | 身份与会话生命周期契约测试（binding/client、401、DELETE /mcp、重连） | RST-T02, 外部实现：token 解析、client_bindings、/mcp 传输会话、DELETE /mcp、/admin/api/clients | 1d |
 | `RST-T06` | 并发与容量契约测试（serial=per-server 写锁、exclusive、配额默认值） | RST-T01, RST-T02, RST-T07, 外部实现：工具路由并发闸门、per-server 锁、容量与 LRU | 2d |

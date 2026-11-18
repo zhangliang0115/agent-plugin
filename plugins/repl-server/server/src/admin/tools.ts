@@ -49,6 +49,8 @@ export interface ToolRecord {
   tags: string[];
   category: string | null;
   schema: unknown;
+  /** `search` rows come from lazy-load scans; only those are warmed before a call. */
+  discoveredVia: 'static' | 'search';
   stale: boolean;
   staleOverride: boolean;
   firstSeenAt?: string;
@@ -195,8 +197,12 @@ function viewTool(tool: ToolRecord, server: ServerRecord): Record<string, unknow
       tags: effectiveTags(server, tool),
       category: tool.category ?? server.category,
       stale: tool.stale,
-      // Mirrors the four visibility gates: server enabled, tool enabled, stale override.
-      exposed: server.enabled && tool.enabled && (!tool.stale || tool.staleOverride),
+      // Mirrors the executor gates: server enabled, tool enabled, stale blocks `search`
+      // rows even when the administrator set `staleOverride` (design 07 §4.7).
+      exposed:
+        server.enabled &&
+        tool.enabled &&
+        (!tool.stale || (tool.staleOverride && tool.discoveredVia !== 'search')),
     },
   };
 }

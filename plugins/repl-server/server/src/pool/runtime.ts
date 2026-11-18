@@ -22,6 +22,7 @@ import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 import type { ToolCallRequest } from '@zhangliang0115/repl-server-core/src/types.ts';
 
 import type { ServerPoolControl, ServerRuntimeState } from '../admin/servers.ts';
+import type { ToolDiscoveryConfig } from '../discovery/types.ts';
 import type { AuditSink, Clock, ProcessLedger } from '../ports.ts';
 import { resolveServerSecrets } from '../secrets/resolve.ts';
 import type { SecretField, SecretFieldValue } from '../secrets/resolve.ts';
@@ -32,6 +33,7 @@ import { HealthMonitor } from './health.ts';
 import type { HealthTimerApi } from './health.ts';
 import {
   ConnectionPool,
+  type PoolCallPrepare,
   type PoolClientFactory,
   type PoolEntrySnapshot,
   type PoolServerSpec,
@@ -60,6 +62,8 @@ export interface PoolRuntimeServerRecord {
   /** Per-server config version; copied to `PoolServerSpec.cfgVersion`. */
   revision: number;
   connectMode?: 'lazy' | 'eager';
+  /** Lazy-tool discovery config; `null`/absent means a static catalog. */
+  toolDiscovery?: ToolDiscoveryConfig | null;
 }
 
 /** Configuration source implemented by the admin `ServerStore`. */
@@ -76,6 +80,11 @@ export type PoolRuntimeSecretSource = Pick<SecretStore, 'get'>;
 export interface PoolToolPolicy {
   concurrency?: ConcurrencyPolicy;
   enabled?: boolean;
+  /** Catalog origin; only `search` rows are warmed before a call. */
+  discoveredVia?: 'static' | 'search';
+  /** Rows marked stale by a scan are not callable, even with `staleOverride`. */
+  stale?: boolean;
+  staleOverride?: boolean;
 }
 
 /** Tool policy source implemented by the admin `ToolStore`. */
@@ -84,6 +93,31 @@ export interface PoolToolPolicySource {
     serverId: string,
     toolName: string,
   ): Promise<PoolToolPolicy | null | undefined> | PoolToolPolicy | null | undefined;
+}
+
+/** One call-time warm-up descriptor produced by the discovery layer. */
+export interface PoolRuntimePrepareInfo {
+  prepare: PoolCallPrepare;
+  searchTool: string;
+  query: string;
+  args: unknown;
+}
+
+/**
+ * Injected by assembly and backed by the discovery service. Returning `null`
+ * means "no warm-up needed" (static tool, prepareOnCall=false, stale row, …).
+ */
+export type PoolPrepareProvider = (
+  serverId: string,
+  toolName: string,
+) => PoolRuntimePrepareInfo | null | Promise<PoolRuntimePrepareInfo | null>;
+
+export interface PoolDiscoverOptions {
+  tool: string;
+  args: unknown;
+  signal?: AbortSignal;
+  /** Caller-side budget, kept for logging; the pool applies its own call timeout. */
+  timeoutMs?: number;
 }
 
 /** Optional background ping loop settings; omitted means enabled at 15s. */
@@ -133,6 +167,11 @@ export interface PoolRuntimeOptions {
   retireDrainTimeoutMs?: number;
   /** Max wait for the global exclusive gate; defaults to 30s. */
   exclusiveTimeoutMs?: number;
+  /**
+   * Builds a warm-up request for a discovered tool. Assembly wires this to the
+   * discovery service; without it no call ever prepares.
+   */
+  prepareProvider?: PoolPrepareProvider;
 }
 
 export interface PoolRuntimeSnapshot {
@@ -160,6 +199,14 @@ export interface PoolToolCallOptions {
 export interface PoolRuntime {
   control: ServerPoolControl;
   callTool(call: ToolCallRequest, options?: PoolToolCallOptions): Promise<unknown>;
+  /**
+   * Runs the upstream search tool on the shared pooled connection under the
+   * server's serial gate. Used by discovery previews; returns the raw result
+   * and never publishes tools or bumps the catalog.
+   */
+  discoverTools(serverId: string, options: PoolDiscoverOptions): Promise<unknown>;
+  /** Drops the connection-level warm-up cache (after a scan changed the tool set). */
+  invalidatePrepared(serverId: string): void;
   snapshot(): PoolRuntimeSnapshot;
   dispose(): Promise<void>;
   /** Registers every configured server and connects the eager ones. */
@@ -174,6 +221,13 @@ interface CachedSpec {
   cfgVersion: number;
   enabled: boolean;
   spec: PoolServerSpec;
+}
+
+interface ResolvedToolPolicy {
+  concurrency: ConcurrencyPolicy;
+  discoveredVia?: 'static' | 'search';
+  stale: boolean;
+  staleOverride: boolean;
 }
 
 interface ToolRoute {
@@ -275,6 +329,22 @@ function retiringError(serverId: string): McpToolError {
   });
 }
 
+/**
+ * A discovered tool that the latest scan did not return. `staleOverride` only
+ * preserves search visibility; callability is revoked for every stale row.
+ */
+function staleToolError(serverId: string, tool: string): McpToolError {
+  return new McpToolError(
+    `MCP tool ${serverId}.${tool} is stale: the latest discovery scan did not return it`,
+    {
+      code: 'MCP_DISCOVERY_TOOL_STALE',
+      server: serverId,
+      tool,
+      retryable: false,
+    },
+  );
+}
+
 class PoolRuntimeImpl implements PoolRuntime {
   readonly pool: ConnectionPool;
   readonly gates: PoolGates;
@@ -339,10 +409,27 @@ class PoolRuntimeImpl implements PoolRuntime {
     if (!record.enabled) throw disabledError(route.server);
 
     const policy = await this.resolvePolicy(route.server, route.tool);
+    // A scan said the tool is gone. `staleOverride` keeps it searchable, not
+    // callable (design 03 §5.1 / 07 §4.7); the script proxy can bypass search,
+    // so the check belongs here as well.
+    if (policy.discoveredVia === 'search' && policy.stale) {
+      throw staleToolError(route.server, route.tool);
+    }
+
+    let prepare: PoolCallPrepare | undefined;
+    if (this.needsPrepare(record, policy)) {
+      const info = await this.options.prepareProvider?.(route.server, route.tool);
+      if (info !== null && info !== undefined) prepare = info.prepare;
+    }
+    // Upstream lazy registration may overwrite the connection's current tool
+    // set, so prepared calls must not interleave with each other.
+    const effectivePolicy: ConcurrencyPolicy =
+      prepare !== undefined && policy.concurrency === 'parallel' ? 'serial' : policy.concurrency;
+
     const bindingId = options.bindingId ?? null;
 
     return await this.track(route.server, () =>
-      this.gates.run(route.server, bindingId, policy, async () => {
+      this.gates.run(route.server, bindingId, effectivePolicy, async () => {
         this.assertUsable();
         if (this.retiring.has(route.server)) throw retiringError(route.server);
 
@@ -354,6 +441,7 @@ class PoolRuntimeImpl implements PoolRuntime {
         const result = await this.pool.callTool(route.server, route.tool, call.args, {
           bindingId,
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
+          ...(prepare === undefined ? {} : { prepare }),
         });
 
         // The first version does not proxy upstream tasks. Dropping the task id
@@ -364,6 +452,58 @@ class PoolRuntimeImpl implements PoolRuntime {
         }
         return result;
       }),
+    );
+  }
+
+  async discoverTools(serverId: string, options: PoolDiscoverOptions): Promise<unknown> {
+    this.assertUsable();
+    const record = await this.ensureRegistered(serverId);
+    if (!record.enabled) throw disabledError(serverId);
+    this.assertConnectable(record);
+
+    // Serial on purpose: the search may rewrite the connection's current tool
+    // set, so it must not interleave with business calls. The gate is not
+    // re-entered from inside the callback (that would deadlock on the write lock).
+    return await this.gates.run(serverId, null, 'serial', async () => {
+      this.assertUsable();
+      if (this.retiring.has(serverId)) throw retiringError(serverId);
+      this.assertScanActive(serverId, options);
+      await this.pool.ensureConnected(serverId);
+      // A queued gate callback can start after the caller's deadline fired.
+      this.assertScanActive(serverId, options);
+      return await this.pool.callToolDirect(serverId, options.tool, options.args, {
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+    });
+  }
+
+  invalidatePrepared(serverId: string): void {
+    this.pool.invalidatePrepared(serverId);
+  }
+
+  private assertScanActive(serverId: string, options: PoolDiscoverOptions): void {
+    if (options.signal?.aborted === true) {
+      throw new McpToolError(`discovery scan on ${serverId} was cancelled`, {
+        code: 'MCP_CALL_CANCELLED',
+        server: serverId,
+        tool: options.tool,
+      });
+    }
+  }
+
+  /** Lazy tools are warmed only when the server config and catalog row agree. */
+  private needsPrepare(
+    record: PoolRuntimeServerRecord,
+    policy: ResolvedToolPolicy,
+  ): boolean {
+    if (this.options.prepareProvider === undefined) return false;
+    if (policy.discoveredVia !== 'search' || policy.stale) return false;
+    const config = record.toolDiscovery;
+    return (
+      config !== null &&
+      config !== undefined &&
+      config.mode === 'search' &&
+      config.prepareOnCall !== false
     );
   }
 
@@ -757,7 +897,10 @@ class PoolRuntimeImpl implements PoolRuntime {
     return spec;
   }
 
-  private async resolvePolicy(serverId: string, toolName: string): Promise<ConcurrencyPolicy> {
+  private async resolvePolicy(
+    serverId: string,
+    toolName: string,
+  ): Promise<ResolvedToolPolicy> {
     const source = this.options.policies;
     const policy = source === undefined ? null : await source.get(serverId, toolName);
     if (policy !== null && policy !== undefined && policy.enabled === false) {
@@ -775,7 +918,16 @@ class PoolRuntimeImpl implements PoolRuntime {
         { code: 'MCP_TOOL_ERROR', server: serverId, tool: toolName },
       );
     }
-    return concurrency;
+    const discoveredVia =
+      policy?.discoveredVia === 'static' || policy?.discoveredVia === 'search'
+        ? policy.discoveredVia
+        : undefined;
+    return {
+      concurrency,
+      ...(discoveredVia === undefined ? {} : { discoveredVia }),
+      stale: policy?.stale === true,
+      staleOverride: policy?.staleOverride === true,
+    };
   }
 
   private async publishTools(serverId: string): Promise<void> {

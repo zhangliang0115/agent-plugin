@@ -28,7 +28,7 @@ import {
   updateClientBinding,
   type ClientBindingRecord,
 } from './db/clients.ts';
-import { getRevision, getSetting, patchSettings } from './db/meta.ts';
+import { getRevision, listSettings, patchSettings } from './db/meta.ts';
 import {
   createServer,
   deleteServer,
@@ -44,6 +44,7 @@ import {
   patchTool,
   type ToolRecord as DbToolRecord,
 } from './db/tools.ts';
+import { decodeStoredDiscovery, toolDiscoveryToJson } from './discovery/config.ts';
 
 function toAdminServer(row: DbServerRecord): AdminServerRecord {
   return {
@@ -64,6 +65,7 @@ function toAdminServer(row: DbServerRecord): AdminServerRecord {
     tags: row.tags,
     timeoutMs: row.timeoutMs,
     maxConcurrency: row.maxConcurrency,
+    toolDiscovery: decodeStoredDiscovery(row.discoveryJson),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     revision: row.revision,
@@ -89,6 +91,7 @@ function toDbServer(config: ServerConfig): NewServer {
     tags: config.tags,
     timeoutMs: config.timeoutMs,
     maxConcurrency: config.maxConcurrency,
+    discoveryJson: toolDiscoveryToJson(config.toolDiscovery),
   };
 }
 
@@ -123,7 +126,12 @@ export class DbServerStore implements ServerStore {
     expectedRevision: number,
   ): Promise<{ server: AdminServerRecord; revision: number }> {
     assertRevision(getRevision(this.db), expectedRevision);
-    const result = updateServer(this.db, id, patch as Parameters<typeof updateServer>[2]);
+    const { toolDiscovery, ...rest } = patch;
+    const dbPatch = {
+      ...(rest as Parameters<typeof updateServer>[2]),
+      ...(toolDiscovery === undefined ? {} : { discoveryJson: toolDiscoveryToJson(toolDiscovery) }),
+    };
+    const result = updateServer(this.db, id, dbPatch);
     if (result === null) throw new Error(`server ${id} not found`);
     return { server: toAdminServer(result.server), revision: result.revision };
   }
@@ -149,6 +157,7 @@ function toAdminTool(serverId: string, row: DbToolRecord): AdminToolRecord {
     tags: row.tags,
     category: row.category,
     schema: row.inputSchema,
+    discoveredVia: row.discoveredVia,
     stale: row.stale,
     staleOverride: row.staleOverride,
     firstSeenAt: row.firstSeenAt,
@@ -262,7 +271,7 @@ export class DbSettingsStore implements SettingsStore {
   }
 
   async read(): Promise<{ settings: StoredSettings; revision: number }> {
-    const stored = getSetting<StoredSettings>(this.db, 'settings') ?? {};
+    const stored = listSettings(this.db);
     return { settings: stored, revision: getRevision(this.db) };
   }
 

@@ -208,6 +208,7 @@ const EVENT_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'eval_end', label: 'eval_end' },
   { value: 'exec_start', label: 'exec_start' },
   { value: 'exec_end', label: 'exec_end' },
+  { value: 'ai_run', label: 'ai_run' },
 ];
 
 const STATUS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [

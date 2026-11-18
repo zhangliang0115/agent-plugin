@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
 import type { JsonRpcDispatcher } from './mcp/jsonrpc.ts';
 import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
+import type { ReportService } from './reports/service.ts';
 import type { TransportSessionRegistry } from './sessions/transport.ts';
 import type { McpTaskStore } from './tasks/mcp-tasks.ts';
 import { VERSION } from '@zhangliang0115/repl-server-core';
@@ -14,6 +15,8 @@ export interface McpContext {
   tasks: McpTaskStore;
   tasksDeclared: boolean;
   transportId: string;
+  /** Present when the report pipeline is wired; `report_problem` needs it. */
+  reports?: ReportService;
 }
 
 export interface AppOptions {
@@ -23,6 +26,8 @@ export interface AppOptions {
   catalog: Catalog;
   tasks: McpTaskStore;
   dispatcher: JsonRpcDispatcher<McpContext>;
+  /** Report service for the `report_problem` tool. */
+  reports?: ReportService;
   /** Returns true when the admin layer wrote the response. */
   admin?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
   /** Protocol-frame audit hooks (`summary`/`full` decided by the writer). */
@@ -215,6 +220,7 @@ export function createApp(options: AppOptions): Server {
         tasks: options.tasks,
         tasksDeclared: declaredTasks(message),
         transportId,
+        ...(options.reports === undefined ? {} : { reports: options.reports }),
       };
 
       const response = await options.dispatcher.handle(message, context);

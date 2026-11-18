@@ -19,6 +19,9 @@ import type { DbRow } from './schema.ts';
 
 export type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
 
+/** Where a catalog row came from: upstream `tools/list` or a discovery scan. */
+export type ToolDiscoverySource = 'static' | 'search';
+
 export interface ToolRecord {
   serverId: string;
   name: string;
@@ -36,6 +39,7 @@ export interface ToolRecord {
   schemaHash: string;
   category: string | null;
   compositeCode: string | null;
+  discoveredVia: ToolDiscoverySource;
   stale: boolean;
   staleOverride: boolean;
   firstSeenAt: string;
@@ -52,6 +56,10 @@ export interface ToolUpsert {
   type?: string | null;
   tags?: string[];
   category?: string | null;
+  /** Source for a new row; defaults to `static`. Existing rows keep their source. */
+  discoveredVia?: ToolDiscoverySource;
+  /** Rewrite an existing `static` row's source to `search`. Default false. */
+  overwriteStatic?: boolean;
 }
 
 /** Admin edits. `description` is stored in `description_override`. */
@@ -99,21 +107,27 @@ export function upsertTool(
   const name = requireToolName(input.name);
   const schemaJson = jsonText(input.inputSchema ?? {});
   const schemaHash = input.schemaHash ?? hashToolSchema(input.inputSchema);
+  const discoveredVia = requireDiscoverySource(input.discoveredVia ?? 'static');
   return withTransaction(db, () => {
     assertServerExists(db, serverId);
     const now = isoNow();
     const existing = getTool(db, serverId, name);
     if (existing) {
+      const nextSource =
+        existing.discoveredVia === 'static' && input.overwriteStatic === true
+          ? 'search'
+          : existing.discoveredVia;
       db.prepare(`
         UPDATE tools
         SET display_name = ?, description = ?, schema_json = ?, schema_hash = ?,
-            stale = 0, last_seen_at = ?
+            discovered_via = ?, stale = 0, last_seen_at = ?
         WHERE server_id = ? AND name = ?
       `).run(
         input.displayName ?? null,
         input.description ?? null,
         schemaJson,
         schemaHash,
+        nextSource,
         now,
         serverId,
         name,
@@ -125,13 +139,13 @@ export function upsertTool(
           enabled, concurrency, type, tags_json,
           index_description, index_summary, index_tags_json,
           schema_json, schema_hash, category, composite_code,
-          stale, stale_override, first_seen_at, last_seen_at
+          discovered_via, stale, stale_override, first_seen_at, last_seen_at
         ) VALUES (
           ?, ?, ?, ?, NULL,
           1, 'parallel', ?, ?,
           '', '', '[]',
           ?, ?, ?, NULL,
-          0, 0, ?, ?
+          ?, 0, 0, ?, ?
         )
       `).run(
         serverId,
@@ -143,6 +157,7 @@ export function upsertTool(
         schemaJson,
         schemaHash,
         input.category ?? null,
+        discoveredVia,
         now,
         now,
       );
@@ -163,24 +178,7 @@ export function patchTool(
     const current = getTool(db, serverId, name);
     if (!current) return null;
     const next = applyToolPatch(current, patch);
-    db.prepare(`
-      UPDATE tools
-      SET display_name = ?, description_override = ?, enabled = ?, concurrency = ?,
-          type = ?, tags_json = ?, category = ?, composite_code = ?, stale_override = ?
-      WHERE server_id = ? AND name = ?
-    `).run(
-      next.displayName,
-      next.descriptionOverride,
-      next.enabled ? 1 : 0,
-      next.concurrency,
-      next.type,
-      jsonText(next.tags),
-      next.category,
-      next.compositeCode,
-      next.staleOverride ? 1 : 0,
-      serverId,
-      name,
-    );
+    writeToolRow(db, next);
     refreshServerIndex(db, serverId, name);
     const revision = bumpRevision(db);
     return { tool: mustGetTool(db, serverId, name), revision };
@@ -231,7 +229,8 @@ export function refreshServerIndex(db: DatabaseSync, serverId: string, onlyName?
   }
 }
 
-function applyToolPatch(current: ToolRecord, patch: ToolPatch): ToolRecord {
+/** Applies admin-editable fields to an in-memory row; pure, no database access. */
+export function applyToolPatch(current: ToolRecord, patch: ToolPatch): ToolRecord {
   const next: ToolRecord = { ...current };
   if (patch.displayName !== undefined) next.displayName = patch.displayName;
   if (patch.description !== undefined) next.descriptionOverride = patch.description;
@@ -243,6 +242,35 @@ function applyToolPatch(current: ToolRecord, patch: ToolPatch): ToolRecord {
   if (patch.compositeCode !== undefined) next.compositeCode = patch.compositeCode;
   if (patch.staleOverride !== undefined) next.staleOverride = patch.staleOverride;
   return next;
+}
+
+/**
+ * Writes the admin-editable columns of an existing row. Runs in the caller's
+ * transaction and does not refresh indexes or bump the revision, so batch
+ * callers can do both once.
+ */
+export function writeToolRow(db: DatabaseSync, tool: ToolRecord): void {
+  const result = db.prepare(`
+    UPDATE tools
+    SET display_name = ?, description_override = ?, enabled = ?, concurrency = ?,
+        type = ?, tags_json = ?, category = ?, composite_code = ?, stale_override = ?
+    WHERE server_id = ? AND name = ?
+  `).run(
+    tool.displayName,
+    tool.descriptionOverride,
+    tool.enabled ? 1 : 0,
+    tool.concurrency,
+    tool.type,
+    jsonText(tool.tags),
+    tool.category,
+    tool.compositeCode,
+    tool.staleOverride ? 1 : 0,
+    tool.serverId,
+    tool.name,
+  );
+  if (Number(result.changes) === 0) {
+    throw new DbNotFoundError(`tool ${tool.serverId}.${tool.name} does not exist`);
+  }
 }
 
 function toTool(row: DbRow): ToolRecord {
@@ -263,6 +291,7 @@ function toTool(row: DbRow): ToolRecord {
     schemaHash: requireText(row, 'schema_hash'),
     category: readText(row, 'category'),
     compositeCode: readText(row, 'composite_code'),
+    discoveredVia: readDiscoverySource(row),
     stale: readFlag(row, 'stale'),
     staleOverride: readFlag(row, 'stale_override'),
     firstSeenAt: requireText(row, 'first_seen_at'),
@@ -290,6 +319,17 @@ function requireToolName(value: string): string {
 function requireConcurrency(value: string): ToolConcurrency {
   if (value === 'parallel' || value === 'serial' || value === 'exclusive') return value;
   throw new DbValidationError(`unknown tool concurrency: ${value}`);
+}
+
+function requireDiscoverySource(value: string): ToolDiscoverySource {
+  if (value === 'static' || value === 'search') return value;
+  throw new DbValidationError(`unknown tool discovery source: ${value}`);
+}
+
+/** Missing column (an unmigrated v1 schema) reads as `static`, the v1 default. */
+function readDiscoverySource(row: DbRow): ToolDiscoverySource {
+  const raw = readText(row, 'discovered_via');
+  return raw === null ? 'static' : requireDiscoverySource(raw);
 }
 
 function requireTags(value: string[]): string[] {

@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { openStateDb } from '../src/db/migrate.ts';
+import { DbSettingsStore } from '../src/assembly-stores.ts';
 import { getRevision, getSetting, listSettings, patchSettings, setSetting } from '../src/db/meta.ts';
 import {
   SEED_SERVER_IDS,
@@ -62,14 +63,14 @@ function readUserVersion(db: DatabaseSync): number {
   return Number(row?.['user_version'] ?? 0);
 }
 
-test('migration creates schema v1 once and seeds the fixed servers', (t) => {
+test('migration creates the current schema once and seeds the fixed servers', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'repl-server-db-'));
   const file = join(dir, 'state.db');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const first = openStateDb(file);
   try {
-    assert.equal(readUserVersion(first), 1);
+    assert.equal(readUserVersion(first), 2);
     assert.equal(count(first, 'SELECT count(*) AS n FROM servers'), 2);
     const seeds = first
       .prepare('SELECT id, transport FROM servers ORDER BY id')
@@ -99,7 +100,7 @@ test('migration creates schema v1 once and seeds the fixed servers', (t) => {
 
   const second = openStateDb(file);
   try {
-    assert.equal(readUserVersion(second), 1);
+    assert.equal(readUserVersion(second), 2);
     assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2);
     assert.equal(
       count(second, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"),
@@ -376,4 +377,26 @@ test('settings round-trip JSON values and bump the catalog revision', (t) => {
   assert.equal(second.revision, 2);
   assert.equal(getSetting(db, 'strict_auth'), false);
   assert.deepEqual(Object.keys(listSettings(db)), ['capacity', 'strict_auth']);
+});
+
+test('DbSettingsStore reads back the top-level keys written by replace', async (t) => {
+  const { db } = fixture(t);
+  const store = new DbSettingsStore(db);
+
+  const empty = await store.read();
+  assert.deepEqual(empty.settings, {});
+  assert.equal(empty.revision, 0);
+
+  const written = await store.replace(
+    { capacity: { maxExecSessions: 6, maxServeProcesses: 6 }, strictAuth: true },
+    0,
+  );
+  assert.equal(written.revision, 1);
+
+  const readBack = await store.read();
+  assert.deepEqual(readBack.settings, {
+    capacity: { maxExecSessions: 6, maxServeProcesses: 6 },
+    strictAuth: true,
+  });
+  assert.equal(readBack.revision, 1);
 });

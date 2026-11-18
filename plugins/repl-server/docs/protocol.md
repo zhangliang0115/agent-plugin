@@ -1,8 +1,8 @@
 # repl-server MCP 协议
 
-- 状态：已冻结（2026-11-18），实现以本文为准
+- 状态：已冻结（2026-11-18），实现以本文为准；工具面 5 个已实现并有测试
 - 协议版本：MCP `2026-07-28`（modern）；legacy `initialize` 只做兼容
-- 设计依据：learn-ai `claude-code/自建设计/` 01 §4.2、02 §4.2–4.4、03 §2
+- 设计依据：learn-ai `claude-code/自建设计/` 01 §4.2、02 §4.2–4.4、03 §2、06 §3.1
 - 传输：Streamable HTTP（stateful），`/mcp`；stdio 通过独立 bridge 转 HTTP
 
 ## 1. 端点
@@ -14,6 +14,8 @@
 | `/health` | 存活检查 | 无 |
 
 只绑 `127.0.0.1`，校验 `Host` 为 `127.0.0.1` / `localhost`（比较时先剥端口）。
+
+`/admin/api/reports`、`/admin/api/alerts/*`、`/admin/api/servers/:id/tools/discover`、`/admin/api/ai/*` 是管理面 HTTP 端点，**不属于本文的 MCP 契约**；其请求/响应形状以 `claude-code/自建设计/` 06–08 为准。
 
 ### 1.1 启动与数据根
 
@@ -93,18 +95,18 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ### 3.3 `tools/list`
 
-返回 4 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`。每个工具带：
+返回 5 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`。每个工具带：
 
-- `description`：`run_script` ≤2KB；其余一句话
+- `description`：`run_script` ≤2KB；其余一句话（`report_problem` ≤500 字符）
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
-- `annotations`：`run_script` 不设；其余 `readOnlyHint: true`、`idempotentHint: true`
+- `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
 
 **方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`tasks/get`、`tasks/cancel`、`tasks/update`。不支持 resources/prompts/logging/subscriptions；未知方法 `-32601`；批量请求不支持。
 
 ### 3.4 `tools/call`
 
-四种工具名。只有 `run_script` 可能返回 task。
+五种工具名。只有 `run_script` 可能返回 task；`search_tools`、`describe_tools`、`wait_tasks`、`report_problem` 永远同步返回 `resultType: "complete"`。`report_problem` 是 MCP 顶层工具，不进 `run_script` 的 `tools`，不占 eval 预算。
 
 #### 同步结果
 
@@ -237,6 +239,28 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 - 未知 id：`{ "ok": false, "error": { "code": "UNKNOWN_TASK", "unknownIds": [] } }`，同时 `isError: true`。
 - `status`：`completed` / `failed` / `cancelled`。
 
+### `report_problem`
+
+依据 06 §3.1 的冻结 schema。它是第 5 个工具，也是唯一不进入 `run_script` 脚本工具面的工具：调用形状是 `report_problem({...})`，不能用 `tools.` 前缀。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "detail": { "type": "string", "minLength": 1, "maxLength": 20000 },
+    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "context": { "type": "object", "additionalProperties": true }
+  },
+  "required": ["title", "detail", "severity"],
+  "additionalProperties": false
+}
+```
+
+- `title` / `detail` 按 trim 后的 Unicode 码点计数；`context` 的 8192 字节上限只在服务端强制。
+- 成功返回 `{ "ok": true, "reportId": "rep_...", "duplicate": false }`；去重命中返回已有 id 且 `duplicate: true`。
+- 永远同步返回，不参与 task 判定、不占 `run_script` 的调用预算。
+
 ## 5. `instructions`
 
 `instructions` 放完整提示词（02 §4.2 的模板），`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
@@ -291,6 +315,9 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 | `MCP_QUEUE_FULL` | 第三方池的 binding 队列已满 |
 | `MCP_CALL_TIMEOUT` | 单次 MCP 调用超时 |
 | `EXCLUSIVE_TIMEOUT` | `exclusive` 等待超过 30s |
+| `REPORT_RATE_LIMITED` | `report_problem` 超过每 owner 的 1 小时 20 条上限；带 `retryAfterMs` |
+| `REPORT_FAILED` | `report_problem` 落库失败 |
+| `REPORT_UNAVAILABLE` | 服务未接线（只可能出现在测试） |
 
 工具层错误一律 `isError: true`，正文是 `<repl-output>`；JSON-RPC 层只用于协议错误（未知方法、参数不是对象）。
 

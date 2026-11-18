@@ -1,7 +1,7 @@
-/** SQLite schema v1 for the repl-server config store, plus shared row helpers. @module */
+/** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -105,8 +105,59 @@ CREATE TRIGGER tools_au AFTER UPDATE ON tools BEGIN
 END;
 `;
 
+/**
+ * DDL for schema v2. Contains both the problem-report tables (06 §2.1) and the
+ * tool-discovery columns (07 §2.3); they share one migration step, so there is
+ * exactly one `applyV2`.
+ */
+export const SCHEMA_V2_SQL = `
+CREATE TABLE reports (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('mcp', 'admin')),
+  binding TEXT,
+  client TEXT NOT NULL DEFAULT '',
+  mcp TEXT NOT NULL DEFAULT '',
+  exec TEXT,
+  eval_id INTEGER,
+  owner_key TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  context_json TEXT,
+  fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'ack', 'closed')),
+  alert_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (alert_state IN ('pending', 'sending', 'sent', 'failed', 'skipped', 'no_webhook')),
+  alert_error TEXT,
+  alert_attempts INTEGER NOT NULL DEFAULT 0,
+  alert_updated_at TEXT,
+  alerted_at TEXT
+);
+
+CREATE INDEX reports_created_idx ON reports (created_at DESC, id DESC);
+CREATE INDEX reports_status_idx ON reports (status, created_at DESC);
+CREATE INDEX reports_owner_idx ON reports (owner_key, created_at DESC);
+CREATE INDEX reports_dedupe_idx ON reports (owner_key, fingerprint, created_at DESC);
+CREATE INDEX reports_alert_idx ON reports (alert_state, created_at);
+
+ALTER TABLE servers ADD COLUMN discovery_json TEXT
+  CHECK (discovery_json IS NULL OR json_valid(discovery_json));
+
+ALTER TABLE tools ADD COLUMN discovered_via TEXT NOT NULL DEFAULT 'static'
+  CHECK (discovered_via IN ('static', 'search'));
+
+CREATE INDEX tools_discovery_idx ON tools (server_id, discovered_via);
+`;
+
 export function createSchemaV1(db: DatabaseSync): void {
   db.exec(SCHEMA_V1_SQL);
+}
+
+export function createSchemaV2(db: DatabaseSync): void {
+  db.exec(SCHEMA_V2_SQL);
 }
 
 /** Raised when repository input violates a storage invariant. */

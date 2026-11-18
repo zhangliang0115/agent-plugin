@@ -274,6 +274,7 @@ function rowToTool(row: Record<string, unknown>): ToolRecord {
     tags: parseJson<string[]>(row['tags_json']),
     category: rowText(row, 'category'),
     schema: parseJson<unknown>(row['schema_json']),
+    discoveredVia: rowText(row, 'discovered_via') === 'search' ? 'search' : 'static',
     stale: rowInteger(row, 'stale') === 1,
     staleOverride: rowInteger(row, 'stale_override') === 1,
     firstSeenAt: String(row['first_seen_at']),

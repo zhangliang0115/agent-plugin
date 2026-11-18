@@ -33,6 +33,8 @@ export interface ServerRecord {
   cwd: string | null;
   url: string | null;
   headers: Record<string, unknown>;
+  /** Normalized tool-discovery config as a JSON string; `null` means static discovery. */
+  discoveryJson: string | null;
   enabled: boolean;
   connectMode: ConnectMode;
   summary: string | null;
@@ -56,6 +58,7 @@ export interface NewServer {
   cwd?: string | null;
   url?: string | null;
   headers?: Record<string, unknown>;
+  discoveryJson?: string | null;
   enabled?: boolean;
   connectMode?: ConnectMode;
   summary?: string | null;
@@ -104,6 +107,7 @@ export function createServer(db: DatabaseSync, input: NewServer): ServerWriteRes
   const args = requireJsonArray(input.args, 'args');
   const env = requireJsonObject(input.env, 'env');
   const headers = requireJsonObject(input.headers, 'headers');
+  const discoveryJson = requireDiscoveryJson(input.discoveryJson);
   const tags = requireTags(input.tags);
   const connectMode = requireConnectMode(input.connectMode ?? 'lazy');
   const timeoutMs = requirePositiveInteger(input.timeoutMs ?? 60000, 'timeoutMs');
@@ -117,9 +121,9 @@ export function createServer(db: DatabaseSync, input: NewServer): ServerWriteRes
     db.prepare(`
       INSERT INTO servers (
         id, label, transport, command, args_json, env_json, cwd, url, headers_json,
-        enabled, connect_mode, summary, summary_source, category, tags_json,
+        discovery_json, enabled, connect_mode, summary, summary_source, category, tags_json,
         timeout_ms, max_concurrency, created_at, updated_at, revision
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
       id,
       label,
@@ -130,6 +134,7 @@ export function createServer(db: DatabaseSync, input: NewServer): ServerWriteRes
       input.cwd ?? null,
       url,
       jsonText(headers),
+      discoveryJson,
       (input.enabled ?? true) ? 1 : 0,
       connectMode,
       input.summary ?? null,
@@ -158,8 +163,8 @@ export function updateServer(
     db.prepare(`
       UPDATE servers
       SET label = ?, transport = ?, command = ?, args_json = ?, env_json = ?, cwd = ?,
-          url = ?, headers_json = ?, enabled = ?, connect_mode = ?, summary = ?,
-          summary_source = ?, category = ?, tags_json = ?, timeout_ms = ?,
+          url = ?, headers_json = ?, discovery_json = ?, enabled = ?, connect_mode = ?,
+          summary = ?, summary_source = ?, category = ?, tags_json = ?, timeout_ms = ?,
           max_concurrency = ?, updated_at = ?, revision = revision + 1
       WHERE id = ?
     `).run(
@@ -171,6 +176,7 @@ export function updateServer(
       next.cwd,
       next.url,
       jsonText(next.headers),
+      next.discoveryJson,
       next.enabled ? 1 : 0,
       next.connectMode,
       next.summary,
@@ -215,6 +221,9 @@ function applyServerPatch(current: ServerRecord, patch: ServerPatch): ServerReco
   if (patch.cwd !== undefined) next.cwd = patch.cwd;
   if (patch.url !== undefined) next.url = patch.url;
   if (patch.headers !== undefined) next.headers = requireJsonObject(patch.headers, 'headers');
+  if (patch.discoveryJson !== undefined) {
+    next.discoveryJson = requireDiscoveryJson(patch.discoveryJson);
+  }
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
   if (patch.connectMode !== undefined) next.connectMode = requireConnectMode(patch.connectMode);
   if (patch.summary !== undefined) next.summary = patch.summary;
@@ -244,6 +253,7 @@ function toServer(row: DbRow): ServerRecord {
     cwd: readText(row, 'cwd'),
     url: readText(row, 'url'),
     headers: readNullableObject<Record<string, unknown>>(row, 'headers_json') ?? {},
+    discoveryJson: readText(row, 'discovery_json'),
     enabled: readFlag(row, 'enabled'),
     connectMode: requireConnectMode(requireText(row, 'connect_mode')),
     summary: readText(row, 'summary'),
@@ -306,6 +316,23 @@ function requireJsonObject(
   if (value === undefined) return {};
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new DbValidationError(`${field} must be an object`);
+  }
+  return value;
+}
+
+/**
+ * Discovery config is stored as JSON text because the repository never
+ * interprets it; callers parse and validate the shape.
+ */
+function requireDiscoveryJson(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') {
+    throw new DbValidationError('discoveryJson must be a JSON string');
+  }
+  try {
+    JSON.parse(value);
+  } catch {
+    throw new DbValidationError('discoveryJson must be valid JSON');
   }
   return value;
 }

@@ -19,6 +19,7 @@ import {
   ConfigValidationError,
   createConfigAdmin,
   type ConfigDiff,
+  type ConfigImportIssue,
   type ConfigImportTarget,
   type ConfigRepository,
   type OperationStarter,
@@ -93,7 +94,7 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
     if (!('diff' in preflight)) {
       throw new AdminApiError(500, 'IMPORT_FAILED', 'config preflight did not return a plan');
     }
-    if (!preflight.valid) throw invalidConfig(preflight.errors ?? []);
+    if (!preflight.valid) throw invalidConfig(preflight.errors ?? [], preflight.issues);
 
     let operationId: string;
     try {
@@ -103,7 +104,9 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
       }
       operationId = result.operationId;
     } catch (error) {
-      if (error instanceof ConfigValidationError) throw invalidConfig(error.errors);
+      if (error instanceof ConfigValidationError) {
+        throw invalidConfig(error.errors, error.issues);
+      }
       throw error;
     }
 
@@ -180,11 +183,33 @@ function readDryRunFlag(request: AdminRequest, body: Record<string, unknown>): b
   });
 }
 
-function invalidConfig(errors: readonly string[]): AdminApiError {
+function invalidConfig(
+  errors: readonly string[],
+  issues?: readonly ConfigImportIssue[],
+): AdminApiError {
   const fields: string[] = [];
   for (const message of errors) {
     const field = fieldOf(message);
     if (!fields.includes(field)) fields.push(field);
+  }
+  // Discovery validation carries its own 422 code (07 §2.3 / A-17); map it so
+  // an import failure is indistinguishable from the same error on PATCH.
+  const discoveryIssue = issues?.find(
+    (issue) =>
+      issue.code === 'DISCOVERY_SECRET_NOT_ALLOWED' ||
+      issue.code === 'DISCOVERY_CONFIG_INVALID',
+  );
+  if (discoveryIssue?.code !== undefined) {
+    return new AdminApiError(
+      422,
+      discoveryIssue.code,
+      `config import rejected: ${errors.join('; ')}`,
+      {
+        ...(discoveryIssue.details ?? {}),
+        fields,
+        errors: [...errors],
+      },
+    );
   }
   return new AdminApiError(
     400,
@@ -259,6 +284,7 @@ function configFromRecord(
     tags: [...(record.tags ?? [])],
     timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxConcurrency: record.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+    ...(record.toolDiscovery === undefined ? {} : { toolDiscovery: record.toolDiscovery }),
   };
 }
 
@@ -278,6 +304,7 @@ function patchFromRecord(record: ServerConfigRecord): ServerConfigPatch {
     tags: [...(record.tags ?? [])],
     timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxConcurrency: record.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+    ...(record.toolDiscovery === undefined ? {} : { toolDiscovery: record.toolDiscovery }),
   };
 }
 
@@ -318,6 +345,18 @@ function createServerStoreImportTarget(servers: ServerStore): ConfigImportTarget
           const previous = snapshot.get(desired.id) ?? current;
           if (current.transport !== desired.transport) {
             // `ServerStore.update` cannot change transport, so the row is replaced.
+            await servers.remove(desired.id, await servers.revision());
+            await servers.create(configFromRecord(desired));
+            state.replaced.push(previous);
+            continue;
+          }
+
+          // `ServerStore.update` can express "set discovery" but not "unset";
+          // an old document without toolDiscovery therefore replaces the row,
+          // which is also how the fallback handles a transport change.
+          const desiredDiscovery = desired.toolDiscovery ?? null;
+          const currentDiscovery = current.toolDiscovery ?? null;
+          if (desiredDiscovery === null && currentDiscovery !== null) {
             await servers.remove(desired.id, await servers.revision());
             await servers.create(configFromRecord(desired));
             state.replaced.push(previous);

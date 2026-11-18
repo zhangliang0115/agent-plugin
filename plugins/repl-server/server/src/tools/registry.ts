@@ -1,16 +1,27 @@
-/** Frozen MCP tool surface: the four tool definitions, argument validation and result shapes. @module */
+/** Frozen MCP tool surface: the five tool definitions, argument validation and result shapes. @module */
 
 import type { CatalogTool, ScriptOutcome } from '../ports.ts';
 
-export type ToolName = 'run_script' | 'search_tools' | 'describe_tools' | 'wait_tasks';
+export type ToolName =
+  | 'run_script'
+  | 'search_tools'
+  | 'describe_tools'
+  | 'wait_tasks'
+  | 'report_problem';
 
 export interface JsonSchemaProperty {
-  readonly type: 'string' | 'integer' | 'boolean' | 'array';
+  readonly type: 'string' | 'integer' | 'boolean' | 'array' | 'object';
   readonly items?: JsonSchemaProperty;
+  readonly enum?: readonly (string | number | boolean)[];
   readonly minimum?: number;
   readonly maximum?: number;
   readonly minItems?: number;
   readonly maxItems?: number;
+  /** String length in Unicode code points (06 §3.1). */
+  readonly minLength?: number;
+  readonly maxLength?: number;
+  /** Object shape hint for the published schema; unknown keys are not rejected here. */
+  readonly additionalProperties?: boolean;
   readonly default?: string | number | boolean;
 }
 
@@ -68,6 +79,9 @@ const DESCRIBE_TOOLS_DESCRIPTION =
 const WAIT_TASKS_DESCRIPTION =
   'Wait until the given eval tasks started with async: true finish (all unconsumed tasks when taskIds is omitted), consume their results, and return events plus a pending count.';
 
+const REPORT_PROBLEM_DESCRIPTION =
+  'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
+
 const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
@@ -111,12 +125,27 @@ const WAIT_TASKS_SCHEMA: ToolInputSchema = deepFreeze({
   additionalProperties: false,
 });
 
+/** Frozen schema from 06 §3.1; the 8 KB context limit is enforced server-side only. */
+export const REPORT_PROBLEM_SCHEMA: ToolInputSchema = deepFreeze({
+  type: 'object',
+  properties: {
+    title: { type: 'string', minLength: 1, maxLength: 200 },
+    detail: { type: 'string', minLength: 1, maxLength: 20_000 },
+    severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+    context: { type: 'object', additionalProperties: true },
+  },
+  required: ['title', 'detail', 'severity'],
+  additionalProperties: false,
+});
+
 /**
- * `tools/list` order is frozen: run_script, search_tools, describe_tools, wait_tasks.
- * `run_script` carries no annotations because scripts write files and run commands; marking it
- * read-only would let plan mode through and duplicate a retried call (docs/protocol.md §3.3).
- * protocol.md gives every other tool both hints; 01 §4.2 would omit idempotentHint on
- * wait_tasks because it consumes results, but the frozen protocol is the implementation source.
+ * `tools/list` order is frozen: run_script, search_tools, describe_tools, wait_tasks,
+ * report_problem. `run_script` carries no annotations because scripts write files and run
+ * commands; marking it read-only would let plan mode through and duplicate a retried call
+ * (docs/protocol.md §3.3). `report_problem` also carries none: it writes a row and does not
+ * promise idempotency (06 §3.1). protocol.md gives the other three both hints; 01 §4.2 would
+ * omit idempotentHint on wait_tasks because it consumes results, but the frozen protocol is
+ * the implementation source.
  */
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly ToolDefinition[]>([
   {
@@ -145,6 +174,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly T
     inputSchema: WAIT_TASKS_SCHEMA,
     _meta: { 'anthropic/alwaysLoad': true },
     annotations: { readOnlyHint: true, idempotentHint: true },
+  },
+  {
+    name: 'report_problem',
+    description: REPORT_PROBLEM_DESCRIPTION,
+    inputSchema: REPORT_PROBLEM_SCHEMA,
+    _meta: { 'anthropic/alwaysLoad': true },
   },
 ]);
 
@@ -184,8 +219,22 @@ function checkProperty(
   value: unknown,
 ): string | null {
   switch (property.type) {
-    case 'string':
-      return typeof value === 'string' ? null : `${tool}.${key} must be a string, got ${valueType(value)}`;
+    case 'string': {
+      if (typeof value !== 'string') {
+        return `${tool}.${key} must be a string, got ${valueType(value)}`;
+      }
+      if (property.enum !== undefined && !property.enum.includes(value)) {
+        return `${tool}.${key} must be one of ${property.enum.map((entry) => JSON.stringify(entry)).join(', ')}`;
+      }
+      const length = [...value].length;
+      if (property.minLength !== undefined && length < property.minLength) {
+        return `${tool}.${key} must be at least ${property.minLength} character(s)`;
+      }
+      if (property.maxLength !== undefined && length > property.maxLength) {
+        return `${tool}.${key} must be at most ${property.maxLength} character(s)`;
+      }
+      return null;
+    }
     case 'integer':
       if (typeof value !== 'number' || !Number.isInteger(value)) {
         return `${tool}.${key} must be an integer, got ${valueType(value)}`;
@@ -199,6 +248,10 @@ function checkProperty(
       return null;
     case 'boolean':
       return typeof value === 'boolean' ? null : `${tool}.${key} must be a boolean`;
+    case 'object':
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? null
+        : `${tool}.${key} must be an object, got ${valueType(value)}`;
     case 'array': {
       if (!Array.isArray(value)) return `${tool}.${key} must be an array, got ${valueType(value)}`;
       if (property.minItems !== undefined && value.length < property.minItems) {

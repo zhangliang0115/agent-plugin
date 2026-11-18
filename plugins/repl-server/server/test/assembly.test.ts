@@ -145,6 +145,7 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
     'search_tools',
     'describe_tools',
     'wait_tasks',
+    'report_problem',
   ]);
 
   const search = await rpc(

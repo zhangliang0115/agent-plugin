@@ -14,11 +14,13 @@
 
 import { ApiError } from '../lib/api.ts';
 import {
+  formatBytes,
   formatDuration,
   formatId,
   formatJson,
   formatNumber,
   formatRelativeTime,
+  formatTimestamp,
 } from '../lib/format.ts';
 import {
   add,
@@ -42,6 +44,7 @@ import {
   selectControl,
   setFormError,
   setStyle,
+  startPolling,
   statusBadge,
   switchControl,
   tabs,
@@ -51,6 +54,7 @@ import {
   type NoticeTone,
   type PageContext,
   type PageHandle,
+  type Polling,
   type TabOption,
 } from './shared.ts';
 
@@ -75,10 +79,12 @@ interface ServerView {
   enabled: boolean;
   connectMode: ConnectMode;
   summary: string | null;
+  summarySource?: string | null;
   category: string | null;
   tags: string[];
   timeoutMs: number;
   maxConcurrency: number;
+  toolDiscovery?: ToolDiscoveryConfig | null;
   revision: number;
   state: string;
   lastError?: string;
@@ -103,6 +109,7 @@ interface ToolRecord {
   tags: string[];
   category: string | null;
   schema?: unknown;
+  discoveredVia?: 'static' | 'search';
   stale: boolean;
   staleOverride: boolean;
   effective?: {
@@ -190,7 +197,231 @@ interface Operation {
   error?: { code: string; message: string };
 }
 
-type Tab = 'servers' | 'tools' | 'clients' | 'secrets' | 'config' | 'discover';
+type Severity = 'low' | 'medium' | 'high' | 'critical';
+type ReportStatus = 'open' | 'ack' | 'closed';
+type ReportSource = 'mcp' | 'admin';
+type AlertState = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped' | 'no_webhook';
+
+interface ReportView {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  source: ReportSource;
+  binding: string | null;
+  client: string | null;
+  mcp: string | null;
+  exec: string | null;
+  evalId: string | null;
+  severity: Severity;
+  title: string;
+  status: ReportStatus;
+  alertState: AlertState;
+  alertError: string | null;
+  alertAttempts: number;
+  alertUpdatedAt: string | null;
+  alertedAt: string | null;
+  detail?: string;
+  context?: unknown;
+}
+
+interface ReportsResponse {
+  items: ReportView[];
+  nextCursor: string | null;
+}
+
+interface AlertConfigView {
+  enabled: boolean;
+  minSeverity: Severity;
+  events: string[];
+  webhook: { configured: boolean; secretName: string };
+  revision: number;
+}
+
+interface AlertTestResponse {
+  ok: boolean;
+  attempts: number;
+  elapsedMs: number;
+  error?: { code: string; message: string };
+  details?: Record<string, unknown>;
+}
+
+interface AlertPreviewResponse {
+  content: string;
+  bytes: number;
+}
+
+interface ToolDiscoveryConfig {
+  mode: 'static' | 'search';
+  searchTool?: string;
+  query?: string;
+  args?: Record<string, unknown>;
+  maxTools?: number;
+  prepareOnCall?: boolean;
+}
+
+interface DiscoveryToolView {
+  name: string;
+  description: string | null;
+  inputSchema: unknown;
+  schemaMissing: boolean;
+  descriptionTruncated: boolean;
+  conflict: 'none' | 'static' | 'search';
+  action: 'create' | 'update' | 'skip_static';
+}
+
+interface DiscoveryPreview {
+  discoveryId: string;
+  serverId: string;
+  searchTool: string;
+  query: string;
+  effectiveConfig: ToolDiscoveryConfig;
+  parsed: boolean;
+  shape: string;
+  tools: DiscoveryToolView[];
+  skipped: Array<{ name?: string; reason: string }>;
+  omitted: number;
+  partial: boolean;
+  willStale: string[];
+  willStaleCount: number;
+  nextCursor: string | null;
+  raw: string | null;
+  rawTruncated: boolean;
+  elapsedMs: number;
+  previewExpiresAt: string;
+}
+
+interface DiscoveryApplyResult {
+  serverId: string;
+  applied: number;
+  created: number;
+  updated: number;
+  skippedStatic: number;
+  skippedOther: number;
+  stale: number;
+  revision: number;
+}
+
+interface DiscoveryDraft {
+  serverId: string;
+  searchTool: string;
+  query: string;
+  args: string;
+  maxTools: string;
+  prepareOnCall: boolean;
+  staleOthers: boolean;
+  cursor: string | null;
+}
+
+interface AiSettings {
+  enabled: boolean;
+  autoAnnotate: boolean;
+  claudeBin: string | null;
+  model: string | null;
+  timeoutMs: number;
+}
+
+type ClaudeBinSource = 'settings' | 'env' | 'default';
+
+interface AiConfigView {
+  ai: AiSettings & { effectiveClaudeBin: string; claudeBinSource: ClaudeBinSource };
+  prompts: { propose: number; annotate: number };
+  revision: number;
+}
+
+interface ProposalServerDraft {
+  id: string;
+  label: string;
+  transport: 'stdio' | 'http';
+  command: string | null;
+  args: Array<string | { $secret: string }>;
+  cwd: string | null;
+  url: string | null;
+  envKeys: string[];
+  headerKeys: string[];
+  enabled: boolean;
+  connectMode: ConnectMode;
+  tags: string[];
+  category: string | null;
+  summary: string | null;
+}
+
+interface AiProposal {
+  proposalId: string | null;
+  server: ProposalServerDraft | null;
+  explanation: string;
+  warnings: string[];
+  idConflict: boolean;
+  inputWarning?: boolean;
+  meta: {
+    model: string | null;
+    durationMs: number;
+    promptVersion: number;
+    costUsd: number | null;
+    expiresAt: string | null;
+  };
+}
+
+interface ToolOverrideDraft {
+  name: string;
+  description: string | null;
+  tags: string[];
+}
+
+interface AnnotationCurrentView {
+  summary: string | null;
+  summarySource: string | null;
+  category: string | null;
+  tags: string[];
+}
+
+interface AnnotationProposedView {
+  summary: string | null;
+  category: string | null;
+  tags: string[];
+  toolOverrides: ToolOverrideDraft[];
+}
+
+interface AnnotationPreviewView {
+  serverId: string;
+  current: AnnotationCurrentView;
+  proposed: AnnotationProposedView;
+  warnings: string[];
+  omittedTools: number;
+  meta: {
+    model: string | null;
+    durationMs: number;
+    promptVersion: number;
+    costUsd: number | null;
+  };
+}
+
+interface PendingAnnotationView {
+  serverId: string;
+  proposed: AnnotationProposedView;
+  warnings: string[];
+  omittedTools: number;
+  createdAt: string;
+}
+
+interface AnnotationToolDraft {
+  name: string;
+  currentDescription: string | null;
+  currentDescriptionSource: string | null;
+  proposedDescription: string | null;
+  currentTags: string[];
+  proposedTags: string[];
+}
+
+interface AnnotationDraft {
+  serverId: string;
+  current: AnnotationCurrentView;
+  proposed: AnnotationProposedView;
+  warnings: string[];
+  omittedTools: number;
+  tools: AnnotationToolDraft[];
+}
+
+type Tab = 'servers' | 'tools' | 'clients' | 'secrets' | 'alerts' | 'ai' | 'config' | 'discover';
 
 interface ServerDraft {
   mode: 'create' | 'edit';
@@ -233,6 +464,8 @@ const TABS: ReadonlyArray<TabOption> = [
   { id: 'tools', label: 'Tools', icon: 'tool' },
   { id: 'clients', label: 'Clients', icon: 'users' },
   { id: 'secrets', label: '密钥', icon: 'key' },
+  { id: 'alerts', label: '告警', icon: 'alert' },
+  { id: 'ai', label: 'AI', icon: 'activity' },
   { id: 'config', label: '导入导出', icon: 'download' },
   { id: 'discover', label: 'Discover', icon: 'search' },
 ];
@@ -252,6 +485,27 @@ const CONNECT_MODE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'lazy', label: 'lazy（默认）' },
   { value: 'eager', label: 'eager' },
 ];
+
+const SEVERITY_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'critical', label: 'critical' },
+];
+
+const REPORT_STATUS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '', label: '全部状态' },
+  { value: 'open', label: 'open' },
+  { value: 'ack', label: 'ack' },
+  { value: 'closed', label: 'closed' },
+];
+
+const REPORT_SEVERITY_FILTER_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '', label: '全部严重级' },
+  ...SEVERITY_OPTIONS,
+];
+
+const AI_INPUT_MAX_BYTES = 16_384;
 
 const QUOTA_KEYS = [
   'maxExecSessionsPerBinding',
@@ -291,9 +545,31 @@ export function createManagePage(context: PageContext): PageHandle {
     importReport: null as ImportReport | null,
     suggestions: [] as DiscoverSuggestion[],
     discoverLoaded: false,
+    alertsConfig: null as AlertConfigView | null,
+    alertsConfigLoaded: false,
+    reports: [] as ReportView[],
+    reportsCursor: null as string | null,
+    reportsLoaded: false,
+    reportStatus: '' as '' | ReportStatus,
+    reportSeverity: '' as '' | Severity,
+    discoveryDraft: null as DiscoveryDraft | null,
+    discoveryPreview: null as DiscoveryPreview | null,
+    discoverySelected: new Set<string>(),
+    aiConfig: null as AiConfigView | null,
+    aiConfigLoaded: false,
+    aiInput: '',
+    aiProposal: null as AiProposal | null,
+    aiPending: [] as PendingAnnotationView[],
+    aiPendingLoaded: false,
+    aiConfigBusy: false,
+    aiProposeBusy: false,
+    aiProposalApplyBusy: false,
+    aiAnnotationBusy: false,
   };
 
   const drawer = createDrawer();
+  let reportHost: HTMLElement | null = null;
+  let reportsPolling: Polling | null = null;
 
   const banner = el('div');
   banner.hidden = true;
@@ -335,9 +611,23 @@ export function createManagePage(context: PageContext): PageHandle {
     toast(message, 'ok');
   }
 
+  function stopReportsPolling(): void {
+    reportsPolling?.stop();
+    reportsPolling = null;
+  }
+
   function setTab(tab: Tab): void {
     if (state.tab === tab) return;
     if (state.tab === 'clients' && tab !== 'clients') state.tokenReveal = null;
+    if (state.tab === 'alerts' && tab !== 'alerts') {
+      stopReportsPolling();
+      reportHost = null;
+    }
+    if (state.tab === 'tools' && tab !== 'tools') {
+      state.discoveryDraft = null;
+      state.discoveryPreview = null;
+      state.discoverySelected = new Set<string>();
+    }
     state.tab = tab;
     renderTabs();
     setStatus(null);
@@ -361,6 +651,12 @@ export function createManagePage(context: PageContext): PageHandle {
           break;
         case 'secrets':
           await loadSecrets();
+          break;
+        case 'alerts':
+          await Promise.all([ensureAlertsConfig(), loadReports(true)]);
+          break;
+        case 'ai':
+          await Promise.all([ensureServers(), ensureAiConfig(), loadAiPending()]);
           break;
         case 'config':
           await loadConfig();
@@ -401,6 +697,12 @@ export function createManagePage(context: PageContext): PageHandle {
         break;
       case 'secrets':
         content.replaceChildren(buildSecretsTab());
+        break;
+      case 'alerts':
+        content.replaceChildren(buildAlertsTab());
+        break;
+      case 'ai':
+        content.replaceChildren(buildAiTab());
         break;
       case 'config':
         content.replaceChildren(buildConfigTab());
@@ -557,9 +859,19 @@ export function createManagePage(context: PageContext): PageHandle {
         state.tools = [];
         state.toolsServerId = null;
         state.toolDraft = null;
+        state.discoveryDraft = null;
+        state.discoveryPreview = null;
         setTab('tools');
       }, { variant: 'ghost', size: 'sm' }),
     ];
+    if (server.transport !== 'builtin' && !isSeedServerId(server.id)) {
+      actions.push(
+        button('AI 标注', () => void startServerAnnotation(server), {
+          variant: 'ghost',
+          size: 'sm',
+        }),
+      );
+    }
     if (server.transport !== 'builtin') {
       actions.push(
         button('连接', () => void runServerAction(server.id, 'connect'), {
@@ -1104,6 +1416,9 @@ export function createManagePage(context: PageContext): PageHandle {
           state.tools = [];
           state.toolsServerId = null;
           state.toolDraft = null;
+          state.discoveryDraft = null;
+          state.discoveryPreview = null;
+          state.discoverySelected = new Set<string>();
           void ensureTools(true)
             .then(() => renderTab())
             .catch((error: unknown) => setStatus(describeError(error), 'error'));
@@ -1112,6 +1427,7 @@ export function createManagePage(context: PageContext): PageHandle {
     );
     setStyle(serverSelect, { width: '240px' });
 
+    const selectedServer = state.servers.find((server) => server.id === state.selectedServerId);
     const refresh = button('刷新工具', () => {
       void ensureTools(true)
         .then(() => renderTab())
@@ -1121,6 +1437,19 @@ export function createManagePage(context: PageContext): PageHandle {
       if (state.selectedServerId === null) return;
       void runServerAction(state.selectedServerId, 'tools/refresh', 'tools_refresh');
     }, { variant: 'secondary' });
+    const scan = button('扫描懒加载工具', () => {
+      openDiscoveryForm();
+    }, {
+      variant: 'secondary',
+      icon: 'search',
+      disabled: selectedServer === undefined || selectedServer.transport === 'builtin',
+    });
+    const saveDiscovery = button('保存配置', () => {
+      void saveDiscoveryConfig();
+    }, {
+      variant: 'secondary',
+      disabled: selectedServer === undefined || selectedServer.transport === 'builtin',
+    });
 
     const listCard = cardSection({
       title: 'Tools',
@@ -1130,7 +1459,7 @@ export function createManagePage(context: PageContext): PageHandle {
           : `${state.selectedServerId} · 共 ${formatNumber(state.tools.length)} 个工具 · 覆盖字段下一次 eval 生效`,
       icon: 'tool',
       flush: true,
-      actions: [serverSelect, refresh, pull],
+      actions: [serverSelect, refresh, pull, scan, saveDiscovery],
     });
 
     if (state.selectedServerId === null) {
@@ -1146,6 +1475,7 @@ export function createManagePage(context: PageContext): PageHandle {
       listCard.body.appendChild(tablePanel(buildToolsTable()));
     }
 
+    if (state.discoveryDraft !== null) fragment.append(buildDiscoveryCard(state.discoveryDraft));
     if (state.toolDraft !== null) fragment.append(buildToolEditor(state.toolDraft));
     fragment.append(listCard.element);
     return fragment;
@@ -1155,7 +1485,7 @@ export function createManagePage(context: PageContext): PageHandle {
     const table = el('table');
     const thead = el('thead');
     const head = el('tr');
-    for (const label of ['tool', '启用', '并发', '生效 tags', '暴露', '描述', '操作']) {
+    for (const label of ['tool', '来源', '启用', '并发', '生效 tags', '暴露', '描述', '操作']) {
       add(head, el('th', '', label));
     }
     thead.appendChild(head);
@@ -1163,9 +1493,24 @@ export function createManagePage(context: PageContext): PageHandle {
     for (const tool of state.tools) {
       const effective = tool.effective;
       const row = el('tr');
+      const actions: Node[] = [
+        button('详情', () => openToolDetail(tool), { variant: 'ghost', size: 'sm' }),
+        button('编辑', () => {
+          state.toolDraft = tool;
+          renderTab();
+        }, { variant: 'ghost', size: 'sm' }),
+      ];
+      if (tool.discoveredVia === 'search') {
+        actions.push(
+          button('再扫描', () => {
+            openDiscoveryForm(tool.serverId);
+          }, { variant: 'ghost', size: 'sm' }),
+        );
+      }
       add(
         row,
         toolIdentity(tool),
+        td(sourceBadge(tool.discoveredVia)),
         td(badge(tool.enabled ? '启用' : '停用', tool.enabled ? 'ok' : 'neutral')),
         td(badge(tool.concurrency, concurrencyTone(tool.concurrency))),
         tagCell(effective?.tags ?? tool.tags),
@@ -1175,15 +1520,7 @@ export function createManagePage(context: PageContext): PageHandle {
             : badge(effective.exposed ? '可见' : '隐藏', effective.exposed ? 'ok' : 'neutral'),
         ),
         descriptionCell(effective?.description ?? tool.description ?? ''),
-        td(
-          rowActions(
-            button('详情', () => openToolDetail(tool), { variant: 'ghost', size: 'sm' }),
-            button('编辑', () => {
-              state.toolDraft = tool;
-              renderTab();
-            }, { variant: 'ghost', size: 'sm' }),
-          ),
-        ),
+        td(rowActions(...actions)),
       );
       tbody.appendChild(row);
     }
@@ -1213,7 +1550,7 @@ export function createManagePage(context: PageContext): PageHandle {
     const category = input({ value: tool.category ?? '', placeholder: '继承 server' });
     const staleSwitch = switchControl({
       checked: tool.staleOverride,
-      label: '允许 stale 工具暴露',
+      label: '保留检索可见性（仍不可直接调用）',
     });
 
     const groups = formGrid();
@@ -1342,6 +1679,567 @@ export function createManagePage(context: PageContext): PageHandle {
     add(wrapper, actions);
     drawer.open(`${tool.serverId}/${tool.name}`, wrapper);
   }
+
+  // -------------------------------------------------------------------------
+  // Lazy tool discovery (design 07 §6)
+  // -------------------------------------------------------------------------
+
+  function serverById(serverId: string | null): ServerView | undefined {
+    if (serverId === null) return undefined;
+    return state.servers.find((server) => server.id === serverId);
+  }
+
+  function isSeedServerId(serverId: string): boolean {
+    return serverId === '__official__' || serverId === '__builtin__';
+  }
+
+  function sourceBadge(source: 'static' | 'search' | undefined): HTMLSpanElement {
+    return source === 'search' ? badge('search', 'info') : badge('static', 'neutral');
+  }
+
+  function makeDiscoveryDraft(serverId: string): DiscoveryDraft {
+    const server = serverById(serverId);
+    const config = server?.toolDiscovery?.mode === 'search' ? server.toolDiscovery : null;
+    const staticTools = state.tools.filter(
+      (tool) => tool.serverId === serverId && tool.discoveredVia !== 'search',
+    );
+    return {
+      serverId,
+      searchTool: config?.searchTool ?? staticTools[0]?.name ?? '',
+      query: config?.query ?? '',
+      args: config?.args === undefined ? '' : formatJson(config.args, 2),
+      maxTools: String(config?.maxTools ?? 50),
+      prepareOnCall: config?.prepareOnCall ?? true,
+      staleOthers: true,
+      cursor: null,
+    };
+  }
+
+  function openDiscoveryForm(serverId: string | null = state.selectedServerId): void {
+    if (serverId === null) return;
+    const server = serverById(serverId);
+    if (server === undefined) {
+      setStatus('server 不存在，刷新后重试。', 'error');
+      return;
+    }
+    if (server.transport === 'builtin') {
+      setStatus('builtin server 不支持懒加载工具扫描。', 'error');
+      return;
+    }
+    if (serverId !== state.selectedServerId) {
+      state.selectedServerId = serverId;
+      state.tools = [];
+      state.toolsServerId = null;
+    }
+    state.discoveryDraft = makeDiscoveryDraft(serverId);
+    state.discoveryPreview = null;
+    state.discoverySelected = new Set<string>();
+    state.toolDraft = null;
+    renderTab();
+  }
+
+  function readDiscoveryArgs(text: string): Record<string, unknown> | undefined {
+    const trimmed = text.trim();
+    if (trimmed === '') return undefined;
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('固定参数必须是 JSON 对象。');
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  function discoveryConfigFromDraft(draft: DiscoveryDraft): ToolDiscoveryConfig {
+    if (draft.searchTool.trim() === '') throw new Error('搜索工具不能为空。');
+    const maxTools = readInteger(draft.maxTools, 'maxTools');
+    if (maxTools < 1 || maxTools > 200) throw new Error('maxTools 必须在 1 到 200 之间。');
+    const args = readDiscoveryArgs(draft.args);
+    return {
+      mode: 'search',
+      searchTool: draft.searchTool.trim(),
+      query: draft.query,
+      ...(args === undefined ? {} : { args }),
+      maxTools,
+      prepareOnCall: draft.prepareOnCall,
+    };
+  }
+
+  async function saveDiscoveryConfig(): Promise<void> {
+    let draft = state.discoveryDraft;
+    if (draft === null) {
+      openDiscoveryForm();
+      setStatus('已打开扫描表单；调整配置后再次点击“保存配置”。', 'info');
+      return;
+    }
+    const server = serverById(draft.serverId);
+    if (server === undefined) {
+      setStatus('server 不存在，刷新后重试。', 'error');
+      return;
+    }
+    try {
+      const toolDiscovery = discoveryConfigFromDraft(draft);
+      const response = await context.api.patch<{ server: ServerView; revision: number }>(
+        `/servers/${encodeURIComponent(draft.serverId)}`,
+        { toolDiscovery },
+        {
+          signal: controller.signal,
+          headers: { 'If-Match': String(state.serversRevision) },
+        },
+      );
+      if (destroyed) return;
+      state.serversRevision = numberOr(response.revision, state.serversRevision);
+      state.servers = state.servers.map((entry) =>
+        entry.id === response.server.id ? response.server : entry,
+      );
+      succeeded(`已保存 ${draft.serverId} 的懒加载配置；下一次扫描或 eval 生效。`);
+      renderTab();
+    } catch (error) {
+      setStatus(saveErrorText(error), 'error');
+    }
+  }
+
+  async function previewDiscovery(): Promise<void> {
+    const draft = state.discoveryDraft;
+    if (draft === null) return;
+    try {
+      const maxTools = readInteger(draft.maxTools, 'maxTools');
+      if (maxTools < 1 || maxTools > 200) throw new Error('maxTools 必须在 1 到 200 之间。');
+      if (draft.searchTool.trim() === '') throw new Error('搜索工具不能为空。');
+      const args = readDiscoveryArgs(draft.args);
+      const body: Record<string, unknown> = {
+        preview: true,
+        searchTool: draft.searchTool.trim(),
+        query: draft.query,
+        maxTools,
+        prepareOnCall: draft.prepareOnCall,
+      };
+      if (args !== undefined) body['args'] = args;
+      if (draft.cursor !== null) body['cursor'] = draft.cursor;
+      const preview = await context.api.post<DiscoveryPreview>(
+        `/servers/${encodeURIComponent(draft.serverId)}/tools/discover`,
+        body,
+        { signal: controller.signal },
+      );
+      if (destroyed) return;
+      state.discoveryPreview = preview;
+      state.discoverySelected = new Set(
+        preview.tools
+          .filter((tool) => tool.action !== 'skip_static')
+          .map((tool) => tool.name),
+      );
+      draft.staleOthers = !preview.partial;
+      renderTab();
+    } catch (error) {
+      if (destroyed) return;
+      handleDiscoveryError(error);
+    }
+  }
+
+  function handleDiscoveryError(error: unknown): void {
+    let message = describeError(error);
+    let cleared = false;
+    if (error instanceof ApiError) {
+      const details = errorDetails(error);
+      switch (error.code) {
+        case 'DISCOVERY_PREVIEW_EXPIRED':
+          message =
+            details?.['reason'] === 'applied'
+              ? '这次预览已经应用过；请重新扫描。'
+              : '预览已过期；请重新扫描。';
+          clearDiscoveryPreview();
+          cleared = true;
+          break;
+        case 'DISCOVERY_PREVIEW_NOT_FOUND':
+          message = '预览不存在（进程可能重启过）；请重新扫描。';
+          clearDiscoveryPreview();
+          cleared = true;
+          break;
+        case 'DISCOVERY_EMPTY_PREVIEW':
+          message = '预览为空，不能应用；请调整搜索工具或查询词后重新预览。';
+          clearDiscoveryPreview();
+          cleared = true;
+          break;
+        case 'DISCOVERY_PARTIAL_STALE_UNCONFIRMED':
+          message = '本次预览不完整，不能把未返回的工具标记为 stale；请重新预览并确认。';
+          break;
+        case 'DISCOVERY_BUSY':
+          message = `另一个扫描正在进行，请稍后重试${retryAfterText(details)}。`;
+          break;
+        case 'REVISION_CONFLICT':
+          message = saveErrorText(error);
+          break;
+        default:
+          break;
+      }
+    }
+    setStatus(message, 'error');
+    if (cleared && !destroyed) renderTab();
+  }
+
+  function clearDiscoveryPreview(): void {
+    state.discoveryPreview = null;
+    state.discoverySelected = new Set<string>();
+    if (state.discoveryDraft !== null) state.discoveryDraft.cursor = null;
+  }
+
+  async function applyDiscovery(): Promise<void> {
+    const preview = state.discoveryPreview;
+    const draft = state.discoveryDraft;
+    if (preview === null || draft === null) return;
+    const selected = preview.tools.filter((tool) => state.discoverySelected.has(tool.name));
+    if (selected.length === 0) {
+      setStatus('至少勾选一个要应用的工具。', 'error');
+      return;
+    }
+    const overwriteStatic = selected.some((tool) => tool.action === 'skip_static');
+    if (
+      overwriteStatic &&
+      !confirmAction('勾选的行与上游声明的同名 static 工具冲突，应用会覆盖它们并改成 search 来源。继续？')
+    ) {
+      return;
+    }
+    let confirmPartialStale = false;
+    if (preview.partial && draft.staleOthers) {
+      const proceed = confirmAction(
+        '本次预览不完整（有未展示或未解析的结果）。继续把未返回的旧 search 工具标记为 stale 吗？',
+      );
+      if (!proceed) return;
+      confirmPartialStale = true;
+    }
+    if (draft.staleOthers && preview.willStaleCount > 0) {
+      const names = preview.willStale.slice(0, 10).join(', ');
+      const suffix =
+        preview.willStaleCount > 10 ? ` 等 ${preview.willStaleCount} 个` : '';
+      const proceed = confirmAction(
+        `本次会把 ${preview.willStaleCount} 个已有工具标记为 stale${names === '' ? '' : `：${names}${suffix}`}。\n它们会从检索与直接调用中消失，直到下次扫描返回。继续？`,
+      );
+      if (!proceed) return;
+    }
+    const accept = selected.map((tool) => tool.name);
+    const body: Record<string, unknown> = {
+      preview: false,
+      discoveryId: preview.discoveryId,
+      accept,
+      staleOthers: draft.staleOthers,
+    };
+    if (overwriteStatic) body['overwriteStatic'] = true;
+    if (confirmPartialStale) body['confirmPartialStale'] = true;
+    try {
+      const result = await context.api.post<DiscoveryApplyResult>(
+        `/servers/${encodeURIComponent(draft.serverId)}/tools/discover`,
+        body,
+        {
+          signal: controller.signal,
+          headers: { 'If-Match': String(state.serversRevision) },
+        },
+      );
+      if (destroyed) return;
+      state.serversRevision = numberOr(result.revision, state.serversRevision);
+      clearDiscoveryPreview();
+      succeeded(
+        `已应用 ${formatNumber(result.applied)} 个工具：新增 ${formatNumber(result.created)}、更新 ${formatNumber(result.updated)}、标记 stale ${formatNumber(result.stale)}；revision ${formatNumber(result.revision)}。`,
+      );
+      state.serversLoaded = false;
+      try {
+        await ensureServers(true);
+        if (!destroyed) await ensureTools(true);
+      } catch (refreshError) {
+        if (!destroyed) {
+          setStatus(`工具已应用，但刷新列表失败：${describeError(refreshError)}`, 'queue');
+        }
+      }
+      if (!destroyed) renderTab();
+    } catch (error) {
+      if (!destroyed) handleDiscoveryError(error);
+    }
+  }
+
+  function buildDiscoveryCard(draft: DiscoveryDraft): HTMLElement {
+    const handle = cardSection({
+      title: `扫描懒加载工具 · ${draft.serverId}`,
+      subtitle: '预览会调用上游搜索工具；应用只写本地 catalog，不再次访问上游。',
+      icon: 'search',
+    });
+    const staticTools = state.tools.filter(
+      (tool) => tool.serverId === draft.serverId && tool.discoveredVia !== 'search',
+    );
+    const staticOptions = staticTools.map((tool) => ({ value: tool.name, label: tool.name }));
+    if (
+      draft.searchTool !== '' &&
+      !staticOptions.some((entry) => entry.value === draft.searchTool)
+    ) {
+      staticOptions.unshift({ value: draft.searchTool, label: `${draft.searchTool}（已保存）` });
+    }
+    const searchToolSelect = selectControl(staticOptions, {
+      value: draft.searchTool,
+      ariaLabel: '搜索工具',
+      disabled: staticOptions.length === 0,
+    });
+    searchToolSelect.addEventListener('change', () => {
+      draft.searchTool = searchToolSelect.value;
+      draft.cursor = null;
+    });
+
+    const queryInput = input({ value: draft.query, placeholder: 'database' });
+    queryInput.addEventListener('input', () => {
+      draft.query = queryInput.value;
+    });
+    const argsArea = textarea({
+      value: draft.args,
+      rows: 4,
+      placeholder: '{"q": "$query"}；留空表示不带固定参数',
+    });
+    argsArea.addEventListener('input', () => {
+      draft.args = argsArea.value;
+    });
+    const maxToolsInput = input({
+      type: 'number',
+      value: draft.maxTools,
+      min: '1',
+      max: '200',
+    });
+    maxToolsInput.addEventListener('input', () => {
+      draft.maxTools = maxToolsInput.value;
+    });
+    const prepareSwitch = switchControl({
+      checked: draft.prepareOnCall,
+      label: '调用前预热（每次新连接首次调用会先执行搜索）',
+    });
+    prepareSwitch.input.addEventListener('change', () => {
+      draft.prepareOnCall = prepareSwitch.input.checked;
+    });
+    const staleSwitch = switchControl({
+      checked: draft.staleOthers,
+      label: '把本次未返回的旧 search 工具标记为 stale',
+    });
+    staleSwitch.input.addEventListener('change', () => {
+      draft.staleOthers = staleSwitch.input.checked;
+    });
+
+    const groups = formGrid();
+    add(
+      groups,
+      groupCard('搜索配置', '搜索参数会以明文保存在配置里，不要填密钥；需要鉴权请配置 server 的 env/headers。', [
+        field('搜索工具', searchToolSelect),
+        field('查询词', queryInput),
+        field('固定参数（JSON）', argsArea),
+        field('最大条数', maxToolsInput),
+      ]),
+      groupCard('应用策略', '应用会改写工具 catalog，下一次 eval 生效；同名 static 工具默认跳过。', [
+        prepareSwitch,
+        staleSwitch,
+      ]),
+    );
+    const errorLine = formError();
+    const previewButton = button('预览', () => {
+      previewButton.disabled = true;
+      previewButton.textContent = '扫描中…';
+      setFormError(errorLine, null);
+      void previewDiscovery().finally(() => {
+        if (previewButton.isConnected) {
+          previewButton.disabled = false;
+          previewButton.textContent = '预览';
+        }
+      });
+    }, { variant: 'primary', icon: 'search' });
+    const saveButton = button('保存配置', () => void saveDiscoveryConfig(), {
+      variant: 'secondary',
+    });
+    const closeButton = button('关闭', () => {
+      state.discoveryDraft = null;
+      clearDiscoveryPreview();
+      renderTab();
+    }, { variant: 'ghost' });
+    const footer = el('div', 'toolbar');
+    add(footer, previewButton, saveButton, closeButton);
+    add(handle.body, notice('预览会调用一次上游搜索工具；原始输出仅供人工排查，不会写入 catalog。', 'queue'), groups, errorLine, footer);
+
+    if (state.discoveryPreview !== null) {
+      handle.body.appendChild(buildDiscoveryPreview(state.discoveryPreview));
+    }
+    return handle.element;
+  }
+
+  function buildDiscoveryPreview(preview: DiscoveryPreview): HTMLElement {
+    const wrap = el('div');
+    setStyle(wrap, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    const head = el('div', 'toolbar');
+    add(
+      head,
+      badge(preview.parsed ? '已解析' : '未解析', preview.parsed ? 'ok' : 'error'),
+      badge(preview.shape, 'neutral'),
+      badge(`${formatNumber(preview.tools.length)} 个工具`, 'info'),
+      badge(`${formatDuration(preview.elapsedMs)}`, 'neutral'),
+      badge(`过期 ${formatTimestamp(preview.previewExpiresAt)}`, 'neutral'),
+    );
+    add(wrap, head);
+
+    if (preview.skipped.length > 0) {
+      add(
+        wrap,
+        notice(
+          `有 ${formatNumber(preview.skipped.length)} 个结果被跳过：${preview.skipped
+            .slice(0, 5)
+            .map((entry) => `${entry.name ?? '?'}（${entry.reason}）`)
+            .join('、')}${preview.skipped.length > 5 ? ' …' : ''}`,
+          'queue',
+        ),
+      );
+    }
+    if (preview.omitted > 0) {
+      add(
+        wrap,
+        notice(
+          `还有 ${formatNumber(preview.omitted)} 个结果未显示；可提高最大条数或使用游标。此时预览不完整。`,
+          'queue',
+        ),
+      );
+    }
+    if (preview.willStaleCount > 0) {
+      const names =
+        preview.willStale.length === 0
+          ? ''
+          : `：${preview.willStale.slice(0, 100).join(', ')}${preview.willStaleCount > preview.willStale.length ? ' …' : ''}`;
+      const marking = state.discoveryDraft?.staleOthers === true;
+      add(
+        wrap,
+        notice(
+          marking
+            ? `本次会把 ${formatNumber(preview.willStaleCount)} 个已有工具标记为 stale${names}。它们会从检索与直接调用中消失，直到下次扫描返回。`
+            : `预览计算有 ${formatNumber(preview.willStaleCount)} 个已有工具不在本次结果中${names}；当前未勾选“标记 stale”，应用不会改动它们。`,
+          'queue',
+        ),
+      );
+    }
+    if (preview.partial) {
+      add(
+        wrap,
+        notice(
+          '本次预览不完整；默认不标记其它工具为 stale。显式勾选时应用前会再次确认。',
+          'queue',
+        ),
+      );
+    }
+
+    if (!preview.parsed) {
+      add(
+        wrap,
+        notice(
+          '未能自动识别上游输出；请调整搜索工具或查询词。原始输出仅供人工排查，不会写入 catalog。',
+          'error',
+        ),
+      );
+      if (preview.raw !== null) {
+        const raw = el('pre', '', preview.raw);
+        setStyle(raw, {
+          maxHeight: '320px',
+          overflow: 'auto',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          margin: '0',
+          padding: '12px',
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+        });
+        if (preview.rawTruncated) add(wrap, notice('原始输出已截断。', 'queue'));
+        add(wrap, raw);
+      }
+      return wrap;
+    }
+
+    if (preview.tools.length === 0) {
+      add(
+        wrap,
+        notice('解析成功但没有可应用的工具；不能应用空预览。请调整后重新扫描。', 'queue'),
+      );
+      return wrap;
+    }
+
+    const table = el('table');
+    const thead = el('thead');
+    const headRow = el('tr');
+    for (const label of ['勾选', '工具名', '描述', 'schema', '冲突', '动作']) {
+      add(headRow, el('th', '', label));
+    }
+    thead.appendChild(headRow);
+    const tbody = el('tbody');
+    for (const tool of preview.tools) {
+      const row = el('tr');
+      const checkbox = el('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = state.discoverySelected.has(tool.name);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) state.discoverySelected.add(tool.name);
+        else state.discoverySelected.delete(tool.name);
+      });
+      const conflict =
+        tool.conflict === 'static'
+          ? badge('static', 'error')
+          : tool.conflict === 'search'
+            ? badge('search', 'info')
+            : el('span', 'muted', '—');
+      const action =
+        tool.action === 'create'
+          ? badge('新建', 'ok')
+          : tool.action === 'update'
+            ? badge('更新', 'info')
+            : badge('跳过', 'queue');
+      add(
+        row,
+        td(checkbox),
+        el('td', 'mono', tool.name),
+        clippedCell(tool.description ?? '', 320),
+        td(tool.schemaMissing ? badge('缺失', 'error') : badge('有', 'ok')),
+        td(conflict),
+        td(action),
+      );
+      tbody.appendChild(row);
+    }
+    add(table, thead, tbody);
+
+    const selection = el('div', 'toolbar');
+    add(
+      selection,
+      button('全选', () => {
+        state.discoverySelected = new Set(
+          preview.tools
+            .filter((tool) => tool.action !== 'skip_static')
+            .map((tool) => tool.name),
+        );
+        renderTab();
+      }, { variant: 'ghost', size: 'sm' }),
+      button('全不选', () => {
+        state.discoverySelected = new Set<string>();
+        renderTab();
+      }, { variant: 'ghost', size: 'sm' }),
+    );
+    add(wrap, selection, tablePanel(table));
+
+    const actions = el('div', 'toolbar');
+    const applyButton = button('应用所选', () => {
+      applyButton.disabled = true;
+      applyButton.textContent = '应用中…';
+      void applyDiscovery().finally(() => {
+        if (applyButton.isConnected) {
+          applyButton.disabled = false;
+          applyButton.textContent = '应用所选';
+        }
+      });
+    }, { variant: 'primary', icon: 'check' });
+    add(actions, applyButton);
+    if (preview.nextCursor !== null) {
+      actions.appendChild(
+        button('加载下一页', () => {
+          if (state.discoveryDraft !== null) state.discoveryDraft.cursor = preview.nextCursor;
+          state.discoveryPreview = null;
+          renderTab();
+          void previewDiscovery();
+        }, { variant: 'secondary', icon: 'chevron-right' }),
+      );
+    }
+    add(wrap, actions);
+    return wrap;
+  }
+
 
   // -------------------------------------------------------------------------
   // Clients
@@ -1865,6 +2763,1535 @@ export function createManagePage(context: PageContext): PageHandle {
   }
 
   // -------------------------------------------------------------------------
+  // Alerts and problem reports (design 06 §6)
+  // -------------------------------------------------------------------------
+
+  async function ensureAlertsConfig(force = false): Promise<void> {
+    if (state.alertsConfigLoaded && !force) return;
+    const config = await context.api.get<AlertConfigView>('/alerts/config', {
+      signal: controller.signal,
+    });
+    if (destroyed) return;
+    state.alertsConfig = config;
+    state.alertsConfigLoaded = true;
+  }
+
+  async function loadReports(reset: boolean): Promise<void> {
+    if (!reset && state.reportsCursor === null) return;
+    const query: Record<string, string | number> = { limit: 50 };
+    if (state.reportStatus !== '') query['status'] = state.reportStatus;
+    if (state.reportSeverity !== '') query['severity'] = state.reportSeverity;
+    if (!reset && state.reportsCursor !== null) query['cursor'] = state.reportsCursor;
+    const response = await context.api.get<ReportsResponse>('/reports', {
+      query,
+      signal: controller.signal,
+    });
+    if (destroyed) return;
+    const items = Array.isArray(response.items) ? response.items : [];
+    state.reports = reset ? items : [...state.reports, ...items];
+    state.reportsCursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
+    state.reportsLoaded = true;
+  }
+
+  function startReportsPolling(): void {
+    if (reportsPolling !== null) return;
+    reportsPolling = startPolling(async () => {
+      if (state.tab !== 'alerts' || destroyed) return;
+      await loadReports(true);
+      if (!destroyed && state.tab === 'alerts' && reportHost !== null && reportHost.isConnected) {
+        renderReportsInto(reportHost);
+      }
+    }, 30_000);
+  }
+
+  function buildAlertsTab(): HTMLElement {
+    const fragment = el('div');
+    setStyle(fragment, { display: 'flex', flexDirection: 'column', gap: '20px' });
+
+    fragment.append(buildAlertConfigCard(), buildReportCreateCard());
+
+    const statusFilter = selectControl(REPORT_STATUS_OPTIONS, {
+      value: state.reportStatus,
+      ariaLabel: '报告状态过滤',
+      onChange: (value) => {
+        state.reportStatus = value as '' | ReportStatus;
+        void reloadReports();
+      },
+    });
+    const severityFilter = selectControl(REPORT_SEVERITY_FILTER_OPTIONS, {
+      value: state.reportSeverity,
+      ariaLabel: '报告严重级过滤',
+      onChange: (value) => {
+        state.reportSeverity = value as '' | Severity;
+        void reloadReports();
+      },
+    });
+    const refresh = button('刷新', () => {
+      void reloadReports();
+    }, { variant: 'secondary', icon: 'refresh' });
+    const listCard = cardSection({
+      title: '问题报告',
+      subtitle: `${formatNumber(state.reports.length)} 条 · 每 30 秒刷新（页面隐藏时暂停）`,
+      icon: 'alert',
+      flush: true,
+      actions: [statusFilter, severityFilter, refresh],
+    });
+    reportHost = el('div');
+    listCard.body.appendChild(reportHost);
+    renderReportsInto(reportHost);
+    fragment.append(listCard.element);
+    startReportsPolling();
+    return fragment;
+  }
+
+  async function reloadReports(): Promise<void> {
+    try {
+      await loadReports(true);
+      if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
+    } catch (error) {
+      if (!destroyed) setStatus(describeError(error), 'error');
+    }
+  }
+
+  function buildAlertConfigCard(): HTMLElement {
+    const config = state.alertsConfig;
+    const handle = cardSection({
+      title: '告警配置',
+      subtitle: '企业微信 webhook 只写不读；保存需要 If-Match revision。',
+      icon: 'alert',
+    });
+    if (config === null) {
+      add(
+        handle.body,
+        emptyBlock('没有读取到告警配置。', '检查服务端 /alerts/config 端点。'),
+        button('重试', () => {
+          state.alertsConfigLoaded = false;
+          void ensureAlertsConfig(true)
+            .then(() => renderTab())
+            .catch((error: unknown) => setStatus(describeError(error), 'error'));
+        }, { variant: 'secondary', icon: 'refresh' }),
+      );
+      return handle.element;
+    }
+
+    const enabledSwitch = switchControl({ checked: config.enabled, label: '启用告警' });
+    const severitySelect = selectControl(SEVERITY_OPTIONS, {
+      value: config.minSeverity,
+      ariaLabel: '最低严重级',
+    });
+    const statusLine = el('div', 'toolbar');
+    add(
+      statusLine,
+      badge(config.enabled ? '已启用' : '已关闭', config.enabled ? 'ok' : 'neutral'),
+      badge(
+        config.webhook.configured ? 'Webhook 已配置' : 'Webhook 未配置',
+        config.webhook.configured ? 'ok' : 'error',
+      ),
+      badge(`revision ${formatNumber(config.revision)}`, 'neutral'),
+    );
+
+    const webhookHost = el('div');
+    let webhookInput: HTMLInputElement | null = null;
+    let revealWebhook = !config.webhook.configured;
+    const drawWebhook = (): void => {
+      webhookHost.replaceChildren();
+      if (config.webhook.configured && !revealWebhook) {
+        const line = el('div', 'toolbar');
+        add(
+          line,
+          el('span', 'mono muted', `${config.webhook.secretName}（已配置）`),
+          button('更换', () => {
+            revealWebhook = true;
+            drawWebhook();
+          }, { variant: 'secondary', size: 'sm' }),
+        );
+        add(webhookHost, line);
+        return;
+      }
+      webhookInput = input({
+        type: 'password',
+        value: '',
+        placeholder: config.webhook.configured
+          ? '输入新值可替换（留空保持不变）'
+          : 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…',
+      });
+      webhookInput.setAttribute('autocomplete', 'off');
+      add(webhookHost, field('企业微信 webhook', webhookInput));
+    };
+    drawWebhook();
+
+    const resultHost = el('div');
+    const errorLine = formError();
+
+    const save = button('保存', () => {
+      const wantEnabled = enabledSwitch.input.checked;
+      if (
+        !config.enabled &&
+        wantEnabled &&
+        !confirmAction(
+          `启用告警后，severity ≥ ${severitySelect.value} 的报告会发送到 ${
+            config.webhook.configured ? `${config.webhook.secretName}（已配置）` : '尚未配置的 webhook'
+          }。继续？`,
+        )
+      ) {
+        return;
+      }
+      const body: Record<string, unknown> = {
+        enabled: wantEnabled,
+        minSeverity: severitySelect.value,
+      };
+      const webhook = webhookInput?.value.trim() ?? '';
+      if (webhook !== '') body['webhook'] = webhook;
+      setFormError(errorLine, null);
+      save.disabled = true;
+      save.textContent = '保存中…';
+      void context.api
+        .put<AlertConfigView>('/alerts/config', body, {
+          signal: controller.signal,
+          headers: { 'If-Match': String(config.revision) },
+        })
+        .then((response) => {
+          if (destroyed) return;
+          state.alertsConfig = response;
+          state.alertsConfigLoaded = true;
+          succeeded('已保存告警配置。');
+          renderTab();
+        })
+        .catch((error: unknown) => {
+          const details = error instanceof ApiError ? errorDetails(error) : null;
+          const message =
+            details?.['webhookUpdated'] === true
+              ? 'webhook 已更新，配置未保存；请刷新后重试。'
+              : saveErrorText(error);
+          setFormError(errorLine, message);
+          save.disabled = false;
+          save.textContent = '保存';
+        });
+    }, { variant: 'primary' });
+
+    const clear = button('清除 webhook', () => {
+      if (!confirmAction('清除已保存的企业微信 webhook？告警将停止发送，开关不会被关闭。')) return;
+      clear.disabled = true;
+      void context.api
+        .put<AlertConfigView>('/alerts/config', { webhook: null }, {
+          signal: controller.signal,
+          headers: { 'If-Match': String(config.revision) },
+        })
+        .then((response) => {
+          if (destroyed) return;
+          state.alertsConfig = response;
+          state.alertsConfigLoaded = true;
+          succeeded('已清除 webhook。');
+          renderTab();
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setStatus(saveErrorText(error), 'error');
+          clear.disabled = false;
+        });
+    }, { variant: 'danger', disabled: !config.webhook.configured });
+
+    const preview = button('预览', () => {
+      preview.disabled = true;
+      preview.textContent = '渲染中…';
+      resultHost.replaceChildren();
+      void context.api
+        .post<AlertPreviewResponse>('/alerts/preview', { severity: severitySelect.value }, {
+          signal: controller.signal,
+        })
+        .then((response) => {
+          if (destroyed) return;
+          const pre = el('pre', '', response.content);
+          setStyle(pre, {
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            margin: '0',
+            padding: '12px',
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+          });
+          resultHost.replaceChildren(
+            notice(`预览内容 ${formatBytes(response.bytes)}（上限 4096 字节）。`, 'info'),
+            pre,
+          );
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) resultHost.replaceChildren(notice(describeError(error), 'error'));
+        })
+        .finally(() => {
+          if (preview.isConnected) {
+            preview.disabled = false;
+            preview.textContent = '预览';
+          }
+        });
+    }, { variant: 'secondary' });
+
+    const test = button('发送测试', () => {
+      test.disabled = true;
+      test.textContent = '发送中…';
+      resultHost.replaceChildren(notice('测试消息正在通过发送队列投递，最长约 10.5 秒。', 'info'));
+      void context.api
+        .post<AlertTestResponse>('/alerts/test', undefined, { signal: controller.signal })
+        .then((response) => {
+          if (destroyed) return;
+          if (response.ok) {
+            resultHost.replaceChildren(
+              notice(
+                `测试消息已送达：attempts ${formatNumber(response.attempts)}，耗时 ${formatDuration(response.elapsedMs)}。`,
+                'ok',
+              ),
+            );
+          } else {
+            const code = response.error?.code ?? 'ALERT_FAILED';
+            const message = response.error?.message ?? '测试消息未送达。';
+            resultHost.replaceChildren(notice(`测试消息未送达：${code} · ${message}`, 'error'));
+          }
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) resultHost.replaceChildren(notice(alertErrorText(error), 'error'));
+        })
+        .finally(() => {
+          if (test.isConnected) {
+            test.disabled = false;
+            test.textContent = '发送测试';
+          }
+        });
+    }, { variant: 'secondary' });
+
+    const controls = el('div', 'toolbar');
+    add(controls, save, clear, preview, test);
+    add(handle.body, statusLine, enabledSwitch, field('最低严重级', severitySelect), webhookHost, controls, errorLine, resultHost);
+    return handle.element;
+  }
+
+  function buildReportCreateCard(): HTMLElement {
+    const handle = cardSection({
+      title: '新建问题报告',
+      subtitle: '提交后写入数据库并进入告警队列；列表不会自动展开详情。',
+      icon: 'plus',
+    });
+    const formBody = el('div');
+    setStyle(formBody, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    formBody.hidden = true;
+    const toggle = button('展开表单', () => {
+      formBody.hidden = !formBody.hidden;
+      toggle.textContent = formBody.hidden ? '展开表单' : '收起表单';
+    }, { variant: 'secondary', icon: 'chevron-down' });
+    handle.actions.appendChild(toggle);
+
+    const title = input({ placeholder: 'Bash 执行 npm test 时挂起' });
+    title.maxLength = 200;
+    const detail = textarea({ rows: 6, placeholder: '现象、期望与实际、复现步骤；不要粘贴密钥。' });
+    detail.maxLength = 20_000;
+    const severity = selectControl(SEVERITY_OPTIONS, { value: 'high', ariaLabel: 'severity' });
+    const contextArea = textarea({
+      rows: 4,
+      placeholder: '可选 JSON 对象，≤ 8192 字节；例如 {"tool":"Bash"}',
+    });
+    const errorLine = formError();
+    const submit = button('提交报告', () => undefined, { type: 'submit', variant: 'primary' });
+    const form = el('form');
+    form.noValidate = true;
+    setStyle(form, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    add(
+      form,
+      notice('报告中不要粘贴密钥；详情与 context 不会进入告警消息和审计日志。', 'queue'),
+      field('标题', title),
+      field('详情', detail),
+      field('严重级', severity),
+      field('context（JSON）', contextArea),
+      errorLine,
+      submit,
+    );
+    formBody.appendChild(form);
+    handle.body.appendChild(formBody);
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      setFormError(errorLine, null);
+      const titleText = title.value.trim();
+      const detailText = detail.value.trim();
+      if (titleText === '') {
+        setFormError(errorLine, '标题不能为空。');
+        return;
+      }
+      if (detailText === '') {
+        setFormError(errorLine, '详情不能为空。');
+        return;
+      }
+      let parsedContext: unknown;
+      if (contextArea.value.trim() !== '') {
+        try {
+          parsedContext = JSON.parse(contextArea.value);
+        } catch (error) {
+          setFormError(errorLine, `context JSON 解析失败：${describeError(error)}`);
+          return;
+        }
+        if (
+          typeof parsedContext !== 'object' ||
+          parsedContext === null ||
+          Array.isArray(parsedContext)
+        ) {
+          setFormError(errorLine, 'context 必须是 JSON 对象。');
+          return;
+        }
+      }
+      const body: Record<string, unknown> = {
+        title: titleText,
+        detail: detailText,
+        severity: severity.value,
+      };
+      if (parsedContext !== undefined) body['context'] = parsedContext;
+      submit.disabled = true;
+      submit.textContent = '提交中…';
+      void context.api
+        .post<{ report: ReportView }>('/reports', body, { signal: controller.signal })
+        .then(async (response) => {
+          if (destroyed) return;
+          succeeded(`已创建报告 ${response.report.id}；状态 ${response.report.status}。`);
+          title.value = '';
+          detail.value = '';
+          contextArea.value = '';
+          try {
+            await loadReports(true);
+            if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
+          } catch (refreshError) {
+            if (!destroyed) {
+              setStatus(`报告已创建，但刷新列表失败：${describeError(refreshError)}`, 'queue');
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setFormError(errorLine, saveErrorText(error));
+        })
+        .finally(() => {
+          if (submit.isConnected) {
+            submit.disabled = false;
+            submit.textContent = '提交报告';
+          }
+        });
+    });
+    return handle.element;
+  }
+
+  function renderReportsInto(host: HTMLElement): void {
+    host.replaceChildren();
+    if (state.reports.length === 0) {
+      host.appendChild(
+        emptyBlock('还没有问题报告。', '可以在上方新建报告，或让 MCP 客户端调用 report_problem。'),
+      );
+      return;
+    }
+    const table = el('table');
+    const thead = el('thead');
+    const head = el('tr');
+    for (const label of ['时间', '严重级', '标题', '来源', '状态', '告警状态']) {
+      add(head, el('th', '', label));
+    }
+    thead.appendChild(head);
+    const tbody = el('tbody');
+    for (const report of state.reports) {
+      const row = el('tr');
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => openReportDetail(report.id));
+      const time = el('span', '', formatTimestamp(report.createdAt));
+      time.title = report.createdAt;
+      add(
+        row,
+        td(time),
+        td(badge(report.severity, severityTone(report.severity))),
+        clippedCell(report.title, 380),
+        td(badge(report.source, report.source === 'mcp' ? 'info' : 'neutral')),
+        td(badge(report.status, reportStatusTone(report.status))),
+        td(alertStateBadge(report.alertState)),
+      );
+      tbody.appendChild(row);
+    }
+    add(table, thead, tbody);
+    host.appendChild(tablePanel(table));
+    if (state.reportsCursor !== null) {
+      const footer = el('div', 'toolbar');
+      add(
+        footer,
+        button('加载更多', () => {
+          void loadReports(false)
+            .then(() => {
+              if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
+            })
+            .catch((error: unknown) => {
+              if (error instanceof ApiError && error.code === 'INVALID_CURSOR') {
+                state.reportsCursor = null;
+                void reloadReports();
+                setStatus('分页游标失效，已从头加载。', 'queue');
+                return;
+              }
+              if (!destroyed) setStatus(describeError(error), 'error');
+            });
+        }, { variant: 'secondary' }),
+      );
+      setStyle(footer, { padding: '12px 16px' });
+      host.appendChild(footer);
+    }
+  }
+
+  function openReportDetail(reportId: string): void {
+    drawer.open(`报告 ${formatId(reportId, 20)}`, loading('正在加载报告详情…'));
+    void context.api
+      .get<{ report: ReportView }>(`/reports/${encodeURIComponent(reportId)}`, {
+        signal: controller.signal,
+      })
+      .then((response) => {
+        if (destroyed) return;
+        drawer.open(`报告 ${formatId(reportId, 20)}`, buildReportDetail(response.report));
+      })
+      .catch((error: unknown) => {
+        if (destroyed) return;
+        const box = el('div');
+        add(box, notice(describeError(error), 'error'));
+        drawer.open(`报告 ${formatId(reportId, 20)}`, box);
+      });
+  }
+
+  function buildReportDetail(report: ReportView): HTMLElement {
+    const wrapper = el('div');
+    setStyle(wrapper, { display: 'flex', flexDirection: 'column', gap: '16px' });
+    const head = el('div', 'toolbar');
+    add(
+      head,
+      badge(report.severity, severityTone(report.severity)),
+      badge(report.status, reportStatusTone(report.status)),
+      alertStateBadge(report.alertState),
+      badge(report.source, report.source === 'mcp' ? 'info' : 'neutral'),
+    );
+    add(wrapper, head);
+    add(
+      wrapper,
+      definitionList([
+        { label: 'id', value: report.id, mono: true },
+        { label: '创建', value: formatTimestamp(report.createdAt) },
+        { label: '更新', value: formatTimestamp(report.updatedAt) },
+        { label: '来源', value: report.source },
+        { label: 'binding', value: report.binding ?? '—', mono: true },
+        { label: 'client', value: report.client ?? '—', mono: true },
+        { label: 'mcp', value: report.mcp ?? '—', mono: true },
+        { label: 'exec', value: report.exec ?? '—', mono: true },
+        { label: 'evalId', value: report.evalId ?? '—', mono: true },
+        { label: '告警尝试', value: formatNumber(report.alertAttempts) },
+        { label: '告警错误', value: report.alertError ?? '—', mono: true },
+        { label: '告警更新', value: formatTimestamp(report.alertUpdatedAt) },
+        { label: '送达时间', value: formatTimestamp(report.alertedAt) },
+      ]),
+    );
+
+    add(wrapper, el('h3', '', report.title));
+    const detail = el('pre', '', report.detail ?? '');
+    setStyle(detail, {
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+      margin: '0',
+      fontFamily: 'inherit',
+      fontSize: '13px',
+    });
+    add(wrapper, detail);
+
+    if (report.context !== undefined && report.context !== null) {
+      add(wrapper, el('h3', '', 'context'));
+      const context = el('pre', '', formatJson(report.context, 2));
+      setStyle(context, {
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        margin: '0',
+        padding: '12px',
+        border: '1px solid var(--border)',
+        borderRadius: '8px',
+      });
+      add(wrapper, context);
+    }
+
+    if (report.alertError !== null) add(wrapper, notice(report.alertError, 'error'));
+
+    const actions = el('div', 'toolbar');
+    if (report.status === 'open') {
+      actions.appendChild(
+        button('确认', () => void changeReportStatus(report.id, 'ack'), {
+          variant: 'secondary',
+          size: 'sm',
+        }),
+      );
+    }
+    if (report.status !== 'open') {
+      actions.appendChild(
+        button('重新打开', () => void changeReportStatus(report.id, 'open'), {
+          variant: 'secondary',
+          size: 'sm',
+        }),
+      );
+    }
+    if (report.status !== 'closed') {
+      actions.appendChild(
+        button('关闭', () => void changeReportStatus(report.id, 'closed'), {
+          variant: 'primary',
+          size: 'sm',
+        }),
+      );
+    }
+    if (
+      report.alertState === 'failed' ||
+      report.alertState === 'skipped' ||
+      report.alertState === 'no_webhook'
+    ) {
+      actions.appendChild(
+        button('重发告警', () => void retryReportAlert(report.id), {
+          variant: 'secondary',
+          size: 'sm',
+        }),
+      );
+    }
+    actions.appendChild(button('关闭详情', () => drawer.close(), { variant: 'ghost', size: 'sm' }));
+    add(wrapper, actions);
+    return wrapper;
+  }
+
+  async function changeReportStatus(reportId: string, status: ReportStatus): Promise<void> {
+    try {
+      await context.api.patch<{ report: ReportView }>(
+        `/reports/${encodeURIComponent(reportId)}`,
+        { status },
+        { signal: controller.signal },
+      );
+      if (destroyed) return;
+      succeeded(`报告状态已更新为 ${status}。`);
+      await reloadReports();
+      openReportDetail(reportId);
+    } catch (error) {
+      if (!destroyed) setStatus(describeError(error), 'error');
+    }
+  }
+
+  async function retryReportAlert(reportId: string): Promise<void> {
+    try {
+      await context.api.post<{ report: ReportView }>(
+        `/reports/${encodeURIComponent(reportId)}/retry-alert`,
+        undefined,
+        { signal: controller.signal },
+      );
+      if (destroyed) return;
+      succeeded('告警已重新排队。');
+      await reloadReports();
+      openReportDetail(reportId);
+    } catch (error) {
+      if (!destroyed) setStatus(describeError(error), 'error');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // AI configuration and annotation (design 08 §8)
+  // -------------------------------------------------------------------------
+
+  async function ensureAiConfig(force = false): Promise<void> {
+    if (state.aiConfigLoaded && !force) return;
+    const config = await context.api.get<AiConfigView>('/ai/config', {
+      signal: controller.signal,
+    });
+    if (destroyed) return;
+    state.aiConfig = config;
+    state.aiConfigLoaded = true;
+  }
+
+  async function loadAiPending(): Promise<void> {
+    const response = await context.api.get<{ items: PendingAnnotationView[] }>(
+      '/ai/annotations/pending',
+      { signal: controller.signal },
+    );
+    if (destroyed) return;
+    state.aiPending = Array.isArray(response.items) ? response.items : [];
+    state.aiPendingLoaded = true;
+  }
+
+  function buildAiTab(): HTMLElement {
+    const fragment = el('div');
+    setStyle(fragment, { display: 'flex', flexDirection: 'column', gap: '20px' });
+    fragment.append(buildAiConfigCard(), buildAiProposeCard(), buildAiPendingCard());
+    return fragment;
+  }
+
+  function buildAiConfigCard(): HTMLElement {
+    const config = state.aiConfig;
+    const handle = cardSection({
+      title: 'AI 配置',
+      subtitle: '启用后生成与标注会把工具名和描述发送给模型；密钥只以 $secret 引用。',
+      icon: 'activity',
+    });
+    if (config === null) {
+      add(handle.body, emptyBlock('没有读取到 AI 配置。', '检查服务端 /ai/config 端点。'));
+      return handle.element;
+    }
+    const ai = config.ai;
+    const enabledSwitch = switchControl({ checked: ai.enabled, label: '启用 AI' });
+    const autoSwitch = switchControl({
+      checked: ai.autoAnnotate,
+      label: '新接入 server 自动生成标注预览',
+    });
+    const claudeBin = input({
+      value: ai.claudeBin ?? '',
+      placeholder: '留空使用环境变量或默认 claude',
+    });
+    const model = input({ value: ai.model ?? '', placeholder: '留空使用 CLI 默认模型' });
+    const timeoutMs = input({
+      type: 'number',
+      value: String(ai.timeoutMs),
+      min: '5000',
+      max: '180000',
+    });
+    const sourceLine = el('div', 'toolbar');
+    add(
+      sourceLine,
+      badge(`生效命令 ${ai.effectiveClaudeBin}`, 'info'),
+      badge(`来源 ${ai.claudeBinSource}`, 'neutral'),
+      badge(`prompt v${config.prompts.propose}/${config.prompts.annotate}`, 'neutral'),
+      badge(`revision ${formatNumber(config.revision)}`, 'neutral'),
+    );
+    const errorLine = formError();
+    const save = button('保存', () => {
+      setFormError(errorLine, null);
+      const timeout = readInteger(timeoutMs.value, 'timeoutMs');
+      if (timeout < 5_000 || timeout > 180_000) {
+        setFormError(errorLine, 'timeoutMs 必须在 5000 到 180000 之间。');
+        return;
+      }
+      const body = {
+        ai: {
+          enabled: enabledSwitch.input.checked,
+          autoAnnotate: autoSwitch.input.checked,
+          claudeBin: nullIfEmpty(claudeBin.value),
+          model: nullIfEmpty(model.value),
+          timeoutMs: timeout,
+        },
+      };
+      state.aiConfigBusy = true;
+      save.disabled = true;
+      save.textContent = '保存中…';
+      void context.api
+        .put<{ ai: AiConfigView['ai']; revision: number }>('/ai/config', body, {
+          signal: controller.signal,
+          headers: { 'If-Match': String(config.revision) },
+        })
+        .then((response) => {
+          if (destroyed) return;
+          state.aiConfig = {
+            ai: response.ai,
+            prompts: config.prompts,
+            revision: response.revision,
+          };
+          state.aiConfigLoaded = true;
+          succeeded('已保存 AI 配置。');
+          renderTab();
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setFormError(errorLine, saveErrorText(error));
+          save.disabled = false;
+          save.textContent = '保存';
+        })
+        .finally(() => {
+          state.aiConfigBusy = false;
+        });
+    }, { variant: 'primary' });
+    add(
+      handle.body,
+      sourceLine,
+      enabledSwitch,
+      autoSwitch,
+      field('claudeBin', claudeBin),
+      field('model', model),
+      field('timeoutMs', timeoutMs),
+      errorLine,
+      save,
+    );
+    return handle.element;
+  }
+
+  function buildAiProposeCard(): HTMLElement {
+    const handle = cardSection({
+      title: '一句话生成 MCP 配置',
+      subtitle: '输入会发送给模型；密钥用 $secret 引用，预览确认后才会创建 server。',
+      icon: 'terminal',
+    });
+    const inputArea = textarea({
+      value: state.aiInput,
+      rows: 5,
+      placeholder: '例如：帮我配一个 github MCP，需要 GITHUB_TOKEN',
+    });
+    const counter = el('p', 'field-hint', '');
+    const updateCounter = (): void => {
+      const bytes = new TextEncoder().encode(inputArea.value).length;
+      counter.textContent = `${formatNumber(bytes)} / ${formatNumber(AI_INPUT_MAX_BYTES)} 字节`;
+    };
+    inputArea.addEventListener('input', () => {
+      state.aiInput = inputArea.value;
+      updateCounter();
+    });
+    updateCounter();
+    const errorLine = formError();
+    const generate = button('生成配置', () => {
+      setFormError(errorLine, null);
+      const bytes = new TextEncoder().encode(inputArea.value).length;
+      if (inputArea.value.trim() === '') {
+        setFormError(errorLine, '输入不能为空。');
+        return;
+      }
+      if (bytes > AI_INPUT_MAX_BYTES) {
+        setFormError(
+          errorLine,
+          `输入为 ${formatNumber(bytes)} 字节，超过上限 ${formatNumber(AI_INPUT_MAX_BYTES)} 字节。`,
+        );
+        return;
+      }
+      generate.disabled = true;
+      generate.textContent = `Claude 正在生成，最长 ${Math.round((state.aiConfig?.ai.timeoutMs ?? 60_000) / 1000)} 秒…`;
+      state.aiProposeBusy = true;
+      void context.api
+        .post<AiProposal>('/ai/propose', { input: inputArea.value }, { signal: controller.signal })
+        .then((proposal) => {
+          if (destroyed) return;
+          state.aiProposal = proposal;
+          renderTab();
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setFormError(errorLine, aiErrorText(error));
+        })
+        .finally(() => {
+          state.aiProposeBusy = false;
+          if (generate.isConnected) {
+            generate.disabled = false;
+            generate.textContent = '生成配置';
+          }
+        });
+    }, { variant: 'primary', icon: 'play' });
+    const toolbar = el('div', 'toolbar');
+    add(toolbar, generate);
+    add(handle.body, inputArea, counter, toolbar, errorLine);
+    if (state.aiProposal !== null) handle.body.appendChild(buildAiProposalCard(state.aiProposal));
+    return handle.element;
+  }
+
+  function buildAiProposalCard(proposal: AiProposal): HTMLElement {
+    const wrapper = el('div');
+    setStyle(wrapper, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    add(
+      wrapper,
+      notice('AI 生成，未经审核；stdio 等于允许执行命令，确认前请核对 command 与 args。', 'queue'),
+    );
+    if (proposal.server === null) {
+      add(
+        wrapper,
+        notice('模型没有给出可用的 server 草稿；请调整输入后重新生成。', 'error'),
+      );
+      add(wrapper, buildAiProposalFooter());
+      return wrapper;
+    }
+    const server = proposal.server;
+    add(wrapper, el('p', '', proposal.explanation));
+    if (proposal.warnings.length > 0) {
+      const list = el('ul');
+      setStyle(list, { margin: '0', paddingLeft: '20px' });
+      for (const warning of proposal.warnings) list.appendChild(el('li', '', warning));
+      add(wrapper, list);
+    }
+    if (proposal.idConflict) {
+      add(wrapper, notice('生成的 id 已存在；请修改 id 或取消后重新生成。', 'error'));
+    }
+    if (proposal.inputWarning === true) {
+      add(wrapper, notice('输入中可能包含字面密钥，已发送给模型；建议改用 $secret。', 'queue'));
+    }
+
+    const idInput = input({ value: server.id, placeholder: 'github' });
+    if (proposal.idConflict) {
+      setStyle(idInput, { borderColor: 'var(--error)' });
+      idInput.focus();
+    }
+    const labelInput = input({ value: server.label, placeholder: 'GitHub' });
+    const transportSelect = selectControl(TRANSPORT_OPTIONS, {
+      value: server.transport,
+      ariaLabel: 'transport',
+    });
+    const commandInput = input({ value: server.command ?? '', placeholder: 'npx' });
+    const argsArea = textarea({
+      value: argsForEditing(server.args),
+      rows: 3,
+      placeholder: '每行一个参数；<secret:NAME> 按引用保存',
+    });
+    const cwdInput = input({ value: server.cwd ?? '', placeholder: '/absolute/workspace' });
+    const urlInput = input({ value: server.url ?? '', placeholder: 'https://…/mcp' });
+    const envKeysArea = textarea({
+      value: server.envKeys.join('\n'),
+      rows: 2,
+      placeholder: '每行一个变量名；值到密钥页写入',
+    });
+    const headerKeysArea = textarea({
+      value: server.headerKeys.join('\n'),
+      rows: 2,
+      placeholder: '每行一个 header 名',
+    });
+    const enabledSwitch = switchControl({ checked: server.enabled, label: '启用该 server' });
+    const connectSelect = selectControl(CONNECT_MODE_OPTIONS, {
+      value: server.connectMode,
+      ariaLabel: 'connectMode',
+    });
+    const categoryInput = input({ value: server.category ?? '', placeholder: 'devtools' });
+    const tagsInput = input({ value: server.tags.join(', '), placeholder: 'git, github' });
+    const summaryInput = input({ value: server.summary ?? '', placeholder: '用于检索的摘要与英文关键词' });
+
+    const stdioFields = el('div');
+    setStyle(stdioFields, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    add(stdioFields, field('command', commandInput), field('args', argsArea), field('cwd', cwdInput));
+    const httpFields = el('div');
+    setStyle(httpFields, { display: 'flex', flexDirection: 'column', gap: '12px' });
+    add(httpFields, field('url', urlInput));
+    const showTransport = (): void => {
+      stdioFields.hidden = transportSelect.value !== 'stdio';
+      httpFields.hidden = transportSelect.value !== 'http';
+    };
+    transportSelect.addEventListener('change', showTransport);
+    showTransport();
+
+    const groups = formGrid();
+    add(
+      groups,
+      groupCard('基本信息', null, [
+        field('id', idInput),
+        field('label', labelInput),
+        field('transport', transportSelect),
+        field('connectMode', connectSelect),
+      ]),
+      groupCard('传输配置', 'envKeys/headerKeys 只允许键名；值到密钥页写入。', [
+        stdioFields,
+        httpFields,
+        field('env 键名', envKeysArea),
+        field('header 键名', headerKeysArea),
+      ]),
+      groupCard('元数据', 'summary 与 tags 用于检索。', [
+        field('summary', summaryInput),
+        field('category', categoryInput),
+        field('tags', tagsInput),
+        enabledSwitch,
+      ]),
+    );
+    const form = el('form');
+    form.noValidate = true;
+    setStyle(form, { display: 'flex', flexDirection: 'column', gap: '16px' });
+    const errorLine = formError();
+    const apply = button('确认创建', () => undefined, { type: 'submit', variant: 'primary' });
+    const cancel = button('取消', () => {
+      state.aiProposal = null;
+      renderTab();
+    }, { variant: 'ghost' });
+    const regenerate = button('重新生成', () => {
+      state.aiProposal = null;
+      renderTab();
+    }, { variant: 'secondary' });
+    const actions = el('div', 'toolbar');
+    add(actions, apply, regenerate, cancel);
+    add(form, groups, errorLine, actions);
+    wrapper.appendChild(form);
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      setFormError(errorLine, null);
+      const id = idInput.value.trim();
+      if (id === '') {
+        setFormError(errorLine, 'id 不能为空。');
+        return;
+      }
+      if (proposal.proposalId === null) {
+        setFormError(errorLine, '草稿已失效，请重新生成。');
+        return;
+      }
+      const transport = transportSelect.value === 'http' ? 'http' : 'stdio';
+      const command = transport === 'stdio' ? nullIfEmpty(commandInput.value) : null;
+      const args = transport === 'stdio' ? parseArgs(argsArea.value) : [];
+      if (
+        transport === 'stdio' &&
+        !confirmAction(
+          `即将创建 stdio server，启动命令为：\n\n${command ?? ''} ${args
+            .map((arg) => (typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`))
+            .join(' ')}\n\n这等于允许执行任意命令。继续？`,
+        )
+      ) {
+        return;
+      }
+      const body: Record<string, unknown> = {
+        proposalId: proposal.proposalId,
+        server: {
+          id,
+          label: labelInput.value.trim() === '' ? id : labelInput.value.trim(),
+          transport,
+          command,
+          args,
+          cwd: transport === 'stdio' ? nullIfEmpty(cwdInput.value) : null,
+          url: transport === 'http' ? nullIfEmpty(urlInput.value) : null,
+          envKeys: splitList(envKeysArea.value),
+          headerKeys: splitList(headerKeysArea.value),
+          enabled: enabledSwitch.input.checked,
+          connectMode: connectSelect.value === 'eager' ? 'eager' : 'lazy',
+          category: nullIfEmpty(categoryInput.value),
+          tags: splitList(tagsInput.value),
+          summary: nullIfEmpty(summaryInput.value),
+        },
+      };
+      if (transport === 'stdio') body['confirmStdio'] = true;
+      state.aiProposalApplyBusy = true;
+      apply.disabled = true;
+      apply.textContent = '创建中…';
+      void context.api
+        .post<{ server: ServerView; revision: number }>('/ai/propose/apply', body, {
+          signal: controller.signal,
+        })
+        .then(async (response) => {
+          if (destroyed) return;
+          state.serversRevision = numberOr(response.revision, state.serversRevision);
+          state.aiProposal = null;
+          state.aiInput = '';
+          succeeded(`已创建 server ${response.server.id}。`);
+          state.serversLoaded = false;
+          try {
+            await ensureServers(true);
+          } catch (refreshError) {
+            if (!destroyed) {
+              setStatus(`server 已创建，但刷新列表失败：${describeError(refreshError)}`, 'queue');
+            }
+          }
+          if (!destroyed) setTab('servers');
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setFormError(errorLine, aiErrorText(error));
+          apply.disabled = false;
+          apply.textContent = '确认创建';
+        })
+        .finally(() => {
+          state.aiProposalApplyBusy = false;
+        });
+    });
+    return wrapper;
+  }
+
+  function buildAiProposalFooter(): HTMLElement {
+    const toolbar = el('div', 'toolbar');
+    add(
+      toolbar,
+      button('重新生成', () => {
+        state.aiProposal = null;
+        renderTab();
+      }, { variant: 'secondary' }),
+      button('取消', () => {
+        state.aiProposal = null;
+        renderTab();
+      }, { variant: 'ghost' }),
+    );
+    return toolbar;
+  }
+
+  function buildAiPendingCard(): HTMLElement {
+    const handle = cardSection({
+      title: '待处理标注',
+      subtitle: `${formatNumber(state.aiPending.length)} 条自动生成的标注建议`,
+      icon: 'layers',
+      flush: true,
+      actions: [
+        button('刷新', () => {
+          void loadAiPending()
+            .then(() => renderTab())
+            .catch((error: unknown) => setStatus(describeError(error), 'error'));
+        }, { variant: 'secondary', icon: 'refresh' }),
+      ],
+    });
+    if (state.aiPending.length === 0) {
+      handle.body.appendChild(
+        emptyBlock('没有待处理标注。', '新接入 server 自动生成建议后会出现在这里。'),
+      );
+      return handle.element;
+    }
+    const table = el('table');
+    const thead = el('thead');
+    const head = el('tr');
+    for (const label of ['server', '生成时间', 'summary', 'tags', 'warnings', '操作']) {
+      add(head, el('th', '', label));
+    }
+    thead.appendChild(head);
+    const tbody = el('tbody');
+    for (const pending of state.aiPending) {
+      const row = el('tr');
+      add(
+        row,
+        el('td', 'mono', pending.serverId),
+        el('td', 'muted', formatTimestamp(pending.createdAt)),
+        clippedCell(pending.proposed.summary ?? '—', 320),
+        tagCell(pending.proposed.tags),
+        el('td', 'muted', formatNumber(pending.warnings.length)),
+        td(
+          rowActions(
+            button('预览', () => void openPendingAnnotation(pending), {
+              variant: 'ghost',
+              size: 'sm',
+            }),
+            button('应用', () => void applyPendingAnnotation(pending), {
+              variant: 'ghost',
+              size: 'sm',
+            }),
+          ),
+        ),
+      );
+      tbody.appendChild(row);
+    }
+    add(table, thead, tbody);
+    handle.body.appendChild(tablePanel(table));
+    return handle.element;
+  }
+
+  function annotationDraftFromPreview(
+    preview: AnnotationPreviewView,
+    tools: ToolRecord[],
+  ): AnnotationDraft {
+    return {
+      serverId: preview.serverId,
+      current: preview.current,
+      proposed: preview.proposed,
+      warnings: preview.warnings,
+      omittedTools: preview.omittedTools,
+      tools: buildAnnotationTools(preview.proposed.toolOverrides, tools),
+    };
+  }
+
+  function buildAnnotationTools(
+    overrides: ToolOverrideDraft[],
+    tools: ToolRecord[],
+  ): AnnotationToolDraft[] {
+    return overrides.map((override) => {
+      const tool = tools.find((entry) => entry.name === override.name);
+      const effectiveDescription =
+        tool === undefined
+          ? null
+          : tool.effective?.description ?? tool.descriptionOverride ?? tool.description;
+      return {
+        name: override.name,
+        currentDescription: effectiveDescription,
+        currentDescriptionSource:
+          tool === undefined
+            ? null
+            : tool.descriptionOverride !== null && tool.descriptionOverride !== undefined
+              ? 'override'
+              : 'upstream',
+        proposedDescription: override.description,
+        currentTags: tool?.effective?.tags ?? tool?.tags ?? [],
+        proposedTags: override.tags,
+      };
+    });
+  }
+
+  async function startServerAnnotation(server: ServerView): Promise<void> {
+    if (state.aiAnnotationBusy) return;
+    if (
+      !confirmAction(
+        `将把 ${server.id} 的工具名与描述（最多 80 个，每个 400 字符）发送给模型。敏感 server 请取消。继续？`,
+      )
+    ) {
+      return;
+    }
+    state.aiAnnotationBusy = true;
+    drawer.open(`AI 标注 · ${server.id}`, loading('Claude 正在生成标注预览…'));
+    try {
+      const preview = await context.api.post<AnnotationPreviewView>(
+        `/ai/annotate/${encodeURIComponent(server.id)}`,
+        { mode: 'preview' },
+        { signal: controller.signal },
+      );
+      const toolsResponse = await context.api.get<ToolsResponse>(
+        `/servers/${encodeURIComponent(server.id)}/tools`,
+        { signal: controller.signal },
+      );
+      if (destroyed) return;
+      openAnnotationPreview(
+        annotationDraftFromPreview(
+          preview,
+          Array.isArray(toolsResponse.tools) ? toolsResponse.tools : [],
+        ),
+      );
+    } catch (error) {
+      if (!destroyed) {
+        const box = el('div');
+        add(box, notice(aiErrorText(error), 'error'));
+        drawer.open(`AI 标注 · ${server.id}`, box);
+      }
+    } finally {
+      state.aiAnnotationBusy = false;
+    }
+  }
+
+  async function openPendingAnnotation(pending: PendingAnnotationView): Promise<void> {
+    const server = serverById(pending.serverId);
+    if (server === undefined) {
+      setStatus(`server ${pending.serverId} 不在当前列表，刷新后重试。`, 'error');
+      return;
+    }
+    state.aiAnnotationBusy = true;
+    drawer.open(`AI 标注 · ${pending.serverId}`, loading('正在读取工具与当前标注…'));
+    try {
+      const toolsResponse = await context.api.get<ToolsResponse>(
+        `/servers/${encodeURIComponent(pending.serverId)}/tools`,
+        { signal: controller.signal },
+      );
+      if (destroyed) return;
+      const preview: AnnotationPreviewView = {
+        serverId: pending.serverId,
+        current: {
+          summary: server.summary,
+          summarySource: server.summarySource ?? null,
+          category: server.category,
+          tags: [...server.tags],
+        },
+        proposed: pending.proposed,
+        warnings: pending.warnings,
+        omittedTools: pending.omittedTools,
+        meta: { model: null, durationMs: 0, promptVersion: 0, costUsd: null },
+      };
+      openAnnotationPreview(
+        annotationDraftFromPreview(
+          preview,
+          Array.isArray(toolsResponse.tools) ? toolsResponse.tools : [],
+        ),
+      );
+    } catch (error) {
+      if (!destroyed) {
+        const box = el('div');
+        add(box, notice(aiErrorText(error), 'error'));
+        drawer.open(`AI 标注 · ${pending.serverId}`, box);
+      }
+    } finally {
+      state.aiAnnotationBusy = false;
+    }
+  }
+
+  function openAnnotationPreview(draft: AnnotationDraft): void {
+    const wrapper = el('div');
+    setStyle(wrapper, { display: 'flex', flexDirection: 'column', gap: '16px' });
+    const head = el('div', 'toolbar');
+    add(
+      head,
+      badge(draft.serverId, 'info'),
+      badge(`summary 来源 ${draft.current.summarySource ?? '未设置'}`, 'neutral'),
+      draft.omittedTools > 0
+        ? badge(`仅标注前 80 个工具（另有 ${formatNumber(draft.omittedTools)} 个）`, 'queue')
+        : null,
+    );
+    add(wrapper, head);
+    if (draft.warnings.length > 0) {
+      const list = el('ul');
+      setStyle(list, { margin: '0', paddingLeft: '20px' });
+      for (const warning of draft.warnings) list.appendChild(el('li', '', warning));
+      add(wrapper, list);
+    }
+
+    const summaryBox = el('input');
+    summaryBox.type = 'checkbox';
+    summaryBox.checked =
+      draft.proposed.summary !== null &&
+      draft.current.summarySource !== 'manual' &&
+      draft.current.summarySource !== 'ai';
+    summaryBox.disabled = draft.proposed.summary === null;
+    const categoryBox = el('input');
+    categoryBox.type = 'checkbox';
+    categoryBox.checked =
+      draft.proposed.category !== null && draft.proposed.category !== draft.current.category;
+    categoryBox.disabled = draft.proposed.category === null;
+    const tagsBox = el('input');
+    tagsBox.type = 'checkbox';
+    tagsBox.checked = draft.proposed.tags.length > 0;
+    tagsBox.disabled = draft.proposed.tags.length === 0;
+    const mergedTags = [...new Set([...draft.current.tags, ...draft.proposed.tags])];
+    const tagsInput = input({ value: mergedTags.join(', '), placeholder: 'db, sql' });
+
+    const summaryCurrent = el('span', 'muted', draft.current.summary ?? '—');
+    const summaryProposed = el('pre', '', draft.proposed.summary ?? '—');
+    setStyle(summaryProposed, {
+      whiteSpace: 'pre-wrap',
+      margin: '0',
+      fontFamily: 'inherit',
+      fontSize: '13px',
+    });
+    const summaryLine = el('div', 'toolbar');
+    add(summaryLine, summaryBox, el('span', '', '应用 summary'), summaryCurrent, el('span', '', '→'), summaryProposed);
+    const categoryLine = el('div', 'toolbar');
+    add(
+      categoryLine,
+      categoryBox,
+      el('span', '', '应用 category'),
+      el('span', 'muted', draft.current.category ?? '—'),
+      el('span', '', '→'),
+      el('span', '', draft.proposed.category ?? '—'),
+    );
+    const tagsLine = el('div', 'toolbar');
+    add(
+      tagsLine,
+      tagsBox,
+      el('span', '', '应用 tags（当前 ∪ 建议）'),
+      badge(`当前 ${draft.current.tags.join(', ') || '—'}`, 'neutral'),
+      tagsInput,
+    );
+    add(wrapper, summaryLine, categoryLine, tagsLine);
+
+    const toolControls: Array<{
+      name: string;
+      descriptionBox: HTMLInputElement;
+      tagsBox: HTMLInputElement;
+      proposedDescription: string | null;
+      proposedTags: string[];
+    }> = [];
+    if (draft.tools.length > 0) {
+      const table = el('table');
+      const thead = el('thead');
+      const headRow = el('tr');
+      for (const label of ['工具', '当前描述', '建议描述', '建议 tags', '应用描述', '应用 tags']) {
+        add(headRow, el('th', '', label));
+      }
+      thead.appendChild(headRow);
+      const tbody = el('tbody');
+      for (const tool of draft.tools) {
+        const row = el('tr');
+        const descriptionBox = el('input');
+        descriptionBox.type = 'checkbox';
+        descriptionBox.checked =
+          tool.proposedDescription !== null &&
+          tool.currentDescriptionSource !== 'override' &&
+          tool.proposedDescription !== tool.currentDescription;
+        descriptionBox.disabled = tool.proposedDescription === null;
+        const toolTagsBox = el('input');
+        toolTagsBox.type = 'checkbox';
+        toolTagsBox.checked = tool.proposedTags.length > 0;
+        toolTagsBox.disabled = tool.proposedTags.length === 0;
+        toolControls.push({
+          name: tool.name,
+          descriptionBox,
+          tagsBox: toolTagsBox,
+          proposedDescription: tool.proposedDescription,
+          proposedTags: tool.proposedTags,
+        });
+        add(
+          row,
+          el('td', 'mono', tool.name),
+          clippedCell(tool.currentDescription ?? '—', 240),
+          clippedCell(tool.proposedDescription ?? '—', 240),
+          tagCell(tool.proposedTags),
+          td(descriptionBox),
+          td(toolTagsBox),
+        );
+        tbody.appendChild(row);
+      }
+      add(table, thead, tbody);
+      add(wrapper, tablePanel(table));
+    } else {
+      add(wrapper, notice('本次建议没有工具级覆盖。', 'info'));
+    }
+
+    const errorLine = formError();
+    const apply = button('应用标注', () => {
+      setFormError(errorLine, null);
+      const applyBody: Record<string, unknown> = {};
+      if (summaryBox.checked && draft.proposed.summary !== null) {
+        applyBody['summary'] = draft.proposed.summary;
+      }
+      if (categoryBox.checked && draft.proposed.category !== null) {
+        applyBody['category'] = draft.proposed.category;
+      }
+      if (tagsBox.checked) {
+        const tags = splitList(tagsInput.value);
+        if (tags.length > 0) applyBody['tags'] = tags;
+      }
+      const overrides: Array<Record<string, unknown>> = [];
+      for (const control of toolControls) {
+        if (!control.descriptionBox.checked && !control.tagsBox.checked) continue;
+        const entry: Record<string, unknown> = { name: control.name };
+        if (control.descriptionBox.checked) entry['description'] = control.proposedDescription;
+        if (control.tagsBox.checked && control.proposedTags.length > 0) {
+          entry['tags'] = control.proposedTags;
+        }
+        overrides.push(entry);
+      }
+      if (overrides.length > 0) applyBody['toolOverrides'] = overrides;
+      if (Object.keys(applyBody).length === 0) {
+        setFormError(errorLine, '没有勾选任何要应用的字段。');
+        return;
+      }
+      apply.disabled = true;
+      apply.textContent = '应用中…';
+      void context.api
+        .post<{ changed: string[]; revision: number }>(
+          `/ai/annotate/${encodeURIComponent(draft.serverId)}`,
+          { mode: 'apply', apply: applyBody },
+          {
+            signal: controller.signal,
+            headers: { 'If-Match': String(state.serversRevision) },
+          },
+        )
+        .then(async (response) => {
+          if (destroyed) return;
+          state.serversRevision = numberOr(response.revision, state.serversRevision);
+          const changed = Array.isArray(response.changed) ? response.changed : [];
+          if (changed.length === 0) toast('标注没有变化。', 'info');
+          else succeeded(`已应用标注：${formatNumber(changed.length)} 项变更。`);
+          drawer.close();
+          state.serversLoaded = false;
+          state.tools = [];
+          state.toolsServerId = null;
+          try {
+            await ensureServers(true);
+            if (!destroyed) await loadAiPending();
+          } catch (refreshError) {
+            if (!destroyed) {
+              setStatus(`标注已应用，但刷新列表失败：${describeError(refreshError)}`, 'queue');
+            }
+          }
+          if (!destroyed) renderTab();
+        })
+        .catch((error: unknown) => {
+          if (!destroyed) setFormError(errorLine, aiErrorText(error));
+          apply.disabled = false;
+          apply.textContent = '应用标注';
+        });
+    }, { variant: 'primary', icon: 'check' });
+    const cancel = button('取消', () => drawer.close(), { variant: 'ghost' });
+    const actions = el('div', 'toolbar');
+    add(actions, apply, cancel);
+    add(wrapper, errorLine, actions);
+    drawer.open(`AI 标注 · ${draft.serverId}`, wrapper);
+  }
+
+  async function applyPendingAnnotation(pending: PendingAnnotationView): Promise<void> {
+    if (
+      !confirmAction(
+        `直接把 ${pending.serverId} 的待处理标注写入 catalog（summary/category/tags 与全部工具覆盖）？`,
+      )
+    ) {
+      return;
+    }
+    const apply: Record<string, unknown> = {};
+    if (pending.proposed.summary !== null) apply['summary'] = pending.proposed.summary;
+    if (pending.proposed.category !== null) apply['category'] = pending.proposed.category;
+    const currentServer = serverById(pending.serverId);
+    const mergedTags = [
+      ...new Set([...(currentServer?.tags ?? []), ...pending.proposed.tags]),
+    ];
+    if (mergedTags.length > 0) apply['tags'] = mergedTags;
+    const overrides = pending.proposed.toolOverrides.map((override) => {
+      const entry: Record<string, unknown> = { name: override.name };
+      if (override.description !== null) entry['description'] = override.description;
+      if (override.tags.length > 0) entry['tags'] = override.tags;
+      return entry;
+    });
+    if (overrides.length > 0) apply['toolOverrides'] = overrides;
+    if (Object.keys(apply).length === 0) {
+      setStatus('这条待处理标注没有可应用的字段；请先预览。', 'queue');
+      return;
+    }
+    try {
+      const response = await context.api.post<{ changed: string[]; revision: number }>(
+        `/ai/annotate/${encodeURIComponent(pending.serverId)}`,
+        { mode: 'apply', apply },
+        {
+          signal: controller.signal,
+          headers: { 'If-Match': String(state.serversRevision) },
+        },
+      );
+      if (destroyed) return;
+      state.serversRevision = numberOr(response.revision, state.serversRevision);
+      const changed = Array.isArray(response.changed) ? response.changed : [];
+      if (changed.length === 0) toast('标注没有变化。', 'info');
+      else succeeded(`已应用标注：${formatNumber(changed.length)} 项变更。`);
+      state.serversLoaded = false;
+      state.tools = [];
+      state.toolsServerId = null;
+      try {
+        await ensureServers(true);
+        if (!destroyed) await loadAiPending();
+      } catch (refreshError) {
+        if (!destroyed) {
+          setStatus(`标注已应用，但刷新列表失败：${describeError(refreshError)}`, 'queue');
+        }
+      }
+      if (!destroyed) renderTab();
+    } catch (error) {
+      if (!destroyed) setStatus(aiErrorText(error), 'error');
+    }
+  }
+
+  function aiErrorText(error: unknown): string {
+    if (!(error instanceof ApiError)) return describeError(error);
+    const details = errorDetails(error);
+    switch (error.code) {
+      case 'AI_DISABLED':
+        return 'AI 未启用；请先在配置卡启用并保存。';
+      case 'AI_BUSY':
+        return '已有 AI 任务在运行，请 1 秒后重试。';
+      case 'AI_TIMEOUT':
+        return `已超过配置的 timeoutMs${details?.['timeoutMs'] === undefined ? '' : `（${String(details['timeoutMs'])}ms）`}；可调大 timeoutMs 后重试。`;
+      case 'AI_INPUT_EMPTY':
+        return '输入不能为空。';
+      case 'AI_INPUT_TOO_LARGE':
+        return `输入为 ${String(details?.['actualBytes'] ?? '?')} 字节，超过上限 ${String(details?.['maxBytes'] ?? '?')} 字节。`;
+      case 'AI_RUN_FAILED':
+        return `Claude 运行失败：${error.message}`;
+      case 'AI_BAD_ENVELOPE':
+      case 'AI_INVALID_JSON':
+        return `Claude 输出无法解析：${error.message}`;
+      case 'AI_OUTPUT_TOO_LARGE':
+        return 'Claude 输出超过 256 KiB，已拒绝。';
+      case 'AI_RUNNER_UNAVAILABLE':
+        return `找不到或无法启动 Claude CLI：${error.message}。请检查 claudeBin 配置。`;
+      case 'AI_PROPOSAL_INVALID':
+        return `草案不合法：${error.message}`;
+      case 'AI_SECRET_LITERAL':
+        return '草案里出现疑似字面密钥；请改用 $secret 引用。';
+      case 'AI_PROPOSAL_NOT_FOUND':
+        return '草图不存在或已被使用，请重新生成。';
+      case 'AI_PROPOSAL_EXPIRED':
+        return '草图已过期，请重新生成。';
+      case 'AI_ANNOTATION_INVALID':
+        return `标注结果不合法：${error.message}`;
+      case 'AI_UNKNOWN_TOOL': {
+        const names = details?.['names'];
+        const list = Array.isArray(names) ? names.map(String).join(', ') : '未知工具';
+        return `标注引用了不存在的工具：${list}；请重新预览。`;
+      }
+      case 'SERVER_NOT_ANNOTATABLE':
+        return '该 server 不支持 AI 标注（builtin 或 seed server）。';
+      case 'STDIO_CONFIRM_REQUIRED':
+        return 'stdio server 需要确认命令后才能创建。';
+      case 'SERVER_EXISTS':
+        return `server ${String(details?.['serverId'] ?? '')} 已存在。`;
+      case 'EMPTY_PATCH':
+        return '没有可应用的变更。';
+      case 'REVISION_CONFLICT':
+        return `${error.message}；配置已被其他页面修改，请刷新后重试。`;
+      default:
+        return describeError(error);
+    }
+  }
+
+  function alertErrorText(error: unknown): string {
+    if (!(error instanceof ApiError)) return describeError(error);
+    const details = errorDetails(error);
+    switch (error.code) {
+      case 'WEBHOOK_NOT_CONFIGURED':
+        return '还没有配置 webhook；先保存一个企业微信 webhook。';
+      case 'WEBHOOK_URL_INVALID':
+        return `webhook URL 不合法${details?.['rule'] === undefined ? '' : `（${String(details['rule'])}）`}。`;
+      case 'ALERT_TEST_THROTTLED':
+        return `测试发送过于频繁；${retryAfterText(details)}。`;
+      case 'REVISION_CONFLICT':
+        return `${error.message}；配置已被其他页面修改，请刷新后重试。`;
+      default:
+        return describeError(error);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Config export / import
   // -------------------------------------------------------------------------
 
@@ -2114,6 +4541,7 @@ export function createManagePage(context: PageContext): PageHandle {
     destroy(): void {
       destroyed = true;
       controller.abort();
+      stopReportsPolling();
       drawer.destroy();
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
@@ -2292,6 +4720,46 @@ function saveErrorText(error: unknown): string {
   return text;
 }
 
+function errorDetails(error: ApiError): Record<string, unknown> | null {
+  const details = error.details;
+  if (typeof details !== 'object' || details === null || Array.isArray(details)) return null;
+  return details as Record<string, unknown>;
+}
+
+function retryAfterText(details: Record<string, unknown> | null): string {
+  const value = details?.['retryAfterMs'];
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${formatDuration(value)} 后重试`
+    : '稍后重试';
+}
+
+function severityTone(severity: Severity): 'error' | 'queue' | 'info' | 'neutral' {
+  if (severity === 'critical') return 'error';
+  if (severity === 'high') return 'queue';
+  if (severity === 'medium') return 'info';
+  return 'neutral';
+}
+
+function reportStatusTone(status: ReportStatus): 'ok' | 'queue' | 'info' {
+  if (status === 'closed') return 'ok';
+  if (status === 'ack') return 'queue';
+  return 'info';
+}
+
+function alertStateBadge(state: AlertState): HTMLSpanElement {
+  const tone =
+    state === 'sent'
+      ? 'ok'
+      : state === 'failed' || state === 'no_webhook'
+        ? 'error'
+        : state === 'skipped'
+          ? 'queue'
+          : state === 'pending' || state === 'sending'
+            ? 'info'
+            : 'neutral';
+  return badge(state, tone);
+}
+
 function tabLabel(tab: Tab): string {
   return TABS.find((entry) => entry.id === tab)?.label ?? tab;
 }
@@ -2321,6 +4789,13 @@ function parseArgs(value: string): Array<string | { $secret: string }> {
       ? { $secret: match[1] }
       : line;
   });
+}
+
+/** Renders secret-backed args as the `<secret:NAME>` form accepted by {@link parseArgs}. */
+function argsForEditing(args: Array<string | { $secret: string }>): string {
+  return args
+    .map((arg) => (typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`))
+    .join('\n');
 }
 
 function splitList(value: string): string[] {

@@ -2,7 +2,9 @@
 
 import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
+import type { ReportService } from '../reports/service.ts';
 import { describeTools, type DescribeToolsInput } from './describe.ts';
+import { reportProblemCall } from './report.ts';
 import { toCallToolResult, validateToolArguments, type CallToolResult } from './registry.ts';
 import { searchTools, type SearchToolsInput } from './search.ts';
 import {
@@ -26,6 +28,8 @@ export interface ToolCallContext {
   tasks: McpTaskStore;
   /** True when this request declared `io.modelcontextprotocol/tasks`. */
   tasksDeclared?: boolean;
+  /** Wired by assembly; absent in focused tests, which makes report_problem fail closed. */
+  reports?: ReportService;
 }
 
 export type ToolCallResponse = CallToolResult | CreateTaskResult;
@@ -254,6 +258,8 @@ export async function callTool(
       return describeToolsCall(args, ctx);
     case 'wait_tasks':
       return waitTasksCall(args, ctx);
+    case 'report_problem':
+      return reportProblemCall(args, ctx);
     default:
       throw new UnknownToolError(name);
   }

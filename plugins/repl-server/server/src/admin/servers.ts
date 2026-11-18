@@ -18,6 +18,14 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
+import {
+  parseToolDiscoveryConfig,
+  type ParseDiscoveryOptions,
+} from '../discovery/config.ts';
+import {
+  DiscoveryConfigError,
+  type ToolDiscoveryConfig,
+} from '../discovery/types.ts';
 import { systemClock, type Clock } from '../ports.ts';
 
 // ---------------------------------------------------------------------------
@@ -453,6 +461,8 @@ export interface ServerConfig {
   tags: string[];
   timeoutMs: number;
   maxConcurrency: number;
+  /** Lazy-tool discovery configuration; `null`/absent means a static catalog. */
+  toolDiscovery?: ToolDiscoveryConfig | null;
 }
 
 export interface ServerRecord extends ServerConfig {
@@ -478,6 +488,8 @@ export interface ServerConfigPatch {
   tags?: string[];
   timeoutMs?: number;
   maxConcurrency?: number;
+  /** `null` clears discovery back to static; omitted leaves it unchanged. */
+  toolDiscovery?: ToolDiscoveryConfig | null;
 }
 
 export interface ServerRuntimeState {
@@ -496,6 +508,8 @@ export interface ServerView
   args: string[];
   envKeys: string[];
   headerKeys: string[];
+  /** Rendered by this module's `viewServer` (`null` for static). */
+  toolDiscovery?: ToolDiscoveryConfig | null;
   state: string;
   lastError?: string;
 }
@@ -545,6 +559,17 @@ export interface AdminServersDeps {
   clock?: Clock;
   /** `POST /servers/:id/test` budget; docs freeze 10s. */
   testTimeoutMs?: number;
+  /**
+   * Discovery lifecycle hook. Called after a committed `PATCH /servers/:id`
+   * switches `toolDiscovery.mode` from search to static, so the implementation
+   * can mark every `discovered_via='search'` row stale and rebuild the catalog.
+   * Optional to keep existing callers source-compatible.
+   */
+  discovery?: AdminServersDiscoveryHooks;
+}
+
+export interface AdminServersDiscoveryHooks {
+  demote(serverId: string): Promise<unknown> | unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +601,7 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   'tags',
   'timeoutMs',
   'maxConcurrency',
+  'toolDiscovery',
 ]);
 
 const PATCH_FIELDS: ReadonlySet<string> = new Set([
@@ -597,6 +623,7 @@ const PATCH_FIELDS: ReadonlySet<string> = new Set([
   'tags',
   'timeoutMs',
   'maxConcurrency',
+  'toolDiscovery',
 ]);
 
 function readTransport(value: unknown): Exclude<ServerTransport, 'builtin'> {
@@ -693,6 +720,24 @@ function readNullableAbsolutePath(value: unknown, field: string): string | null 
   return text === '' ? null : text;
 }
 
+/**
+ * Shared validation for `toolDiscovery`. Returns `null` for static; converts
+ * discovery errors to the admin 422 shape so every route reports the same code.
+ */
+function readToolDiscovery(
+  value: unknown,
+  options?: ParseDiscoveryOptions,
+): ToolDiscoveryConfig | null {
+  try {
+    return parseToolDiscoveryConfig(value, options);
+  } catch (error) {
+    if (error instanceof DiscoveryConfigError) {
+      throw new AdminApiError(error.status, error.code, error.message, error.details);
+    }
+    throw error;
+  }
+}
+
 function applySecretKeys(
   base: Record<string, SecretValue>,
   keys: readonly string[],
@@ -768,7 +813,7 @@ function assertTransportConfig(
   }
 }
 
-function parseCreateServer(body: Record<string, unknown>): ServerConfig {
+export function parseCreateServer(body: Record<string, unknown>): ServerConfig {
   rejectUnknownFields(body, CREATE_FIELDS);
 
   const rawId = body['id'];
@@ -839,6 +884,7 @@ function parseCreateServer(body: Record<string, unknown>): ServerConfig {
     body['maxConcurrency'] === undefined
       ? DEFAULT_MAX_CONCURRENCY
       : expectInteger(body['maxConcurrency'], 'maxConcurrency', { min: 1, max: 64 });
+  const toolDiscovery = readToolDiscovery(body['toolDiscovery']);
 
   const config: ServerConfig = {
     id,
@@ -858,6 +904,7 @@ function parseCreateServer(body: Record<string, unknown>): ServerConfig {
     tags,
     timeoutMs,
     maxConcurrency,
+    toolDiscovery,
   };
 
   assertTransportConfig(config);
@@ -917,6 +964,9 @@ function parseServerPatch(
       min: 1,
       max: 64,
     });
+  }
+  if ('toolDiscovery' in body) {
+    patch.toolDiscovery = readToolDiscovery(body['toolDiscovery']);
   }
 
   if ('env' in body) patch.env = readSecretRecord(body['env'], 'env', ENV_KEY_PATTERN);
@@ -1018,6 +1068,7 @@ function viewServer(record: ServerRecord, runtime: ServerRuntimeState | null): S
     tags: [...record.tags],
     timeoutMs: record.timeoutMs,
     maxConcurrency: record.maxConcurrency,
+    toolDiscovery: record.toolDiscovery ?? null,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     revision: record.revision,
@@ -1118,7 +1169,21 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
     // Validate the patch before the precondition so malformed bodies always get 400/422.
     const patch = parseServerPatch(current, requireObjectBody(request));
     assertRevision(await deps.servers.revision(), expected);
+    const wasSearch = current.toolDiscovery?.mode === 'search';
     const { server, revision } = await deps.servers.update(id, patch, expected);
+
+    // Switching discovery back to static demotes every discovered row. Doing it
+    // after the committed update keeps the server config authoritative; the hook
+    // also rebuilds the catalog snapshot so stale rows disappear immediately.
+    const nextDiscovery = patch.toolDiscovery;
+    if (
+      deps.discovery !== undefined &&
+      wasSearch &&
+      nextDiscovery !== undefined &&
+      (nextDiscovery === null || nextDiscovery.mode === 'static')
+    ) {
+      await deps.discovery.demote(id);
+    }
 
     return adminJson(200, {
       server: viewServer(server, await deps.pool.state(server.id)),

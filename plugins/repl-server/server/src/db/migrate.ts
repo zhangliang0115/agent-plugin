@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createSchemaV1, SCHEMA_VERSION } from './schema.ts';
+import { createSchemaV1, createSchemaV2, SCHEMA_VERSION } from './schema.ts';
 
 export interface OpenStateDbOptions {
   /** Create the parent directory (mode 0700) when it does not exist. Default true. */
@@ -45,15 +45,22 @@ export function openStateDb(path: string, options: OpenStateDbOptions = {}): Dat
 
 /** Applies pending migrations. Idempotent: a migrated database is left untouched. */
 export function migrate(db: DatabaseSync): number {
-  const current = readUserVersion(db);
+  let current = readUserVersion(db);
   if (current > SCHEMA_VERSION) {
     throw new Error(`state.db schema version ${current} is newer than supported ${SCHEMA_VERSION}`);
   }
   if (current === SCHEMA_VERSION) return current;
   withTransaction(db, () => {
-    applyV1(db);
+    if (current < 1) {
+      applyV1(db);
+      current = 1;
+    }
+    if (current < 2) {
+      applyV2(db);
+      current = 2;
+    }
   });
-  return SCHEMA_VERSION;
+  return current;
 }
 
 /**
@@ -92,7 +99,13 @@ function applyV1(db: DatabaseSync): void {
   `);
   insertSeed.run('__official__', 'Official Claude Code tools', now, now);
   insertSeed.run('__builtin__', 'Built-in composite tools', now, now);
-  db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
+  db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run('schema_version', '1');
   db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run('revision', '0');
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  db.exec('PRAGMA user_version = 1');
+}
+
+function applyV2(db: DatabaseSync): void {
+  createSchemaV2(db);
+  db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 2');
 }

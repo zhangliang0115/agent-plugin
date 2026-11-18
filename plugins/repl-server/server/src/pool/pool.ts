@@ -129,8 +129,32 @@ export interface PoolEntrySnapshot {
   lastError: { code: string; message: string } | null;
 }
 
+export interface PoolCallPrepare {
+  /** Upstream search tool name. */
+  tool: string;
+  /** Arguments for the search tool (already `$query`-substituted). */
+  args: unknown;
+  /** Prepare-cache key on the current connection; typically the called tool. */
+  cacheKey: string;
+  /** Warm-up budget; only `min(15000, remaining call budget)` is ever used. */
+  timeoutMs?: number;
+  /**
+   * Optional: parse the search result into the set of tool names it registered.
+   * Returning `undefined` means "could not parse" and keeps only the cacheKey.
+   */
+  onPrepared?: (result: unknown) => readonly string[] | undefined;
+}
+
 export interface PoolCallOptions {
   /** Recorded per in-flight call; gates enforce the binding quota, not the pool. */
+  bindingId?: string | null;
+  signal?: AbortSignal;
+  /** When present, warm the connection with this search before the business call. */
+  prepare?: PoolCallPrepare;
+}
+
+/** Options for {@link ConnectionPool.callToolDirect}; no gates and no prepare. */
+export interface PoolDirectCallOptions {
   bindingId?: string | null;
   signal?: AbortSignal;
 }
@@ -175,6 +199,8 @@ export const POOL_DEFAULTS = {
   circuitCooldownMs: 60_000,
   envWhitelist: ['PATH', 'HOME', 'LANG'] as const,
   stderrChunkChars: 8_192,
+  /** Upper bound for one call-time discovery warm-up (design 07 §4.6). */
+  prepareTimeoutMs: 15_000,
 } as const;
 
 const BACKOFF_JITTER_RATIO = 0.2;
@@ -223,6 +249,12 @@ interface PoolEntry {
   readonly inflight: Map<number, InflightCall>;
   retryTimer: ReturnType<typeof setTimeout> | null;
   lastError: { code: string; message: string } | null;
+  /** cacheKeys prepared on the current connection generation. */
+  prepared: Set<string>;
+  /** In-flight prepare promises, one per cacheKey. */
+  preparePending: Map<string, Promise<void>>;
+  /** Bumped by explicit invalidation so late writes cannot land. */
+  prepareEpoch: number;
 }
 
 /**
@@ -366,12 +398,50 @@ export class ConnectionPool {
    * Calls a tool through the pooled connection. The pool never replays: one
    * attempt, one result or one error. Gates (binding quota, serial/exclusive)
    * wrap this method; they are not applied here.
+   *
+   * When `options.prepare` is present and the cacheKey is not prepared on the
+   * current connection, the search tool runs first on the same client. Prepare
+   * and the business call share one deadline.
    */
   async callTool(
     serverId: string,
     tool: string,
     args: unknown,
     options: PoolCallOptions = {},
+  ): Promise<unknown> {
+    return await this.callOnConnection(serverId, tool, args, options, options.prepare);
+  }
+
+  /**
+   * One call on the pooled connection without gates and without preparation.
+   * Used by a caller that already holds the server's serial gate (discovery
+   * scans must not re-enter {@link PoolGates}).
+   */
+  async callToolDirect(
+    serverId: string,
+    tool: string,
+    args: unknown,
+    options: PoolDirectCallOptions = {},
+  ): Promise<unknown> {
+    return await this.callOnConnection(serverId, tool, args, options, undefined);
+  }
+
+  /**
+   * Drops every warm-up entry for one server. In-flight prepares are also
+   * invalidated, so a late result cannot repopulate the cache.
+   */
+  invalidatePrepared(serverId: string): void {
+    const entry = this.serverMap.get(serverId);
+    if (entry === undefined) return;
+    this.clearPrepared(entry);
+  }
+
+  private async callOnConnection(
+    serverId: string,
+    tool: string,
+    args: unknown,
+    options: PoolDirectCallOptions,
+    prepare: PoolCallPrepare | undefined,
   ): Promise<unknown> {
     await this.ensureConnected(serverId);
     const entry = this.requireEntry(serverId);
@@ -405,7 +475,10 @@ export class ConnectionPool {
       });
     });
 
-    const task = Promise.resolve(client.callTool(tool, args, { signal: controller.signal }));
+    const deadline = this.options.clock.now() + this.options.callTimeoutMs;
+    const task = this.invoke(entry, tool, args, prepare, controller.signal, deadline, (reason) =>
+      controller.abort(reason),
+    );
     try {
       const result = await withTimeout(
         Promise.race([task, death]),
@@ -416,24 +489,194 @@ export class ConnectionPool {
       this.markHealthy(entry);
       return result;
     } catch (error) {
-      if (errorCode(error) === 'MCP_SESSION_EXPIRED_RETRY') {
-        // HTTP session expiry is a reconnect event, not a business failure.
-        // The call still rejects unchanged: MCP tools are not idempotent, so
-        // the pool never replays it (design 03 §3.3).
-        this.abandonTransport(entry, 'HTTP session expired');
-      } else if (isTransportFailure(error)) {
-        // A tool-level JSON-RPC error proves the transport is alive; only
-        // transport failures degrade the entry. `markTransportFailure` is a
-        // no-op when a concurrent close already moved the entry out of
-        // ready/degraded, so the failure is counted once.
-        this.markTransportFailure(entry.spec.id, error);
-      } else if (entry.state === 'ready' || entry.state === 'degraded') {
-        this.markHealthy(entry);
+      // Warm-up failures already classified the transport inside
+      // `prepareForCall`; re-classifying the wrapper would mark a genuinely
+      // degraded link healthy again.
+      if (errorCode(error) !== 'MCP_DISCOVERY_PREPARE_FAILED') {
+        this.classifyFailure(entry, error);
       }
       throw error;
     } finally {
       entry.inflight.delete(callId);
       signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /** Runs the optional warm-up, then the business call, on one connection. */
+  private async invoke(
+    entry: PoolEntry,
+    tool: string,
+    args: unknown,
+    prepare: PoolCallPrepare | undefined,
+    signal: AbortSignal,
+    deadline: number,
+    abortCall: (reason: unknown) => void,
+  ): Promise<unknown> {
+    if (prepare !== undefined) {
+      if (entry.prepared.has(prepare.cacheKey)) {
+        this.auditPrepare(entry, tool, prepare.cacheKey, true, 0, true, undefined);
+      } else {
+        await this.prepareForCall(entry, prepare, signal, deadline, abortCall);
+      }
+    }
+
+    const client = entry.client;
+    if (client === null) throw unavailableError(entry, `server is ${entry.state}`);
+    try {
+      return await client.callTool(tool, args, { signal });
+    } catch (error) {
+      if (prepare !== undefined && isUnknownToolError(error)) {
+        // The upstream tool set moved on; the next call prepares again.
+        entry.prepared.delete(prepare.cacheKey);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * One warm-up, deduplicated per cacheKey. A successful result replaces the
+   * prepared set with the parsed registered names (replace semantics are safe
+   * for both overwrite-style and additive upstreams), always after checking
+   * the connection generation and the invalidation epoch.
+   */
+  private async prepareForCall(
+    entry: PoolEntry,
+    prepare: PoolCallPrepare,
+    signal: AbortSignal,
+    deadline: number,
+    abortCall: (reason: unknown) => void,
+  ): Promise<void> {
+    const pending = entry.preparePending.get(prepare.cacheKey);
+    if (pending !== undefined) {
+      await pending;
+      return;
+    }
+
+    const generation = entry.generation;
+    const epoch = entry.prepareEpoch;
+    const startedAt = this.options.clock.now();
+    const remaining = deadline - startedAt;
+    const maxBudget = Math.min(POOL_DEFAULTS.prepareTimeoutMs, remaining);
+    if (maxBudget <= 0) {
+      throw prepareError(entry, prepare, 'deadline_exceeded', undefined, false);
+    }
+    const budget = Math.max(
+      1,
+      Math.min(prepare.timeoutMs ?? POOL_DEFAULTS.prepareTimeoutMs, maxBudget),
+    );
+
+    const task = (async (): Promise<void> => {
+      const client = entry.client;
+      if (client === null) {
+        throw prepareError(entry, prepare, 'not_connected', undefined, true);
+      }
+
+      let result: unknown;
+      try {
+        result = await withTimeout(
+          Promise.resolve(client.callTool(prepare.tool, prepare.args, { signal })),
+          budget,
+          () => abortCall(new Error('discovery prepare timeout')),
+          () => prepareError(entry, prepare, 'timeout', undefined, true),
+        );
+      } catch (error) {
+        if (errorCode(error) === 'MCP_DISCOVERY_PREPARE_FAILED') {
+          this.auditPrepare(entry, prepare.tool, prepare.cacheKey, false, this.elapsed(startedAt), false, errorCode(error));
+          throw error;
+        }
+        this.classifyFailure(entry, error);
+        const wrapped = prepareError(entry, prepare, 'search_failed', error, isRetryable(error));
+        this.auditPrepare(entry, prepare.tool, prepare.cacheKey, false, this.elapsed(startedAt), false, wrapped.code);
+        throw wrapped;
+      }
+
+      if (entry.generation !== generation) {
+        const error = prepareError(entry, prepare, 'generation_changed', undefined, true);
+        this.auditPrepare(entry, prepare.tool, prepare.cacheKey, false, this.elapsed(startedAt), false, error.code);
+        throw error;
+      }
+      if (entry.prepareEpoch !== epoch) {
+        const error = prepareError(entry, prepare, 'invalidated', undefined, true);
+        this.auditPrepare(entry, prepare.tool, prepare.cacheKey, false, this.elapsed(startedAt), false, error.code);
+        throw error;
+      }
+
+      if (prepare.onPrepared !== undefined) {
+        let names: readonly string[] | undefined;
+        try {
+          names = prepare.onPrepared(result);
+        } catch {
+          names = undefined;
+        }
+        if (names !== undefined) entry.prepared = new Set(names);
+      }
+      entry.prepared.add(prepare.cacheKey);
+      this.auditPrepare(entry, prepare.tool, prepare.cacheKey, false, this.elapsed(startedAt), true, undefined);
+    })();
+
+    entry.preparePending.set(prepare.cacheKey, task);
+    try {
+      await task;
+    } finally {
+      if (entry.preparePending.get(prepare.cacheKey) === task) {
+        entry.preparePending.delete(prepare.cacheKey);
+      }
+    }
+  }
+
+  /** Degrades or reconnects for transport failures; tool errors leave the link alone. */
+  private classifyFailure(entry: PoolEntry, error: unknown): void {
+    if (errorCode(error) === 'MCP_SESSION_EXPIRED_RETRY') {
+      // HTTP session expiry is a reconnect event, not a business failure.
+      // The call still rejects unchanged: MCP tools are not idempotent, so
+      // the pool never replays it (design 03 §3.3).
+      this.abandonTransport(entry, 'HTTP session expired');
+    } else if (isTransportFailure(error)) {
+      // A tool-level JSON-RPC error proves the transport is alive; only
+      // transport failures degrade the entry. `markTransportFailure` is a
+      // no-op when a concurrent close already moved the entry out of
+      // ready/degraded, so the failure is counted once.
+      this.markTransportFailure(entry.spec.id, error);
+    } else if (entry.state === 'ready' || entry.state === 'degraded') {
+      this.markHealthy(entry);
+    }
+  }
+
+  private clearPrepared(entry: PoolEntry): void {
+    entry.prepared.clear();
+    entry.preparePending.clear();
+    entry.prepareEpoch += 1;
+  }
+
+  private elapsed(startedAt: number): number {
+    return Math.max(0, this.options.clock.now() - startedAt);
+  }
+
+  private auditPrepare(
+    entry: PoolEntry,
+    tool: string,
+    cacheKey: string,
+    cacheHit: boolean,
+    ms: number,
+    ok: boolean,
+    errorCodeValue: string | undefined,
+  ): void {
+    const audit = this.options.audit;
+    if (audit === undefined) return;
+    try {
+      audit.write({
+        event: 'discovery_prepare',
+        ts: new Date(this.options.clock.now()).toISOString(),
+        server: entry.spec.id,
+        tool,
+        cacheKey,
+        cacheHit,
+        ms,
+        ok,
+        ...(errorCodeValue === undefined ? {} : { errorCode: errorCodeValue }),
+      });
+    } catch {
+      // Audit must never fail a call.
     }
   }
 
@@ -529,6 +772,9 @@ export class ConnectionPool {
       inflight: new Map(),
       retryTimer: null,
       lastError: null,
+      prepared: new Set<string>(),
+      preparePending: new Map<string, Promise<void>>(),
+      prepareEpoch: 0,
     };
     this.serverMap.set(spec.id, entry);
   }
@@ -729,6 +975,7 @@ export class ConnectionPool {
     const client = entry.client;
     entry.client = null;
     entry.transport = null;
+    this.clearPrepared(entry);
     void closeQuietly(client);
     void this.removeLedger(entry);
     this.recordFailure(entry);
@@ -846,6 +1093,7 @@ export class ConnectionPool {
     const transport = entry.transport;
     entry.client = null;
     entry.transport = null;
+    this.clearPrepared(entry);
     await closeQuietly(client);
     await closeQuietly(transport);
   }
@@ -968,6 +1216,63 @@ function callTimeoutError(entry: PoolEntry, tool: string): McpToolError {
     tool,
     retryable: true,
   });
+}
+
+/** Tool-level "gone" errors that mean the prepare cache is out of date. */
+function isUnknownToolError(error: unknown): boolean {
+  if (errorCode(error) === 'MCP_TOOL_NOT_FOUND') return true;
+  if (error === null || typeof error !== 'object') return false;
+  const detail = (error as { detail?: unknown }).detail;
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    (detail as { code?: unknown }).code === 'TOOL_NOT_FOUND'
+  );
+}
+
+function isRetryable(error: unknown): boolean {
+  if (error !== null && typeof error === 'object') {
+    const retryable = (error as { retryable?: unknown }).retryable;
+    if (typeof retryable === 'boolean') return retryable;
+    if (isTransportFailure(error)) return true;
+  }
+  return false;
+}
+
+function describeCause(error: unknown): unknown {
+  if (error === null || typeof error !== 'object') return error === undefined ? undefined : String(error);
+  const record = error as { code?: unknown; message?: unknown };
+  const detail: Record<string, unknown> = {};
+  if (typeof record.code === 'string') detail['code'] = record.code;
+  if (typeof record.message === 'string') detail['message'] = record.message;
+  return Object.keys(detail).length === 0 ? String(error) : detail;
+}
+
+/**
+ * A failed warm-up never becomes a business error: the call is not sent, and
+ * the script sees an explicit preparation failure (design 07 §4.5).
+ */
+function prepareError(
+  entry: PoolEntry,
+  prepare: PoolCallPrepare,
+  reason: string,
+  cause: unknown,
+  retryable: boolean,
+): McpToolError {
+  return new McpToolError(
+    `preparing ${entry.spec.id}.${prepare.cacheKey} failed: ${reason}`,
+    {
+      code: 'MCP_DISCOVERY_PREPARE_FAILED',
+      server: entry.spec.id,
+      tool: prepare.cacheKey,
+      retryable,
+      detail: {
+        searchTool: prepare.tool,
+        reason,
+        ...(cause === undefined ? {} : { cause: describeCause(cause) }),
+      },
+    },
+  );
 }
 
 /** Keep the more specific error when the connect path already built one. */

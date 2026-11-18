@@ -33,18 +33,25 @@ function failure(tool: string, input: unknown): string {
   return result.message;
 }
 
-test('tools/list exposes the four tools in the frozen order', () => {
+test('tools/list exposes the five tools in the frozen order', () => {
   const names = listTools().map((tool) => tool.name);
-  assert.deepEqual(names, ['run_script', 'search_tools', 'describe_tools', 'wait_tasks']);
+  assert.deepEqual(names, [
+    'run_script',
+    'search_tools',
+    'describe_tools',
+    'wait_tasks',
+    'report_problem',
+  ]);
   assert.deepEqual([...TOOL_ORDER], names);
 });
 
-test('every tool is alwaysLoad and only run_script lacks annotations', () => {
+test('every tool is alwaysLoad and only run_script and report_problem lack annotations', () => {
   for (const tool of listTools()) {
     assert.equal(tool._meta['anthropic/alwaysLoad'], true);
   }
   const byName = new Map(listTools().map((tool) => [tool.name, tool]));
   assert.equal(byName.get('run_script')?.annotations, undefined);
+  assert.equal(byName.get('report_problem')?.annotations, undefined);
   for (const name of ['search_tools', 'describe_tools', 'wait_tasks'] as const) {
     assert.deepEqual(byName.get(name)?.annotations, {
       readOnlyHint: true,
@@ -102,6 +109,17 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     },
     additionalProperties: false,
   });
+  assert.deepEqual(getToolDefinition('report_problem')?.inputSchema, {
+    type: 'object',
+    properties: {
+      title: { type: 'string', minLength: 1, maxLength: 200 },
+      detail: { type: 'string', minLength: 1, maxLength: 20000 },
+      severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+      context: { type: 'object', additionalProperties: true },
+    },
+    required: ['title', 'detail', 'severity'],
+    additionalProperties: false,
+  });
 });
 
 test('the published tool surface cannot be mutated', () => {
@@ -138,6 +156,12 @@ test('validateToolArguments enforces required fields, types and additionalProper
   assert.match(failure('wait_tasks', { taskIds: 't_1' }), /taskIds must be an array/);
   assert.match(failure('wait_tasks', { timeoutMs: 999 }), /timeoutMs must be >= 1000/);
   assert.match(failure('wait_tasks', { timeoutMs: 600001 }), /timeoutMs must be <= 600000/);
+  assert.match(failure('report_problem', {}), /title is required/);
+  assert.match(failure('report_problem', { title: '', detail: 'd', severity: 'low' }), /at least 1 character/);
+  assert.match(
+    failure('report_problem', { title: 't', detail: 'd', severity: 'low', context: [] }),
+    /context must be an object/,
+  );
   assert.match(failure('nope', {}), /unknown tool/);
 });
 
