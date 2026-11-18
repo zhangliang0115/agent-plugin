@@ -1,0 +1,17 @@
+{
+  "name": "@zhangliang0115/repl-server-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Admin UI for repl-server; built assets are served by the server package.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

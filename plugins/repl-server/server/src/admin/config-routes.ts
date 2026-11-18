@@ -1,0 +1,394 @@
+/** `/secrets` and `/config` routes not covered by the servers handler.
+ *
+ * `POST /config/import` accepts the declarative document exported by
+ * `GET /config/export` plus an optional `dryRun` flag (the frozen design also
+ * allows `?dry-run=true`). Validation and document normalization live in
+ * {@link createConfigAdmin}; this module only translates the plan into HTTP:
+ *
+ * - dry-run answers `200 { valid, diff, errors?, missingSecrets? }` and never writes;
+ * - an invalid document answers `400 INVALID_CONFIG` with the offending field paths;
+ * - a valid import answers `200 { operationId, diff, missingSecrets? }` when it runs
+ *   inline, or `202` when an operation registry defers it.
+ *
+ * Responses contain server ids and secret *key names* only; values never leave
+ * the process.
+ * @module
+ */
+
+import {
+  ConfigValidationError,
+  createConfigAdmin,
+  type ConfigDiff,
+  type ConfigImportTarget,
+  type ConfigRepository,
+  type OperationStarter,
+  type ServerConfigRecord,
+} from './config.ts';
+import {
+  AdminApiError,
+  adminHandler,
+  adminJson,
+  invalidField,
+  queryValue,
+  rejectUnknownFields,
+  requestSegments,
+  requireObjectBody,
+  type AdminHandler,
+  type AdminRequest,
+  type AdminResponse,
+  type OperationLauncher,
+  type ServerConfig,
+  type ServerConfigPatch,
+  type ServerRecord,
+  type ServerStore,
+} from './servers.ts';
+import type { SecretStore } from '../secrets/store.ts';
+
+export interface AdminConfigRoutesDeps {
+  secrets: SecretStore;
+  servers: ServerStore;
+  /**
+   * Import writer. Assembly should inject an implementation that applies every
+   * upsert/removal in one storage transaction. When omitted, the route adapts
+   * {@link ServerStore} with a snapshot + compensating rollback, which restores
+   * the previous rows on failure but is not atomic against a process crash.
+   */
+  importTarget?: ConfigImportTarget;
+  /** 202-operation registry. Without it imports run inline and answer 200. */
+  operations?: OperationStarter;
+  /** Deterministic operation ids for tests and embedders. */
+  newOperationId?: () => string;
+}
+
+const IMPORT_BODY_FIELDS: ReadonlySet<string> = new Set(['version', 'servers', 'dryRun']);
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_CONCURRENCY = 8;
+
+/** `/secrets` and `/config` routes not covered by the servers handler. */
+export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandler {
+  const admin = createConfigAdmin({
+    repository: createServerStoreRepository(deps.servers),
+    importTarget: deps.importTarget ?? createServerStoreImportTarget(deps.servers),
+    secrets: deps.secrets,
+    ...(deps.operations === undefined ? {} : { operations: deps.operations }),
+    ...(deps.newOperationId === undefined ? {} : { newOperationId: deps.newOperationId }),
+  });
+
+  async function importConfig(request: AdminRequest): Promise<AdminResponse> {
+    const body = requireObjectBody(request);
+    rejectUnknownFields(body, IMPORT_BODY_FIELDS);
+    const dryRun = readDryRunFlag(request, body);
+
+    const document: Record<string, unknown> = {};
+    if (body['version'] !== undefined) document['version'] = body['version'];
+    if (body['servers'] !== undefined) document['servers'] = body['servers'];
+
+    if (dryRun) {
+      return adminJson(200, await admin.importConfig(document, { dryRun: true }));
+    }
+
+    // Preflight gives the response its diff and missing secret names, and turns
+    // validation errors into a 400 with the offending field paths.
+    const preflight = await admin.importConfig(document, { dryRun: true });
+    if (!('diff' in preflight)) {
+      throw new AdminApiError(500, 'IMPORT_FAILED', 'config preflight did not return a plan');
+    }
+    if (!preflight.valid) throw invalidConfig(preflight.errors ?? []);
+
+    let operationId: string;
+    try {
+      const result = await admin.importConfig(document);
+      if (!('operationId' in result)) {
+        throw new AdminApiError(500, 'IMPORT_FAILED', 'config import did not start');
+      }
+      operationId = result.operationId;
+    } catch (error) {
+      if (error instanceof ConfigValidationError) throw invalidConfig(error.errors);
+      throw error;
+    }
+
+    const response: { operationId: string; diff: ConfigDiff; missingSecrets?: string[] } = {
+      operationId,
+      diff: preflight.diff,
+    };
+    if (preflight.missingSecrets !== undefined) {
+      response.missingSecrets = [...preflight.missingSecrets];
+    }
+    return adminJson(deps.operations === undefined ? 200 : 202, response);
+  }
+
+  return adminHandler(async (request): Promise<AdminResponse | null> => {
+    const withoutPrefix = request.path.replace(/^\/admin\/api/, '');
+    const queryStart = withoutPrefix.indexOf('?');
+    const pathname = queryStart === -1 ? withoutPrefix : withoutPrefix.slice(0, queryStart);
+    const path = pathname.replace(/\/+$/, '') || '/';
+    const segments = requestSegments({ ...request, path });
+
+    if (request.method === 'GET' && path === '/secrets') {
+      const names = await deps.secrets.listNames();
+      return adminJson(200, {
+        secrets: names.map((name) => ({ name, configured: true })),
+      });
+    }
+
+    if (request.method === 'PUT' && segments[0] === 'secrets' && segments[1] !== undefined) {
+      const body = requireObjectBody(request);
+      const value = body['value'];
+      if (typeof value !== 'string' || value === '') {
+        throw invalidField('value', 'must be a non-empty string');
+      }
+      await deps.secrets.set(segments[1], value);
+      return adminJson(200, { name: segments[1], configured: true });
+    }
+
+    if (request.method === 'GET' && path === '/config/export') {
+      // Sanitized document: secret refs become `<secret:name>` placeholders and
+      // literal env/header values become null (design 03 §5; RS-11).
+      return adminJson(200, await admin.exportConfig());
+    }
+
+    if (request.method === 'POST' && path === '/config/import') {
+      return importConfig(request);
+    }
+
+    return null;
+  });
+}
+
+/** Adapts the shared admin operation launcher to the config import registry. */
+export function operationStarterFromLauncher(launcher: OperationLauncher): OperationStarter {
+  return {
+    start(input) {
+      return launcher.launch(input.kind, input.target ?? 'config', input.run).operationId;
+    },
+  };
+}
+
+function readDryRunFlag(request: AdminRequest, body: Record<string, unknown>): boolean {
+  const raw = body['dryRun'];
+  if (raw !== undefined) {
+    if (typeof raw !== 'boolean') throw invalidField('dryRun', 'must be a boolean');
+    return raw;
+  }
+
+  const fromQuery = queryValue(request, 'dry-run');
+  if (fromQuery === null || fromQuery === '') return false;
+  if (fromQuery === 'true' || fromQuery === '1') return true;
+  if (fromQuery === 'false' || fromQuery === '0') return false;
+  throw new AdminApiError(400, 'INVALID_QUERY', 'dry-run must be true or false', {
+    parameter: 'dry-run',
+  });
+}
+
+function invalidConfig(errors: readonly string[]): AdminApiError {
+  const fields: string[] = [];
+  for (const message of errors) {
+    const field = fieldOf(message);
+    if (!fields.includes(field)) fields.push(field);
+  }
+  return new AdminApiError(
+    400,
+    'INVALID_CONFIG',
+    `config import rejected: ${errors.join('; ')}`,
+    { fields, errors: [...errors] },
+  );
+}
+
+/** Extracts `servers[0].command`-style paths from normalization messages. */
+function fieldOf(message: string): string {
+  const head = message.split(/[:\s]/, 1)[0] ?? '';
+  if (/^(?:servers(?:\[|\.)|config(?:\.|$)|version$)/.test(head)) return head;
+  if (message.startsWith('duplicate server id')) return 'servers';
+  if (message.includes('config version')) return 'version';
+  return 'servers';
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function createServerStoreRepository(servers: ServerStore): ConfigRepository {
+  return {
+    listServers: () => servers.list(),
+    getServer: (id) => servers.get(id),
+  };
+}
+
+function cloneArgs(
+  args: ServerConfigRecord['args'],
+): Array<string | { $secret: string }> {
+  return (args ?? []).map((arg) =>
+    typeof arg === 'string' ? arg : { $secret: arg.$secret },
+  );
+}
+
+function cloneField(
+  field: ServerConfigRecord['env'],
+): Record<string, string | { $secret: string }> {
+  const result: Record<string, string | { $secret: string }> = {};
+  for (const [key, value] of Object.entries(field ?? {})) {
+    result[key] = typeof value === 'string' ? value : { $secret: value.$secret };
+  }
+  return result;
+}
+
+function configFromRecord(
+  record: ServerConfigRecord,
+  summarySource?: string | null,
+): ServerConfig {
+  return {
+    id: record.id,
+    label: record.label,
+    transport: record.transport,
+    command: record.command ?? null,
+    args: cloneArgs(record.args),
+    env: cloneField(record.env),
+    cwd: record.cwd ?? null,
+    url: record.url ?? null,
+    headers: cloneField(record.headers),
+    enabled: record.enabled ?? true,
+    connectMode: record.connectMode ?? 'lazy',
+    summary: record.summary ?? null,
+    summarySource:
+      summarySource !== undefined
+        ? summarySource
+        : record.summary == null
+          ? null
+          : 'manual',
+    category: record.category ?? null,
+    tags: [...(record.tags ?? [])],
+    timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    maxConcurrency: record.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+  };
+}
+
+function patchFromRecord(record: ServerConfigRecord): ServerConfigPatch {
+  return {
+    label: record.label,
+    command: record.command ?? null,
+    args: cloneArgs(record.args),
+    env: cloneField(record.env),
+    cwd: record.cwd ?? null,
+    url: record.url ?? null,
+    headers: cloneField(record.headers),
+    enabled: record.enabled ?? true,
+    connectMode: record.connectMode ?? 'lazy',
+    summary: record.summary ?? null,
+    category: record.category ?? null,
+    tags: [...(record.tags ?? [])],
+    timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    maxConcurrency: record.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+  };
+}
+
+interface RollbackState {
+  created: string[];
+  replaced: ServerRecord[];
+  updated: ServerRecord[];
+  removed: ServerRecord[];
+}
+
+/**
+ * Fallback import writer over {@link ServerStore}. `ServerStore` has no bulk
+ * transaction, so every write is tracked and undone on failure. Assembly should
+ * inject a real single-transaction target when one exists.
+ */
+function createServerStoreImportTarget(servers: ServerStore): ConfigImportTarget {
+  return {
+    async applyImport(input): Promise<void> {
+      const snapshot = new Map<string, ServerRecord>();
+      for (const record of await servers.list()) snapshot.set(record.id, record);
+
+      const state: RollbackState = {
+        created: [],
+        replaced: [],
+        updated: [],
+        removed: [],
+      };
+
+      try {
+        for (const desired of input.upserts) {
+          const current = await servers.get(desired.id);
+          if (current === null) {
+            await servers.create(configFromRecord(desired));
+            state.created.push(desired.id);
+            continue;
+          }
+
+          const previous = snapshot.get(desired.id) ?? current;
+          if (current.transport !== desired.transport) {
+            // `ServerStore.update` cannot change transport, so the row is replaced.
+            await servers.remove(desired.id, await servers.revision());
+            await servers.create(configFromRecord(desired));
+            state.replaced.push(previous);
+            continue;
+          }
+
+          await servers.update(desired.id, patchFromRecord(desired), await servers.revision());
+          state.updated.push(previous);
+        }
+
+        for (const id of input.removals) {
+          const previous = snapshot.get(id);
+          if (previous === undefined) continue;
+          await servers.remove(id, await servers.revision());
+          state.removed.push(previous);
+        }
+      } catch (error) {
+        const rollbackErrors = await rollbackImport(servers, state);
+        if (rollbackErrors.length > 0) {
+          throw new AdminApiError(
+            500,
+            'IMPORT_ROLLBACK_FAILED',
+            `config import failed (${messageOf(error)}) and rollback was incomplete: ${rollbackErrors.join('; ')}`,
+            { cause: messageOf(error), rollbackErrors },
+          );
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+async function rollbackImport(
+  servers: ServerStore,
+  state: RollbackState,
+): Promise<string[]> {
+  const errors: string[] = [];
+  const attempt = async (label: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      errors.push(`${label}: ${messageOf(error)}`);
+    }
+  };
+
+  for (const id of state.created) {
+    await attempt(`remove ${id}`, async () => {
+      if ((await servers.get(id)) !== null) {
+        await servers.remove(id, await servers.revision());
+      }
+    });
+  }
+
+  for (const previous of [...state.replaced, ...state.removed]) {
+    await attempt(`restore ${previous.id}`, async () => {
+      if ((await servers.get(previous.id)) !== null) {
+        await servers.remove(previous.id, await servers.revision());
+      }
+      await servers.create(configFromRecord(previous, previous.summarySource));
+    });
+  }
+
+  for (const previous of state.updated) {
+    await attempt(`restore ${previous.id}`, async () => {
+      if ((await servers.get(previous.id)) === null) {
+        await servers.create(configFromRecord(previous, previous.summarySource));
+        return;
+      }
+      await servers.update(previous.id, patchFromRecord(previous), await servers.revision());
+    });
+  }
+
+  return errors;
+}

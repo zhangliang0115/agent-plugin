@@ -1,5 +1,5 @@
 # 0005 对外发布的 npm scope 与包名
-- 状态：已接受
+- 状态：已接受；发布范围被 [0007](0007-server-and-web-package-types.md) 修订（独立 server 包也发布）
 - 日期：2026-11-16
 - 取代：无
 - 关联：[issue #3](https://github.com/zhangliang0115/agent-plugin/issues/3)、[issue #4](https://github.com/zhangliang0115/agent-plugin/issues/4)

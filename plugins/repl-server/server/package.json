@@ -1,0 +1,33 @@
+{
+  "name": "@zhangliang0115/repl-server",
+  "version": "0.1.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "MCP server that runs JavaScript against Claude Code tools and third-party MCP servers.",
+  "main": "./dist/index.js",
+  "bin": {
+    "repl-server": "./dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@zhangliang0115/repl-server-core": "workspace:*",
+    "esbuild": "0.28.2"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

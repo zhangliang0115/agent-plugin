@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a0b10" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="repl-server 管理端：进程、审计与 MCP server 管理。" />
+    <title>repl-server 管理端</title>
+    <style>
+      /* Paints the correct background before the stylesheet and bundle load. */
+      html {
+        background: #0a0b10;
+        color-scheme: dark;
+      }
+      html[data-theme="light"] {
+        background: #f6f7fb;
+        color-scheme: light;
+      }
+      body {
+        margin: 0;
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('repl-server.admin.theme');
+          var theme = stored === 'light' ? 'light' : 'dark';
+          document.documentElement.dataset.theme = theme;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', theme === 'light' ? '#f6f7fb' : '#0a0b10');
+        } catch (error) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>管理端需要 JavaScript。</noscript>
+    <script type="module" src="/admin/main.js"></script>
+  </body>
+</html>

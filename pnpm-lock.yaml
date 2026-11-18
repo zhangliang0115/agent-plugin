@@ -90,6 +90,23 @@ importers:
         specifier: 4.6.6
         version: 4.6.6
 
+  plugins/repl-server/core: {}
+
+  plugins/repl-server/server:
+    devDependencies:
+      '@zhangliang0115/repl-server-core':
+        specifier: workspace:*
+        version: link:../core
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
+  plugins/repl-server/web:
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
 packages:
 
   '@deepseek-ai/cordis@4.1.0':

@@ -14,10 +14,12 @@
 |---|---|---|
 | 插件 id / 目录名 | kebab-case；不以 `claude-`、`anthropic-` 开头 | `code-mode` |
 | 包名 | `@zhangliang0115/<id>-<host>`，core 为 `@zhangliang0115/<id>-core`；workspace 内部名与发布名一致 | `@zhangliang0115/code-mode-dsh` |
+| server 包名 | `@zhangliang0115/<id>`（插件主体就是 server，不加 `-server` 后缀）；独立进程的插件才建 | `@zhangliang0115/repl-server` |
+| web 包名 | `@zhangliang0115/<id>-web`，`private`，构建产物由 server 托管，不单独发布 | `@zhangliang0115/repl-server-web` |
 | 宿主目录名 | 固定为 `claude-code`、`dsh`、`pi` | |
 | 工具名（给模型看） | snake_case，跨宿主一致 | `run_code` |
 
-只发布宿主 adapter，core 保持 `private` 并被打包进 adapter 的 `dist`。决策见 [ADR 0005](decisions/0005-npm-scope-and-package-names.md)。
+只发布宿主 adapter 与独立 server 包，core 保持 `private` 并被打包进 adapter/server 的 `dist`。决策见 [ADR 0005](decisions/0005-npm-scope-and-package-names.md)，server/web 包类型见 [ADR 0007](decisions/0007-server-and-web-package-types.md)。
 
 ## 版本
 
@@ -37,7 +39,7 @@
 - 版本在**打包或发布之前**升，不是发布之后补。
 - 一次改动涉及多处文件时，同一次只升一次，不按文件累加。
 - 0.x 阶段：破坏性变更与新增都升 minor；1.0 之后按常规 semver。
-- 升版本要同步三处：`plugin.meta.json`、插件根 `README.md` 标明的宿主版本、adapter 的 `package.json`；然后跑 `pnpm matrix`（矩阵含版本号，不同步会让 `pnpm matrix:check` 失败）。
+- 升版本要同步：`plugin.meta.json`、插件根 `README.md` 标明的宿主版本、各 adapter 的 `package.json`；server 类插件再加 server/web 的 `package.json`。然后跑 `pnpm matrix`（矩阵含版本号，不同步会让 `pnpm matrix:check` 失败）。
 - 在 `CHANGELOG.md` 里新建 `## <version>（<日期>）` 小节，把该版本的改动写进去；不要改动已发布版本的条目。
 - 已经装到用户 profile 的旧版本不自动升级；交付时给出装新 tgz 的命令。
 - 改了某个宿主的锁定版本，同时更新 `docs/hosts/<host>.md` 的核对版本。
@@ -110,6 +112,8 @@
 ## 安装文档
 
 每个插件一份 `plugins/<id>/INSTALL.md`，每个 `supported` 或 `experimental` 的宿主一节。读者是 agent：它会照着逐条执行，把插件装进用户的宿主里。
+
+**server 类插件按客户端分节，不按宿主 adapter 分节。** 一节一个客户端（Claude Code、Cursor、自有 agent），内容是：npm 或本地 tgz 安装命令、MCP 配置片段（stdio 的 `command`/`args`，或 HTTP 的 `url` + token）、启动方式、验证命令（例如 `curl -s 127.0.0.1:8787/health`，预期 `ok`）。没有 adapter 安装这一步。
 
 ### 写法
 

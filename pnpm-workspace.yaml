@@ -4,3 +4,5 @@ packages:
   - plugins/*/claude-code
   - plugins/*/dsh
   - plugins/*/pi
+  - plugins/*/server
+  - plugins/*/web

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -6,7 +6,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { loadPlugins } from '../lib/plugin-meta.ts';
-import { main as validateMain } from '../validate.ts';
+import { checkPackageVersions, main as validateMain } from '../validate.ts';
 
 const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const repoOk = join(fixtures, 'repo-ok');
@@ -47,8 +47,30 @@ describe('loadPlugins', () => {
   });
 });
 
-describe('validate main', () => {
-  let emptyRoot: string;
+describe('checkPackageVersions', () => {
+  it('reports a server package whose version drifts from plugin.meta.json', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-plugin-version-'));
+    try {
+      await mkdir(join(root, 'plugins', 'demo', 'server'), { recursive: true });
+      await writeFile(
+        join(root, 'plugins', 'demo', 'plugin.meta.json'),
+        JSON.stringify({ id: 'demo', version: '1.0.0', description: 'demo', hosts: {} }),
+      );
+      await writeFile(
+        join(root, 'plugins', 'demo', 'server', 'package.json'),
+        JSON.stringify({ name: '@scope/demo', version: '0.9.0' }),
+      );
+      const { plugins } = await loadPlugins(root);
+      const errors = await checkPackageVersions(root, plugins);
+      assert.equal(errors.length, 1);
+      assert.match(errors[0] ?? '', /version/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('validate main', () => {  let emptyRoot: string;
 
   before(async () => {
     emptyRoot = await mkdtemp(join(tmpdir(), 'agent-plugin-validate-'));

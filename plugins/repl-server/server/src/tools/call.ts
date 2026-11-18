@@ -1,0 +1,260 @@
+/** `tools/call` routing: argument validation, run_script dispatch and the three sync tools. @module */
+
+import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
+import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
+import { describeTools, type DescribeToolsInput } from './describe.ts';
+import { toCallToolResult, validateToolArguments, type CallToolResult } from './registry.ts';
+import { searchTools, type SearchToolsInput } from './search.ts';
+import {
+  McpTaskStore,
+  ownerOf,
+  resolveDispatchMode,
+  TASK_ASYNC_MAX_MS,
+  TASK_TIMEOUT_THRESHOLD_MS,
+  type CreateTaskResult,
+  type ToolDispatchMode,
+} from '../tasks/mcp-tasks.ts';
+
+const SYNC_DEFAULT_TIMEOUT_MS = 30_000;
+const SYNC_MAX_TIMEOUT_MS = 600_000;
+const WAIT_TASKS_DEFAULT_MS = 270_000;
+
+export interface ToolCallContext {
+  identity: RequestIdentity;
+  gateway: ExecutionGateway;
+  catalog: Catalog;
+  tasks: McpTaskStore;
+  /** True when this request declared `io.modelcontextprotocol/tasks`. */
+  tasksDeclared?: boolean;
+}
+
+export type ToolCallResponse = CallToolResult | CreateTaskResult;
+
+/** Unknown tool names are invalid params at the JSON-RPC layer, not a tool-layer error. */
+export class UnknownToolError extends JsonRpcError {
+  readonly toolName: string;
+
+  constructor(toolName: string) {
+    super(JSON_RPC_INVALID_PARAMS, `unknown tool: ${toolName}`);
+    this.name = 'UnknownToolError';
+    this.toolName = toolName;
+  }
+}
+
+interface RunScriptArguments {
+  code: string;
+  timeout?: number;
+  async?: boolean;
+  workspace?: string;
+  visibleTools?: string[];
+  excludeTags?: string[];
+}
+
+interface WaitTasksArguments {
+  taskIds?: string[];
+  timeoutMs?: number;
+}
+
+function escapeXml(text: string): string {
+  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function escapeXmlAttribute(text: string): string {
+  return escapeXml(text).replaceAll('"', '&quot;');
+}
+
+function jsonResult(value: unknown, isError: boolean): CallToolResult {
+  return {
+    resultType: 'complete',
+    content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }],
+    isError,
+  };
+}
+
+function toolFailure(code: string, message: string): CallToolResult {
+  return jsonResult({ ok: false, error: { code, message } }, true);
+}
+
+/**
+ * Pre-execution failures have no evalId yet; `eval="0"` keeps the attribute set frozen by
+ * docs/protocol.md §7 while making it obvious that no script ran.
+ */
+function runScriptFailure(code: string, message: string): CallToolResult {
+  return {
+    resultType: 'complete',
+    content: [
+      {
+        type: 'text',
+        text: `<repl-output eval="0"><error>${escapeXml(`${code}: ${message}`)}</error></repl-output>`,
+      },
+    ],
+    isError: true,
+  };
+}
+
+function asyncAcknowledgement(evalId: number, evalTaskId: string): CallToolResult {
+  return {
+    resultType: 'complete',
+    content: [
+      {
+        type: 'text',
+        text: `<repl-output eval="${evalId}" async="true" task="${escapeXmlAttribute(evalTaskId)}"></repl-output>`,
+      },
+    ],
+    isError: false,
+  };
+}
+
+/** Reads a string error code from the error itself or from its JSON-RPC `data`. */
+function readErrorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === 'string') return direct;
+  const data = (error as { data?: unknown }).data;
+  if (typeof data === 'object' && data !== null) {
+    const nested = (data as { code?: unknown }).code;
+    if (typeof nested === 'string') return nested;
+  }
+  return undefined;
+}
+
+function errorCode(error: unknown): string {
+  return readErrorCode(error) ?? 'INTERNAL_ERROR';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function failureFromError(error: unknown): CallToolResult {
+  return runScriptFailure(errorCode(error), errorMessage(error));
+}
+
+interface ResolvedTimeout {
+  ok: boolean;
+  value: number;
+  message?: string;
+}
+
+function resolveTimeout(mode: ToolDispatchMode, requested: number | undefined): ResolvedTimeout {
+  if (mode === 'async') return { ok: true, value: requested ?? TASK_ASYNC_MAX_MS };
+  if (mode === 'task') return { ok: true, value: requested ?? TASK_TIMEOUT_THRESHOLD_MS };
+  const value = requested ?? SYNC_DEFAULT_TIMEOUT_MS;
+  if (value > SYNC_MAX_TIMEOUT_MS) {
+    return {
+      ok: false,
+      value,
+      message: `timeout ${value} exceeds the synchronous maximum ${SYNC_MAX_TIMEOUT_MS}; pass async: true`,
+    };
+  }
+  return { ok: true, value };
+}
+
+async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<ToolCallResponse> {
+  const validation = validateToolArguments('run_script', input);
+  if (!validation.ok) return runScriptFailure(validation.code, validation.message);
+
+  const args = validation.value as unknown as RunScriptArguments;
+  const mode = resolveDispatchMode('run_script', args, ctx.tasksDeclared === true);
+  const timeout = resolveTimeout(mode, args.timeout);
+  if (!timeout.ok) {
+    return runScriptFailure('INVALID_ARGUMENT', timeout.message ?? 'invalid timeout');
+  }
+
+  const request: ScriptRequest = {
+    code: args.code,
+    timeoutMs: timeout.value,
+    async: mode !== 'sync',
+    identity: ctx.identity,
+  };
+  if (args.workspace !== undefined) request.workspace = args.workspace;
+  if (args.visibleTools !== undefined) request.visibleTools = args.visibleTools;
+  if (args.excludeTags !== undefined) request.excludeTags = args.excludeTags;
+
+  if (mode === 'sync') {
+    try {
+      return toCallToolResult(await ctx.gateway.runScript(request));
+    } catch (error) {
+      return failureFromError(error);
+    }
+  }
+
+  try {
+    const dispatched = await ctx.gateway.dispatchScript(request);
+    if (mode === 'task') return ctx.tasks.create(ownerOf(ctx.identity), dispatched.taskId);
+    return asyncAcknowledgement(dispatched.evalId, dispatched.taskId);
+  } catch (error) {
+    return failureFromError(error);
+  }
+}
+
+async function searchToolsCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
+  const validation = validateToolArguments('search_tools', input);
+  if (!validation.ok) return toolFailure(validation.code, validation.message);
+  const items = searchTools(ctx.catalog.snapshot(), validation.value as SearchToolsInput);
+  return jsonResult(items, false);
+}
+
+async function describeToolsCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
+  const validation = validateToolArguments('describe_tools', input);
+  if (!validation.ok) return toolFailure(validation.code, validation.message);
+  const args = validation.value as unknown as DescribeToolsInput;
+  return jsonResult(describeTools(ctx.catalog.snapshot(), args.names), false);
+}
+
+function waitTasksFailure(error: unknown): { ok: false; error: Record<string, unknown> } | undefined {
+  const code = readErrorCode(error);
+  if (code === undefined) return undefined;
+
+  const detail: Record<string, unknown> = { code };
+  const record = error as { unknownIds?: unknown; data?: unknown };
+  if (Array.isArray(record.unknownIds)) {
+    detail.unknownIds = record.unknownIds;
+  } else if (typeof record.data === 'object' && record.data !== null) {
+    const nested = (record.data as { unknownIds?: unknown }).unknownIds;
+    if (Array.isArray(nested)) detail.unknownIds = nested;
+  }
+  return { ok: false, error: detail };
+}
+
+function isWaitTasksFailure(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && (value as { ok?: unknown }).ok === false;
+}
+
+async function waitTasksCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
+  const validation = validateToolArguments('wait_tasks', input);
+  if (!validation.ok) return toolFailure(validation.code, validation.message);
+
+  const args = validation.value as unknown as WaitTasksArguments;
+  const owner = ownerOf(ctx.identity);
+  let value: unknown;
+  try {
+    value = await ctx.gateway.waitTasks(owner, args.taskIds, args.timeoutMs ?? WAIT_TASKS_DEFAULT_MS);
+  } catch (error) {
+    const failure = waitTasksFailure(error);
+    if (failure === undefined) return toolFailure(errorCode(error), errorMessage(error));
+    value = failure;
+  }
+  return jsonResult(value, isWaitTasksFailure(value));
+}
+
+export async function callTool(
+  name: string,
+  input: unknown,
+  ctx: ToolCallContext,
+): Promise<ToolCallResponse> {
+  // MCP makes `arguments` optional for a call with no fields (search_tools, wait_tasks).
+  const args = input === undefined ? {} : input;
+  switch (name) {
+    case 'run_script':
+      return runScriptCall(args, ctx);
+    case 'search_tools':
+      return searchToolsCall(args, ctx);
+    case 'describe_tools':
+      return describeToolsCall(args, ctx);
+    case 'wait_tasks':
+      return waitTasksCall(args, ctx);
+    default:
+      throw new UnknownToolError(name);
+  }
+}

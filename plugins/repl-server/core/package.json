@@ -1,0 +1,15 @@
+{
+  "name": "@zhangliang0115/repl-server-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host-independent runtime for repl-server: eval executor, tool bridge, process ledger.",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}

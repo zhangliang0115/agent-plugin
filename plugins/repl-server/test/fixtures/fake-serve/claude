@@ -1,0 +1,3 @@
+#!/bin/sh
+# Wrapper so tests can set REPL_CLAUDE_BIN to a fake `claude mcp serve`.
+exec node "$(dirname "$0")/server.mjs" "$@"

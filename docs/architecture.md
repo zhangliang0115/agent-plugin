@@ -10,12 +10,14 @@ plugins/<name>/
   claude-code/   Claude Code 插件目录（manifest + skills/hooks + MCP server 入口）
   dsh/           Cordis 插件包（apply(ctx) + cordis.patch.yml）
   pi/            Pi 扩展包（export default (pi) => ...）
+  server/        独立进程的 MCP server 包（ADR 0007）；入口 bin，产物 dist
+  web/           管理前端包（ADR 0007）；构建产物由 server 托管，private
 packages/
   portable/      跨插件共享的中立契约（按需增长）
 scripts/         validate、matrix 等仓库脚本
 ```
 
-依赖方向只能向下：`adapter → core → portable`。core 和 portable 不知道宿主存在。
+依赖方向只能向下：`adapter → core → portable`；server 类插件是 `server → core → portable`，`web` 不 import core，只消费 server 的 HTTP API。core 和 portable 不知道宿主存在。
 
 ## 插件目录
 
@@ -27,9 +29,11 @@ plugins/<name>/
   plugin.meta.json     元数据，矩阵和校验脚本读它
   core/                package.json + src/ + test/
   <host>/              package.json + src/ + test/（Claude Code 另有插件目录结构）
+  server/              package.json + src/ + test/ + scripts/build.mjs（ADR 0007）
+  web/                 package.json + src/ + scripts/build.mjs（产物复制进 server/dist/web）
 ```
 
-只为实际要支持的宿主建 adapter 目录。不支持的宿主在 `plugin.meta.json` 里写原因。
+只为实际要支持的宿主建 adapter 目录。不支持的宿主在 `plugin.meta.json` 里写原因。server 类插件的 `hosts` 写 `{}`，矩阵里宿主列显示 `—`。
 
 ### plugin.meta.json
 
@@ -67,4 +71,5 @@ plugins/<name>/
 | core 单元测试 | 业务逻辑 | `node --test`，不依赖宿主 |
 | 仓库脚本测试 | `validate`、`matrix` 的校验规则、生成内容、`--check` 行为 | `node --test`，fixture 在 `scripts/test/fixtures/` |
 | adapter 契约测试 | 注册了什么、参数/结果转换是否正确 | 用该宿主 API 的最小 fake，不启动宿主 |
+| server 协议契约测试 | `server/discover`、tasks、工具结果形状 | `node --test` + fixture MCP server，不启动真实客户端 |
 | 宿主冒烟 | 真实宿主能加载并调用 | 按 `docs/hosts/<host>.md` 的本地验证命令，结果贴进 PR 或交付说明 |
