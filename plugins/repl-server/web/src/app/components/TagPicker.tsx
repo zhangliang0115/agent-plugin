@@ -1,8 +1,7 @@
 /** Tag dictionary hook plus the multi-select used by server/tool/client forms. */
 import { Select, Tag } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
 
-import { useApi } from '../api.tsx';
+import { useDictionaryResource } from './dictionary-resource.ts';
 
 export interface TagDefinition {
   key: string;
@@ -17,36 +16,10 @@ export interface TagDictionaryState {
   reload(): Promise<void>;
 }
 
-let cache: { tags: TagDefinition[]; revision: number } | null = null;
-
 /** Loads the dictionary once per session; failures degrade to an empty list. */
 export function useTagDictionary(): TagDictionaryState {
-  const api = useApi();
-  const [tags, setTags] = useState<TagDefinition[]>(cache?.tags ?? []);
-  const [revision, setRevision] = useState(cache?.revision ?? 0);
-  const [loading, setLoading] = useState(cache === null);
-
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
-    try {
-      const response = await api.get<{ tags?: TagDefinition[]; revision?: number }>('/tags');
-      const next = Array.isArray(response.tags) ? response.tags : [];
-      cache = { tags: next, revision: typeof response.revision === 'number' ? response.revision : 0 };
-      setTags(next);
-      setRevision(cache.revision);
-    } catch {
-      cache = { tags: [], revision: 0 };
-      setTags([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [api]);
-
-  useEffect(() => {
-    if (cache === null) void reload();
-  }, [reload]);
-
-  return { tags, revision, loading, reload };
+  const { entries, revision, loading, reload } = useDictionaryResource('/tags', 'tags');
+  return { tags: entries, revision, loading, reload };
 }
 
 export function tagLabel(tags: readonly TagDefinition[], key: string): string {

@@ -26,7 +26,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
+import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
+import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
 
@@ -168,6 +170,7 @@ export function ToolsPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
   const dictionary = useTagDictionary();
+  const categoryDictionary = useCategoryDictionary();
   const [servers, setServers] = useState<ServerListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tools, setTools] = useState<ToolRecord[]>([]);
@@ -265,6 +268,7 @@ export function ToolsPage(): React.ReactElement {
 
   const selectedServer = servers.find((server) => server.id === selectedId) ?? null;
   const tagDefinitions = dictionary.tags;
+  const categoryDefinitions = categoryDictionary.categories;
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -748,7 +752,11 @@ export function ToolsPage(): React.ReactElement {
                   {tagLabel(tagDefinitions, tag)}
                 </Tag>
               ))}
-              {toolServer.category === null ? null : <Tag bordered={false}>{toolServer.category}</Tag>}
+              {toolServer.category === null ? null : (
+                <Tag bordered={false} title={toolServer.category}>
+                  {dictionaryLabel(categoryDefinitions, toolServer.category)}
+                </Tag>
+              )}
               <span className="muted">共 {tools.length} 个工具 · revision {revision}</span>
             </Space>
           )
@@ -823,7 +831,7 @@ export function ToolsPage(): React.ReactElement {
             <Input placeholder="query / action" />
           </Form.Item>
           <Form.Item name="category" label="category（分类）" extra="留空继承 server 的 category。">
-            <Input placeholder="database" />
+            <CategorySelect dictionary={categoryDefinitions} placeholder="从分类字典选择（留空继承 server）" />
           </Form.Item>
           <Form.Item
             name="staleOverride"

@@ -22,6 +22,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
+import { useCategoryDictionary } from '../components/CategorySelect.tsx';
+import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatTimestamp } from '../../lib/format.ts';
 
@@ -107,6 +109,7 @@ interface AnnotationReview {
 export function AiPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
+  const { categories: categoryDefinitions } = useCategoryDictionary();
   const [config, setConfig] = useState<AiConfigView | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
   const [pending, setPending] = useState<PendingAnnotationView[]>([]);
@@ -554,7 +557,13 @@ export function AiPage(): React.ReactElement {
                 {review.current.summary ?? '—'} → {review.proposed.summary ?? '—'}
               </Descriptions.Item>
               <Descriptions.Item label="category">
-                {review.current.category ?? '—'} → {review.proposed.category ?? '—'}
+                {review.current.category === null
+                  ? '—'
+                  : dictionaryLabel(categoryDefinitions, review.current.category)}{' '}
+                →{' '}
+                {review.proposed.category === null
+                  ? '—'
+                  : dictionaryLabel(categoryDefinitions, review.proposed.category)}
               </Descriptions.Item>
               <Descriptions.Item label="tags">
                 {review.current.tags.join(', ') || '—'} ∪ {review.proposed.tags.join(', ') || '—'}

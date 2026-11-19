@@ -35,7 +35,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader, StateTag } from '../components/common.tsx';
+import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
+import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatDuration, formatRelativeTime, formatTimestamp } from '../../lib/format.ts';
 
@@ -117,6 +119,7 @@ export function ServersPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
   const dictionary = useTagDictionary();
+  const categoryDictionary = useCategoryDictionary();
   const [servers, setServers] = useState<ServerView[]>([]);
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -205,6 +208,7 @@ export function ServersPage(): React.ReactElement {
   }, [query, servers]);
 
   const tagDefinitions = dictionary.tags;
+  const categoryDefinitions = categoryDictionary.categories;
 
   const columns = useMemo(
     () => [
@@ -698,7 +702,11 @@ export function ServersPage(): React.ReactElement {
                   <Descriptions.Item label="summary" span={2}>
                     {selected.summary ?? '—'}
                   </Descriptions.Item>
-                  <Descriptions.Item label="category">{selected.category ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="category">
+                    {selected.category === null
+                      ? '—'
+                      : dictionaryLabel(categoryDefinitions, selected.category)}
+                  </Descriptions.Item>
                   <Descriptions.Item label="tags">
                     <TagList tags={selected.tags} dictionary={tagDefinitions} />
                   </Descriptions.Item>
@@ -942,7 +950,7 @@ export function ServersPage(): React.ReactElement {
             <Input placeholder="用于检索的 server 摘要" />
           </Form.Item>
           <Form.Item name="category" label="category">
-            <Input placeholder="database" />
+            <CategorySelect dictionary={categoryDefinitions} />
           </Form.Item>
           <Form.Item name="tags" label="tags">
             <TagsField dictionary={dictionary.tags} />

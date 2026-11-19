@@ -23,6 +23,7 @@ export const PALETTE_PAGES: readonly PaletteItem[] = [
   { kind: '页面', label: '客户端', hint: '连接', path: '/manage', tab: 'clients' },
   { kind: '页面', label: '密钥', hint: '配置', path: '/manage', tab: 'secrets' },
   { kind: '页面', label: '标签', hint: '配置', path: '/manage', tab: 'tags' },
+  { kind: '页面', label: '分类', hint: '配置', path: '/manage', tab: 'categories' },
   { kind: '页面', label: '告警', hint: '配置', path: '/manage', tab: 'alerts' },
   { kind: '页面', label: 'AI 配置', hint: '配置', path: '/manage', tab: 'ai' },
   { kind: '页面', label: '导入导出', hint: '迁移', path: '/manage', tab: 'config' },

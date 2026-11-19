@@ -27,6 +27,7 @@ import { ToolsPage } from './pages/ToolsPage.tsx';
 import { ClientsPage } from './pages/ClientsPage.tsx';
 import { SecretsPage } from './pages/SecretsPage.tsx';
 import { TagsPage } from './pages/TagsPage.tsx';
+import { CategoriesPage } from './pages/CategoriesPage.tsx';
 import { AlertsPage } from './pages/AlertsPage.tsx';
 import { AiPage } from './pages/AiPage.tsx';
 import { ConfigPage } from './pages/ConfigPage.tsx';
@@ -37,7 +38,7 @@ const THEME_KEY = 'repl-server.admin.theme';
 
 const GROUP_TABS: Record<'conn' | 'config' | 'migrate', ManageTab[]> = {
   conn: ['servers', 'tools', 'clients'],
-  config: ['secrets', 'tags', 'alerts', 'ai'],
+  config: ['secrets', 'tags', 'categories', 'alerts', 'ai'],
   migrate: ['config', 'discover'],
 };
 
@@ -271,6 +272,8 @@ function Page({ route }: { route: RouteState }): React.ReactElement {
       return <SecretsPage />;
     case 'tags':
       return <TagsPage />;
+    case 'categories':
+      return <CategoriesPage />;
     case 'alerts':
       return <AlertsPage />;
     case 'ai':

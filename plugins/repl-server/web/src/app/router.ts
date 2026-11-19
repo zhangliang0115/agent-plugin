@@ -7,6 +7,7 @@ export type ManageTab =
   | 'clients'
   | 'secrets'
   | 'tags'
+  | 'categories'
   | 'alerts'
   | 'ai'
   | 'config'
@@ -23,6 +24,7 @@ export const MANAGE_TABS: ReadonlyArray<{ id: ManageTab; label: string; group: '
   { id: 'clients', label: '客户端', group: '连接' },
   { id: 'secrets', label: '密钥', group: '配置' },
   { id: 'tags', label: '标签', group: '配置' },
+  { id: 'categories', label: '分类', group: '配置' },
   { id: 'alerts', label: '告警', group: '配置' },
   { id: 'ai', label: 'AI 配置', group: '配置' },
   { id: 'config', label: '导入导出', group: '迁移' },
