@@ -155,6 +155,24 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
       return adminJson(200, { name: segments[1], configured: true });
     }
 
+    // One explicit reveal per key. The list endpoint above stays value-free, and
+    // the response is never cacheable. Reveal is a local-admin convenience: the
+    // admin cookie is minted automatically on first GET, so this is not a
+    // user-password boundary.
+    if (
+      request.method === 'GET' &&
+      segments.length === 2 &&
+      segments[0] === 'secrets' &&
+      segments[1] !== undefined
+    ) {
+      const name = segments[1];
+      const value = await deps.secrets.get(name);
+      if (value === undefined) {
+        throw new AdminApiError(404, 'SECRET_NOT_FOUND', `secret ${name} is not stored`, { name });
+      }
+      return adminJson(200, { name, value }, { 'cache-control': 'no-store' });
+    }
+
     if (request.method === 'GET' && path === '/config/export') {
       // Sanitized document: secret refs become `<secret:name>` placeholders and
       // literal env/header values become null (design 03 §5; RS-11).

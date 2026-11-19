@@ -23,6 +23,8 @@ npm install -g @zhangliang0115/repl-server
 repl-server --port 8787
 ```
 
+`--frame-mode off|summary|full`（或环境变量 `REPL_FRAME_MODE`）控制协议帧落盘：默认 `summary` 只记 method、耗时和字节数；`full` 额外记录脱敏后的请求/响应正文，便于在管理端「审计 → 协议帧」核对报文，但磁盘占用更高。`off` 关闭记录。
+
 ### 配置 MCP
 
 在 Claude Code 的用户级或项目级 MCP 配置里加：

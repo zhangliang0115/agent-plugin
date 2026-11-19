@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Drawer,
+  Dropdown,
   Empty,
   Form,
   Input,
@@ -173,6 +174,16 @@ const CONCURRENCY_OPTIONS = [
   { value: 'exclusive', label: 'exclusive（全局独占）' },
 ];
 
+/** Compact tag face for the concurrency column; the dropdown keeps inline editing. */
+const CONCURRENCY_TAGS: Record<
+  ToolConcurrency,
+  { label: string; hint: string; color: 'green' | 'gold' | 'red' }
+> = {
+  parallel: { label: 'parallel', hint: '读锁：同类工具可并发执行', color: 'green' },
+  serial: { label: 'serial', hint: '写锁：与其它工具串行执行', color: 'gold' },
+  exclusive: { label: 'exclusive', hint: '全局独占：同一时刻只允许一个调用', color: 'red' },
+};
+
 export function ToolsPage({ serverId }: { serverId?: string | null }): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
@@ -317,18 +328,24 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '工具',
         dataIndex: 'name',
-        width: 220,
+        width: 150,
         render: (value: string, tool: ToolRecord) => (
           <div>
             {tool.displayName !== null && tool.displayName !== value ? <div>{tool.displayName}</div> : null}
-            <span className="mono">{value}</span>
+            <span
+              className="mono"
+              title={value}
+              style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              {value}
+            </span>
           </div>
         ),
       },
       {
         title: '来源',
         dataIndex: 'discoveredVia',
-        width: 80,
+        width: 64,
         render: (value: 'static' | 'search' | undefined) => (
           <Tag bordered={false} color={value === 'search' ? 'blue' : 'default'}>
             {value === 'search' ? 'search' : 'static'}
@@ -338,7 +355,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '启用',
         dataIndex: 'enabled',
-        width: 76,
+        width: 72,
         render: (value: boolean, tool: ToolRecord) => {
           const pending = (inlinePending[inlineKey(tool, 'enabled')] ?? 0) > 0;
           return (
@@ -358,26 +375,42 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '并发',
         dataIndex: 'concurrency',
-        width: 110,
-        render: (value: ToolConcurrency, tool: ToolRecord) => (
-          <div onClick={(event) => event.stopPropagation()}>
-            <Select
-              size="small"
-              style={{ width: '100%' }}
-              value={value}
-              options={CONCURRENCY_OPTIONS}
-              loading={(inlinePending[inlineKey(tool, 'concurrency')] ?? 0) > 0}
-              onChange={(next: ToolConcurrency) =>
-                void patchInline(tool, { concurrency: next }, 'concurrency')
-              }
-            />
-          </div>
-        ),
+        width: 88,
+        render: (value: ToolConcurrency, tool: ToolRecord) => {
+          const pending = (inlinePending[inlineKey(tool, 'concurrency')] ?? 0) > 0;
+          const tag = CONCURRENCY_TAGS[value];
+          return (
+            <div onClick={(event) => event.stopPropagation()}>
+              <Dropdown
+                trigger={['click']}
+                disabled={pending}
+                menu={{
+                  selectable: true,
+                  selectedKeys: [value],
+                  items: CONCURRENCY_OPTIONS.map((option) => ({
+                    key: option.value,
+                    label: option.label,
+                  })),
+                  onClick: ({ key }) =>
+                    void patchInline(tool, { concurrency: key as ToolConcurrency }, 'concurrency'),
+                }}
+              >
+                <Tag
+                  bordered={false}
+                  color={tag.color}
+                  title={tag.hint}
+                  style={{ cursor: pending ? 'default' : 'pointer', opacity: pending ? 0.5 : 1 }}
+                >
+                  {tag.label}
+                </Tag>
+              </Dropdown>
+            </div>
+          );
+        },
       },
       {
         title: '标签（含继承）',
         dataIndex: 'tags',
-        width: 300,
         render: (value: string[], tool: ToolRecord) => (
           <TagPillEditor
             dictionary={tagDefinitions}
@@ -391,7 +424,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '暴露',
-        width: 90,
+        width: 76,
         render: (_value: unknown, tool: ToolRecord) => {
           if (tool.effective === undefined) {
             return tool.stale ? <Tag color="gold">stale</Tag> : <span className="muted">—</span>;
@@ -405,7 +438,6 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '描述',
-        width: 280,
         ellipsis: true,
         render: (_value: unknown, tool: ToolRecord) => {
           const text = tool.effective?.description ?? tool.description ?? '';
@@ -418,7 +450,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '操作',
-        width: 120,
+        width: 180,
         render: (_value: unknown, tool: ToolRecord) => (
           <Space size={0}>
             <Button size="small" type="link" icon={<BookOutlined />} onClick={() => setDocTool(tool)}>
@@ -893,7 +925,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             dataSource={filtered}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1280 }}
+            tableLayout="fixed"
             locale={{
               emptyText: (
                 <Empty

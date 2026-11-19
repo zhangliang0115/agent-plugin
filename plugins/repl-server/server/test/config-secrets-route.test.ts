@@ -1,4 +1,4 @@
-/** GET /admin/api/secrets: stored keys plus every declared config key, values never read. */
+/** `/admin/api/secrets`: list never returns values; one explicit GET reveals one stored value. */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -86,5 +86,26 @@ test('GET /secrets unions stored names with env, header and arg declarations', a
   const serialized = JSON.stringify(response.body);
   for (const forbidden of ['secret-value', 'stored-value', 'literal-value', 'production']) {
     assert.equal(serialized.includes(forbidden), false, `response leaked ${forbidden}`);
+  }
+});
+
+test('GET /secrets/:name reveals one stored value with no-store caching', async (t) => {
+  const { handler } = await fixture(t);
+  const response = await handler({ method: 'GET', path: '/admin/api/secrets/pg_db_url' });
+  assert.ok(response !== null);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { name: 'pg_db_url', value: 'postgres://secret-value' });
+  assert.equal(response.headers?.['cache-control'], 'no-store');
+
+  const listed = await getSecrets(handler);
+  assert.equal(JSON.stringify(listed.body).includes('secret-value'), false);
+});
+
+test('GET /secrets/:name returns 404 for declared-but-unset and unknown names', async (t) => {
+  const { handler } = await fixture(t);
+  for (const name of ['github_pat', 'missing']) {
+    const response = await handler({ method: 'GET', path: `/admin/api/secrets/${name}` });
+    assert.ok(response !== null);
+    assert.equal(response.status, 404, `${name} should not resolve`);
   }
 });

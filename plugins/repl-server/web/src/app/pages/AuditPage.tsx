@@ -161,6 +161,10 @@ export function AuditPage(): React.ReactElement {
   const [frames, setFrames] = useState<FramesResponse | null>(null);
   const [framesLoading, setFramesLoading] = useState(false);
   const [framesError, setFramesError] = useState<string | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [viewerFrames, setViewerFrames] = useState<FramesResponse | null>(null);
+  const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewerError, setViewerError] = useState<string | null>(null);
 
   const aliveRef = useRef(true);
   const appliedRef = useRef<AuditFilters>(applied);
@@ -173,6 +177,7 @@ export function AuditPage(): React.ReactElement {
   const loadTokenRef = useRef(0);
   const statsTokenRef = useRef(0);
   const frameTokenRef = useRef(0);
+  const viewerTokenRef = useRef(0);
   const streamOpenRef = useRef(false);
   const loadingRef = useRef(true);
   const pollTicksRef = useRef(0);
@@ -576,6 +581,35 @@ export function AuditPage(): React.ReactElement {
     });
   }
 
+  /** Standalone frame list: connection and tools/list traffic has no eval row to click. */
+  function openViewer(): void {
+    const ticket = ++viewerTokenRef.current;
+    setViewerOpen(true);
+    setViewerFrames(null);
+    setViewerError(null);
+    setViewerLoading(true);
+    void (async () => {
+      try {
+        const response = await requestFrames(appliedRef.current, null, undefined);
+        if (!aliveRef.current || ticket !== viewerTokenRef.current) return;
+        setViewerFrames(response);
+      } catch (failure) {
+        if (!aliveRef.current || ticket !== viewerTokenRef.current) return;
+        setViewerError(failureText(failure));
+      } finally {
+        if (aliveRef.current && ticket === viewerTokenRef.current) setViewerLoading(false);
+      }
+    })();
+  }
+
+  function closeViewer(): void {
+    viewerTokenRef.current += 1;
+    setViewerOpen(false);
+    setViewerFrames(null);
+    setViewerError(null);
+    setViewerLoading(false);
+  }
+
   const columns = useMemo<TableProps<AuditEvent>['columns']>(
     () => [
       {
@@ -686,6 +720,7 @@ export function AuditPage(): React.ReactElement {
         description="调用列表、协议帧与调用详情；筛选在服务端完成，实时视图最多保留 5000 条。"
         actions={
           <Space>
+            <Button onClick={openViewer}>协议帧</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshEvents}>
               刷新
             </Button>
@@ -1037,50 +1072,24 @@ export function AuditPage(): React.ReactElement {
               />
             </Card>
 
-            {framesLoading ? (
-              <Spin size="small" />
-            ) : framesError === null ? null : (
-              <Alert
-                type="error"
-                showIcon
-                message="协议帧读取失败"
-                description={framesError}
-              />
-            )}
-            {frames === null ? null : (
-              <Card
-                size="small"
-                title="协议帧"
-                extra={
-                  <Space>
-                    <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
-                    {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
-                      <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
-                    ) : null}
-                  </Space>
-                }
-              >
-                {frames.frames.length === 0 ? (
-                  <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
-                ) : (
-                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    {frames.frames.slice(0, FRAME_LIMIT).map((frame, index) => (
-                      <FramePairCard
-                        key={`${frame.mcp}-${String(frame.id ?? '')}-${index}`}
-                        frame={frame}
-                      />
-                    ))}
-                  </Space>
-                )}
-                {frames.hasMore === true ? (
-                  <Text type="secondary" style={{ fontSize: 11.5 }}>
-                    还有更多帧；缩小时间范围或指定 mcp / id。
-                  </Text>
-                ) : null}
-              </Card>
-            )}
+            <ProtocolFramesCard frames={frames} loading={framesLoading} error={framesError} />
           </Space>
         )}
+      </Drawer>
+
+      <Drawer
+        open={viewerOpen}
+        onClose={closeViewer}
+        width={760}
+        title="协议帧"
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Text type="secondary" style={{ fontSize: 11.5 }}>
+            当前筛选时间范围内的 JSON-RPC 请求与响应，包含连接期 initialize / tools/list 等没有
+            eval 事件的报文。报文只在协议帧模式为 full 时带正文。
+          </Text>
+          <ProtocolFramesCard frames={viewerFrames} loading={viewerLoading} error={viewerError} />
+        </Space>
       </Drawer>
     </div>
   );
@@ -1089,6 +1098,54 @@ export function AuditPage(): React.ReactElement {
 // ---------------------------------------------------------------------------
 // Small presentational pieces
 // ---------------------------------------------------------------------------
+
+function ProtocolFramesCard({
+  frames,
+  loading,
+  error,
+}: {
+  frames: FramesResponse | null;
+  loading: boolean;
+  error: string | null;
+}): React.ReactElement {
+  if (loading && frames === null) return <Spin size="small" />;
+  if (error !== null) {
+    return <Alert type="error" showIcon message="协议帧读取失败" description={error} />;
+  }
+  if (frames === null) return <Empty description="暂无协议帧。" />;
+  return (
+    <Card
+      size="small"
+      title="协议帧"
+      extra={
+        <Space>
+          <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
+          {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
+            <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
+          ) : null}
+        </Space>
+      }
+    >
+      {frames.frames.length === 0 ? (
+        <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
+      ) : (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          {frames.frames.slice(0, FRAME_LIMIT).map((frame, index) => (
+            <FramePairCard
+              key={`${frame.mcp}-${String(frame.id ?? '')}-${index}`}
+              frame={frame}
+            />
+          ))}
+        </Space>
+      )}
+      {frames.hasMore === true ? (
+        <Text type="secondary" style={{ fontSize: 11.5 }}>
+          还有更多帧；缩小时间范围或指定 mcp / id。
+        </Text>
+      ) : null}
+    </Card>
+  );
+}
 
 function Field({
   label,

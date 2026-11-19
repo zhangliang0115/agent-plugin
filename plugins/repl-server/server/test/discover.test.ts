@@ -70,12 +70,12 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
     },
     instructions: INSTRUCTIONS,
     ttlMs: 3_600_000,
-    cacheScope: 'public',
+    cacheScope: 'private',
   });
 
   assert.equal(PROTOCOL_VERSION, '2026-07-28');
   assert.equal(DISCOVER_TTL_MS, 3_600_000);
-  assert.equal(DISCOVER_CACHE_SCOPE, 'public');
+  assert.equal(DISCOVER_CACHE_SCOPE, 'private');
   assert.equal(SERVER_NAME, 'repl-server');
   assert.equal(SERVER_VERSION, VERSION);
   assert.ok(INSTRUCTIONS.includes('persistent JavaScript context'));

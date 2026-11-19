@@ -20,6 +20,7 @@ import { parseCreateServer } from './admin/servers.ts';
 import { createEventHub } from './admin/events.ts';
 import { createAdminSession } from './admin/session.ts';
 import { createAuditRuntime } from './audit/runtime.ts';
+import type { FrameMode } from './audit/frames.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
 import { createAiService } from './ai/index.ts';
@@ -87,6 +88,8 @@ export interface AssemblyOptions {
   transportIdleMs?: number;
   /** Test seam: background lifecycle sweep interval; defaults to 60 seconds. */
   sweepIntervalMs?: number;
+  /** Protocol-frame recording mode; defaults to `summary` (`docs/02 §6.6`). */
+  frameMode?: FrameMode;
   log?: (line: string) => void;
 }
 
@@ -125,6 +128,15 @@ const SERVER_CLOSE_TIMEOUT_MS = 5_000;
 
 /** Background idle-lifecycle sweep (design 03 §2.3). */
 const SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * `tools/list` cache hints, required on every modern complete result by
+ * protocol 2026-07-28 §Caching. The surface is filtered per client binding,
+ * so it must never be shared as `public`; the TTL stays short because admin
+ * edits and discovery change the catalog without `list_changed` notifications.
+ */
+const TOOLS_LIST_TTL_MS = 300_000;
+const TOOLS_LIST_CACHE_SCOPE = 'private' as const;
 
 /**
  * Stops accepting connections and waits for the listener to close. Idle
@@ -195,6 +207,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const audit = createAuditRuntime({
     dir: join(dataDir, 'audit'),
     log,
+    ...(options.frameMode === undefined ? {} : { frameMode: options.frameMode }),
     onEvent: (event) => {
       auditHub.publish('audit', event);
     },
@@ -728,6 +741,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           searchToolsDescription: surface.searchToolsDefinition.description,
           searchToolsSchema: surface.searchToolsDefinition.inputSchema,
         }),
+        ttlMs: TOOLS_LIST_TTL_MS,
+        cacheScope: TOOLS_LIST_CACHE_SCOPE,
       };
     },
     toolsCall: async (params, context): Promise<ToolCallResponse> => {
