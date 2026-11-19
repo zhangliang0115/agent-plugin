@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { AdminApiError } from '../src/admin/servers.ts';
 import {
+  appendTagDictionary,
   createAdminTagsHandler,
   parseTagDictionary,
   readTagDictionary,
@@ -35,11 +36,148 @@ test('GET /tags returns the built-in dictionary until it is replaced', async () 
   assert.equal(response?.status, 200);
   const body = response?.body as { tags: Array<{ key: string; zh: string; en: string }>; revision: number };
   assert.equal(body.revision, 3);
-  assert.ok(body.tags.length >= 10);
+  assert.equal(body.tags.length, 26);
   assert.deepEqual(
     body.tags.find((tag) => tag.key === 'official'),
     { key: 'official', zh: '官方', en: 'Official' },
   );
+  for (const key of [
+    'builtin',
+    'env.dev',
+    'env.test',
+    'env.pre',
+    'env.prod',
+    'cross-env',
+    'read',
+    'write',
+    'query',
+    'exec',
+    'deploy',
+    'destructive',
+    'memory',
+    'docs',
+    'testing',
+    'security',
+    'mysql',
+    'postgresql',
+    'elasticsearch',
+    'redis',
+    'prometheus',
+    'apm',
+    'gitlab',
+    'browser',
+    'computer-use',
+  ]) {
+    assert.ok(body.tags.some((tag) => tag.key === key), key);
+  }
+});
+
+const LEGACY_TAG_DEFAULT = [
+  { key: 'official', zh: '官方', en: 'Official' },
+  { key: 'builtin', zh: '内置', en: 'Built-in' },
+  { key: 'database', zh: '数据库', en: 'Database' },
+  { key: 'filesystem', zh: '文件系统', en: 'Filesystem' },
+  { key: 'search', zh: '搜索', en: 'Search' },
+  { key: 'web', zh: '网页', en: 'Web' },
+  { key: 'browser', zh: '浏览器', en: 'Browser' },
+  { key: 'ai', zh: '人工智能', en: 'AI' },
+  { key: 'dev', zh: '开发', en: 'Development' },
+  { key: 'ops', zh: '运维', en: 'Operations' },
+  { key: 'docs', zh: '文档', en: 'Docs' },
+  { key: 'messaging', zh: '消息', en: 'Messaging' },
+  { key: 'memory', zh: '记忆', en: 'Memory' },
+  { key: 'security', zh: '安全', en: 'Security' },
+  { key: 'testing', zh: '测试', en: 'Testing' },
+];
+
+test('the old 15-entry default is upgraded on read', () => {
+  const upgraded = readTagDictionary({ tagDictionary: LEGACY_TAG_DEFAULT });
+  assert.equal(upgraded.length, 26);
+  assert.ok(upgraded.some((tag) => tag.key === 'env.prod'));
+  assert.ok(!upgraded.some((tag) => tag.key === 'database'));
+});
+
+test('a reordered old default is kept as-is', () => {
+  const reordered = [...LEGACY_TAG_DEFAULT].reverse();
+  assert.deepEqual(readTagDictionary({ tagDictionary: reordered }), reordered);
+});
+
+test('the old 15 keys with a changed label are kept as-is', () => {
+  for (const changed of ['zh', 'en'] as const) {
+    const relabelled = LEGACY_TAG_DEFAULT.map((entry, index) =>
+      index === 2 ? { ...entry, [changed]: `${entry[changed]} 自定义` } : entry,
+    );
+    assert.deepEqual(readTagDictionary({ tagDictionary: relabelled }), relabelled, changed);
+  }
+});
+
+test('a custom subset of the old keys is kept as-is', () => {
+  const subset = LEGACY_TAG_DEFAULT.slice(0, 5);
+  assert.deepEqual(readTagDictionary({ tagDictionary: subset }), subset);
+});
+
+test('a customised dictionary is kept as-is', () => {
+  const custom = [
+    { key: 'db', zh: '数据库', en: 'Database' },
+    { key: 'custom', zh: '自定义', en: 'Custom' },
+  ];
+  assert.deepEqual(readTagDictionary({ tagDictionary: custom }), custom);
+});
+
+test('appendTagDictionary adds only unknown keys and keeps existing labels', () => {
+  const settings: StoredSettings = {
+    tagDictionary: [{ key: 'read', zh: '只读', en: 'Read-only' }],
+  };
+  const result = appendTagDictionary(settings, [
+    { key: 'read', zh: '重复', en: 'Duplicate' },
+    { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
+  ]);
+  assert.deepEqual(result.added, [
+    { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
+  ]);
+  assert.deepEqual(result.tags, [
+    { key: 'read', zh: '只读', en: 'Read-only' },
+    { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
+  ]);
+});
+
+test('PUT /tags and GET agree when the submitted dictionary is the old default', async () => {
+  const store = memoryStore({}, 1);
+  const handler = createAdminTagsHandler({ settings: store });
+  const put = await handler({
+    method: 'PUT',
+    path: '/tags',
+    headers: { 'if-match': '"1"' },
+    body: { tags: LEGACY_TAG_DEFAULT },
+  });
+  assert.equal(put?.status, 200);
+  assert.equal((put?.body as { tags: unknown[] }).tags.length, 26);
+
+  const get = await handler({ method: 'GET', path: '/tags' });
+  assert.deepEqual(get?.body, put?.body);
+  assert.deepEqual(
+    (await store.read()).settings['tagDictionary'],
+    LEGACY_TAG_DEFAULT,
+    'the submission is stored verbatim and upgraded on read',
+  );
+});
+
+test('appendTagDictionary refuses to exceed the 200-entry limit', () => {
+  const full = Array.from({ length: 200 }, (_entry, index) => ({
+    key: `tag${index}`,
+    zh: `标签${index}`,
+    en: `Tag ${index}`,
+  }));
+  assert.throws(
+    () => appendTagDictionary({ tagDictionary: full }, [{ key: 'extra', zh: '额外', en: 'Extra' }]),
+    (error: unknown) => error instanceof AdminApiError && error.code === 'INVALID_TAGS',
+  );
+
+  const lastSlot = appendTagDictionary({ tagDictionary: full.slice(0, 199) }, [
+    { key: 'extra', zh: '额外', en: 'Extra' },
+  ]);
+  assert.equal(lastSlot.tags.length, 200);
+  assert.deepEqual(lastSlot.added, [{ key: 'extra', zh: '额外', en: 'Extra' }]);
 });
 
 test('an explicitly saved empty dictionary stays empty', async () => {

@@ -18,7 +18,7 @@ import type {
   AdminResponse,
 } from '../src/admin/servers.ts';
 
-type StoredBinding = ClientBinding & { tokenHash: string };
+type StoredBinding = ClientBinding & { tokenHash: string; tokenPlain: string | null };
 
 class MemoryBindingStore implements ClientBindingStore {
   readonly rows = new Map<string, StoredBinding>();
@@ -47,6 +47,7 @@ class MemoryBindingStore implements ClientBindingStore {
       createdAt: new Date(1_700_000_000_000).toISOString(),
       lastSeenAt: null,
       tokenHash,
+      tokenPlain: input.token,
     };
     this.rows.set(row.id, row);
     return row;
@@ -56,6 +57,20 @@ class MemoryBindingStore implements ClientBindingStore {
     const current = this.rows.get(id);
     assert.ok(current !== undefined, `missing binding ${id}`);
     const next: StoredBinding = { ...current, ...patch };
+    this.rows.set(id, next);
+    return next;
+  }
+
+  async token(id: string): Promise<string | null> {
+    return this.rows.get(id)?.tokenPlain ?? null;
+  }
+
+  async rotateToken(id: string, token: string): Promise<ClientBinding | null> {
+    const current = this.rows.get(id);
+    if (current === undefined) return null;
+    const tokenHash = sha256(token);
+    this.tokenHashes.push(tokenHash);
+    const next: StoredBinding = { ...current, tokenHash, tokenPlain: token };
     this.rows.set(id, next);
     return next;
   }
@@ -96,7 +111,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function setup(options: { token?: string; callbackResult?: number } = {}): {
+function setup(options: { token?: string; tokens?: string[]; callbackResult?: number } = {}): {
   handler: AdminHandler;
   store: MemoryBindingStore;
   changes: Array<[string, BindingChange]>;
@@ -132,6 +147,7 @@ function setup(options: { token?: string; callbackResult?: number } = {}): {
     },
   ];
 
+  let issued = 0;
   const handler = createAdminClientsHandler({
     bindings: store,
     onBindingChanged: (bindingId, change) => {
@@ -140,13 +156,17 @@ function setup(options: { token?: string; callbackResult?: number } = {}): {
       return options.callbackResult ?? 3;
     },
     sessions: { list: async () => sessions },
-    tokenFactory: () => options.token ?? 'client-test-token-0123456789',
+    tokenFactory: () => {
+      const next = options.tokens?.[issued];
+      issued += 1;
+      return next ?? options.token ?? 'client-test-token-0123456789';
+    },
   });
 
   return { handler, store, changes, sessions, callbackState };
 }
 
-test('POST /clients returns the plaintext token once and stores only its hash', async () => {
+test('POST /clients returns the plaintext token and keeps it out of the list', async () => {
   const token = 'client-test-token-0123456789';
   const { handler, store } = setup({ token });
 
@@ -173,12 +193,14 @@ test('POST /clients returns the plaintext token once and stores only its hash', 
   assert.equal('tokenHash' in client, false);
   assert.equal(store.tokenHashes.length, 1);
   assert.equal(store.tokenHashes[0], sha256(token));
+  assert.equal(await store.token('cb_1'), token);
 
   const listed = await call(handler, makeRequest('GET', '/clients'));
   const serialized = JSON.stringify(listed.body);
   assert.equal(serialized.includes(token), false);
   assert.equal(serialized.includes(sha256(token)), false);
   assert.equal(serialized.includes('tokenHash'), false);
+  assert.equal(serialized.includes('tokenPlain'), false);
 });
 
 test('POST /clients validates the binding shape', async () => {
@@ -301,6 +323,56 @@ test('PUT still reports a callback failure instead of hiding it', async () => {
   assert.deepEqual(changes, [['cb_1', 'updated']]);
 });
 
+test('GET /clients/:id/token returns the stored token with no-store', async () => {
+  const token = 'client-test-token-0123456789';
+  const { handler, store } = setup({ token });
+  await call(handler, makeRequest('POST', '/clients', { label: 'work' }));
+
+  const response = await call(handler, makeRequest('GET', '/admin/api/clients/cb_1/token'));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers?.['cache-control'], 'no-store');
+  assert.equal(bodyOf(response)['token'], token);
+  assert.equal(await store.token('cb_1'), token);
+});
+
+test('GET /clients/:id/token reports missing bindings and unavailable tokens', async () => {
+  const { handler, store } = setup();
+  await call(handler, makeRequest('POST', '/clients', { label: 'work' }));
+  store.rows.get('cb_1')!.tokenPlain = null;
+
+  const unavailable = await call(handler, makeRequest('GET', '/clients/cb_1/token'));
+  assert.equal(unavailable.status, 404);
+  assert.equal(errorCode(unavailable), 'CLIENT_TOKEN_UNAVAILABLE');
+
+  const missing = await call(handler, makeRequest('GET', '/clients/cb_404/token'));
+  assert.equal(missing.status, 404);
+  assert.equal(errorCode(missing), 'CLIENT_NOT_FOUND');
+});
+
+test('POST /clients/:id/token rotates the token and invalidates the old one', async () => {
+  const oldToken = 'old-token-0123456789';
+  const newToken = 'new-token-0123456789';
+  const { handler, store, changes } = setup({ tokens: [oldToken, newToken], callbackResult: 2 });
+  await call(handler, makeRequest('POST', '/clients', { label: 'work' }));
+  assert.equal(store.rows.get('cb_1')?.tokenHash, sha256(oldToken));
+
+  const response = await call(handler, makeRequest('POST', '/admin/api/clients/cb_1/token'));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers?.['cache-control'], 'no-store');
+  const body = bodyOf(response);
+  assert.equal(body['token'], newToken);
+  assert.equal(body['affectedSessions'], 2);
+  assert.equal('tokenPlain' in (body['client'] as Record<string, unknown>), false);
+  assert.equal(store.rows.get('cb_1')?.tokenHash, sha256(newToken));
+  assert.notEqual(store.rows.get('cb_1')?.tokenHash, sha256(oldToken));
+  assert.equal(await store.token('cb_1'), newToken);
+  assert.deepEqual(changes, [['cb_1', 'updated']]);
+
+  const missing = await call(handler, makeRequest('POST', '/clients/cb_404/token'));
+  assert.equal(missing.status, 404);
+  assert.equal(errorCode(missing), 'CLIENT_NOT_FOUND');
+});
+
 test('DELETE /clients/:id removes the binding and invalidates the token', async () => {
   const { handler, store, changes } = setup({ callbackResult: 1 });
   await call(handler, makeRequest('POST', '/clients', { label: 'work' }));
@@ -317,6 +389,10 @@ test('DELETE /clients/:id removes the binding and invalidates the token', async 
   const again = await call(handler, makeRequest('DELETE', '/clients/cb_1'));
   assert.equal(again.status, 404);
   assert.equal(errorCode(again), 'CLIENT_NOT_FOUND');
+
+  const token = await call(handler, makeRequest('GET', '/clients/cb_1/token'));
+  assert.equal(token.status, 404);
+  assert.equal(errorCode(token), 'CLIENT_NOT_FOUND');
 
   assert.equal(await handler(makeRequest('PATCH', '/clients/cb_1')), null);
   assert.equal(await handler(makeRequest('GET', '/clients/cb_1')), null);

@@ -79,6 +79,10 @@ export interface CatalogTool {
   kind: 'builtin' | 'mcp';
   server?: string;
   description?: string;
+  /** Server-level category inherited from the owning server row (including builtins). */
+  category?: string;
+  /** Server-level summary inherited from the owning server row (including builtins). */
+  summary?: string;
   tags?: string[];
   inputSchema: unknown;
   concurrency: 'parallel' | 'serial' | 'exclusive';

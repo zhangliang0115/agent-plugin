@@ -172,7 +172,7 @@ test('GET /ai/config returns defaults and prompt versions', async (t) => {
   assert.equal(response.ai.claudeBin, null);
   assert.equal(response.ai.effectiveClaudeBin, 'claude');
   assert.equal(response.ai.claudeBinSource, 'default');
-  assert.deepEqual(response.prompts, { propose: 1, annotate: 1 });
+  assert.deepEqual(response.prompts, { propose: 5, annotate: 5 });
   assert.equal(response.revision, 0);
 });
 
@@ -270,11 +270,32 @@ test('propose previews a draft without writing servers or revision', async (t) =
   assert.match(response.proposalId ?? '', /^prop_[0-9a-f]+$/);
   assert.equal((response.server as { id: string }).id, 'github');
   assert.equal(response.idConflict, false);
-  assert.equal(response.meta.promptVersion, 1);
+  assert.equal(response.meta.promptVersion, 5);
   assert.ok(typeof response.meta.expiresAt === 'string');
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'github'), null);
   assert.equal(fixture.rebuilds.length, 0);
+});
+
+test('a proposal without connectMode defaults to eager', async (t) => {
+  const server = okServer();
+  delete server['connectMode'];
+  const fixture = await makeFixture(t, {
+    extraEnv: {
+      FAKE_CLAUDE_MODE: 'payload',
+      FAKE_CLAUDE_PAYLOAD: proposalPayload(server),
+    },
+  });
+
+  const response = await fixture.service.propose({ input: 'x' });
+  assert.equal((response.server as { connectMode: string }).connectMode, 'eager');
+
+  const applied = await fixture.service.applyProposal({
+    proposalId: response.proposalId,
+    confirmStdio: true,
+  });
+  assert.equal(getServer(fixture.db, 'github')?.connectMode, 'eager');
+  assert.equal(applied.server.connectMode, 'eager');
 });
 
 test('propose is disabled without touching config reads', async (t) => {

@@ -25,6 +25,8 @@ SELECT
   t.enabled AS tool_enabled,
   s.enabled AS server_enabled,
   s.transport AS transport,
+  s.category AS server_category,
+  s.summary AS server_summary,
   s.tags_json AS server_tags_json
 FROM tools t
 JOIN servers s ON s.id = t.server_id
@@ -165,6 +167,11 @@ export function buildCatalogSnapshot(
         && readNumberColumn(row, 'server_enabled') === 1,
     };
     if (!builtin) tool.server = serverId;
+    // Category and summary live on the server row; builtins inherit them too.
+    const category = readTextColumn(row, 'server_category');
+    if (category !== '') tool.category = category;
+    const summary = readTextColumn(row, 'server_summary');
+    if (summary !== '') tool.summary = summary;
     tools.push(Object.freeze(tool));
   }
 

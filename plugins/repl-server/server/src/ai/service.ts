@@ -9,6 +9,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
+import { readCategoryDictionary, type CategoryDefinition } from '../admin/categories.ts';
 import {
   AdminApiError,
   invalidField,
@@ -20,6 +21,7 @@ import {
   type ServerView,
 } from '../admin/servers.ts';
 import type { SettingsStore } from '../admin/settings.ts';
+import { readTagDictionary, type TagDefinition } from '../admin/tags.ts';
 import type { ToolRecord, ToolStore } from '../admin/tools.ts';
 import { getRevision } from '../db/meta.ts';
 import { isSeedServer } from '../db/servers.ts';
@@ -54,8 +56,11 @@ import {
   normalizeAnnotation,
   normalizeProposal,
   normalizeProposalServer,
+  restrictAnnotationToDictionary,
   scanSecretLiterals,
   toServerConfig,
+  type AnnotationDictionaryKeys,
+  type DictionarySuggestion,
   type NormalizedAnnotation,
   type NormalizedToolOverride,
   type ProposalServer,
@@ -145,7 +150,9 @@ export interface AnnotationCurrent {
 export interface AnnotationProposedView {
   summary: string | null;
   category: string | null;
+  categorySuggestion: DictionarySuggestion | null;
   tags: string[];
+  tagSuggestions: DictionarySuggestion[];
   toolOverrides: NormalizedToolOverride[];
 }
 
@@ -249,7 +256,9 @@ function proposedView(annotation: NormalizedAnnotation): AnnotationProposedView 
   return {
     summary: annotation.summary ?? null,
     category: annotation.category ?? null,
+    categorySuggestion: annotation.categorySuggestion ?? null,
     tags: [...(annotation.tags ?? [])],
+    tagSuggestions: [...(annotation.tagSuggestions ?? [])],
     toolOverrides: [...(annotation.toolOverrides ?? [])],
   };
 }
@@ -258,9 +267,25 @@ function toAnnotationPatch(annotation: NormalizedAnnotation): AnnotationPatch {
   const patch: AnnotationPatch = {};
   if (annotation.summary !== undefined) patch.summary = annotation.summary;
   if (annotation.category !== undefined) patch.category = annotation.category;
+  if (annotation.categorySuggestion !== undefined) {
+    patch.categorySuggestion = annotation.categorySuggestion;
+  }
   if (annotation.tags !== undefined) patch.tags = annotation.tags;
+  if (annotation.tagSuggestions !== undefined) patch.tagSuggestions = annotation.tagSuggestions;
   if (annotation.toolOverrides !== undefined) patch.toolOverrides = annotation.toolOverrides;
   return patch;
+}
+
+interface AnnotationDictionaries {
+  categories: CategoryDefinition[];
+  tags: TagDefinition[];
+}
+
+function dictionaryKeys(dictionaries: AnnotationDictionaries): AnnotationDictionaryKeys {
+  return {
+    categories: new Set(dictionaries.categories.map((entry) => entry.key)),
+    tags: new Set(dictionaries.tags.map((entry) => entry.key)),
+  };
 }
 
 /** Body shape accepted by `parseCreateServer` (env/header values stay as `$secret`). */
@@ -647,6 +672,14 @@ export function createAiService(deps: AiServiceDeps): AiService {
 
   // -- annotation -----------------------------------------------------------
 
+  async function annotationDictionaries(): Promise<AnnotationDictionaries> {
+    const { settings } = await deps.settings.read();
+    return {
+      categories: readCategoryDictionary(settings),
+      tags: readTagDictionary(settings),
+    };
+  }
+
   async function loadAnnotatable(
     serverId: string,
   ): Promise<{ record: ServerRecord; tools: ToolRecord[] }> {
@@ -670,10 +703,12 @@ export function createAiService(deps: AiServiceDeps): AiService {
   ): Promise<AnnotationPreviewResponse & { toolsHash: string }> {
     const ai = ensureEnabled();
     const { record, tools } = await loadAnnotatable(serverId);
+    const dictionaries = await annotationDictionaries();
     const views = buildToolPromptViews(tools);
     const promptResult = buildAnnotatePrompt(
       serverPromptView(record, tools.length),
       views,
+      dictionaries,
       createPromptNonce(),
     );
     const { run, audit } = await callModel({
@@ -696,8 +731,9 @@ export function createAiService(deps: AiServiceDeps): AiService {
       throw error;
     }
 
-    const warnings = [...normalized.warnings];
-    if (annotationIsEmpty(normalized)) {
+    const restricted = restrictAnnotationToDictionary(normalized, dictionaryKeys(dictionaries));
+    const warnings = [...restricted.annotation.warnings, ...restricted.dropped];
+    if (annotationIsEmpty(restricted.annotation)) {
       warnings.push('AI 未给出可应用的标注');
     }
     emitSuccess(audit, null);
@@ -710,7 +746,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         category: record.category,
         tags: [...record.tags],
       },
-      proposed: proposedView(normalized),
+      proposed: proposedView(restricted.annotation),
       warnings,
       omittedTools: promptResult.omittedTools,
       meta: {
@@ -747,12 +783,22 @@ export function createAiService(deps: AiServiceDeps): AiService {
       applyBody,
       tools.map((tool) => tool.name),
     );
+    const dictionaries = await annotationDictionaries();
+    const restricted = restrictAnnotationToDictionary(normalized, dictionaryKeys(dictionaries));
+    if (restricted.dropped.length > 0) {
+      throw new AdminApiError(
+        422,
+        'AI_ANNOTATION_INVALID',
+        restricted.dropped.join('; '),
+        { errors: restricted.dropped },
+      );
+    }
 
     let result;
     try {
       result = applyAnnotation(
         deps.db,
-        { serverId, patch: toAnnotationPatch(normalized) },
+        { serverId, patch: toAnnotationPatch(restricted.annotation) },
         expectedRevision,
       );
     } catch (error) {

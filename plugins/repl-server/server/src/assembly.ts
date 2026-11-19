@@ -66,7 +66,13 @@ import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
 import { callTool, type ToolCallResponse } from './tools/call.ts';
-import { listTools, RUN_SCRIPT_DESCRIPTION } from './tools/registry.ts';
+import {
+  buildSearchToolsDefinition,
+  listTools,
+  RUN_SCRIPT_DESCRIPTION,
+  type ToolDefinition,
+} from './tools/registry.ts';
+import { isToolVisible, type ToolVisibility } from './tools/search.ts';
 
 export interface AssemblyOptions {
   root?: string;
@@ -649,35 +655,85 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   ];
 
   /**
-   * One request's visible MCP servers (design 01 §7.2, 03 §6.2): one server
-   * read and one catalog snapshot per call, no per-server queries. A binding
-   * that vanished mid-request fails closed.
+   * One request's tool surface (design 01 §7.2, 03 §6.2): one binding read and
+   * one catalog snapshot, shared by `tools/list`, `tools/call` and the discover
+   * instructions. A binding that vanished mid-request fails closed.
    */
-  const visibleServersFor = (identity: RequestIdentity): McpServerOverview[] => {
+  interface ToolSurface {
+    servers: McpServerOverview[];
+    visibility: Required<Pick<ToolVisibility, 'allowedServers' | 'allowedTags'>>;
+    categories: string[];
+    tags: string[];
+    runScriptDescription: string;
+    searchToolsDefinition: ToolDefinition;
+  }
+
+  const toolSurfaceFor = (identity: RequestIdentity): ToolSurface => {
     const binding = identity.binding === null ? null : getClientBinding(db, identity.binding);
-    if (identity.binding !== null && binding === null) return [];
-    return collectVisibleMcpServers({
+    const missingBinding = identity.binding !== null && binding === null;
+    const allowedServers = missingBinding ? [] : (binding?.allowedServers ?? null);
+    const allowedTags = missingBinding ? [] : (binding?.allowedTags ?? null);
+    const visibility = { allowedServers, allowedTags };
+
+    const snapshot = catalog.snapshot();
+    const servers = collectVisibleMcpServers({
       servers: listServers(db),
-      tools: catalog.snapshot().tools,
-      allowedServers: binding?.allowedServers ?? null,
-      allowedTags: binding?.allowedTags ?? null,
+      tools: snapshot.tools,
+      allowedServers,
+      allowedTags,
     });
+    const visibleTools = snapshot.tools.filter(
+      (tool) => tool.enabled && isToolVisible(tool, visibility),
+    );
+    const categories = [
+      ...new Set(
+        visibleTools
+          .map((tool) => tool.category)
+          .filter((category): category is string => category !== undefined),
+      ),
+    ].sort();
+    const tags = [
+      ...new Set(visibleTools.flatMap((tool) => tool.tags ?? [])),
+    ].sort();
+
+    return {
+      servers,
+      visibility,
+      categories,
+      tags,
+      runScriptDescription: buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers),
+      searchToolsDefinition: buildSearchToolsDefinition(
+        categories,
+        tags,
+        servers.map((server) => server.id),
+      ),
+    };
   };
 
   const dispatcher = createMethodTable<McpContext>({
     instructions: (context) =>
-      buildInstructions(INSTRUCTIONS, visibleServersFor(context.identity)),
-    toolsList: (_params, context) => ({
-      tools: listTools(
-        buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, visibleServersFor(context.identity)),
-      ),
-    }),
+      buildInstructions(INSTRUCTIONS, toolSurfaceFor(context.identity).servers),
+    toolsList: (_params, context) => {
+      const surface = toolSurfaceFor(context.identity);
+      return {
+        tools: listTools({
+          runScriptDescription: surface.runScriptDescription,
+          searchToolsDescription: surface.searchToolsDefinition.description,
+          searchToolsSchema: surface.searchToolsDefinition.inputSchema,
+        }),
+      };
+    },
     toolsCall: async (params, context): Promise<ToolCallResponse> => {
       const name = params['name'];
       if (typeof name !== 'string' || name === '') {
         throw new JsonRpcError(JSON_RPC_INVALID_PARAMS, 'tool name must be a non-empty string');
       }
-      return await callTool(name, params['arguments'], context);
+      const surface = toolSurfaceFor(context.identity);
+      return await callTool(name, params['arguments'], {
+        ...context,
+        visibility: surface.visibility,
+        searchToolsDefinition: surface.searchToolsDefinition,
+      });
     },
     tasksGet: async (params, context) => {
       const owner = ownerOf(context.identity);

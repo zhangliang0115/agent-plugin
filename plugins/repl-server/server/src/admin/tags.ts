@@ -33,28 +33,83 @@ export interface AdminTagsDeps {
 }
 
 const SETTING_KEY = 'tagDictionary';
+/** Settings-table key; exported for in-transaction dictionary appends. */
+export const TAG_SETTING_KEY = SETTING_KEY;
 const MAX_TAGS = 200;
 const TAG_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/u;
 const LABEL_MAX_LENGTH = 40;
 
-/** Shown until the administrator saves their own dictionary; an explicit `[]` clears it. */
+/** Shown until the administrator saves their own dictionary; an explicit `[]` clears it.
+ *
+ * Tags are multi-valued and never double as categories: they carry environment,
+ * provenance, capability, common product and cross-cutting concern. `env.*` only
+ * declares which environments a server touches; it is not an isolation boundary.
+ */
 export const DEFAULT_TAG_DICTIONARY: readonly TagDefinition[] = Object.freeze([
   { key: 'official', zh: '官方', en: 'Official' },
   { key: 'builtin', zh: '内置', en: 'Built-in' },
-  { key: 'filesystem', zh: '文件系统', en: 'Filesystem' },
+  { key: 'env.dev', zh: '开发环境', en: 'Development' },
+  { key: 'env.test', zh: '测试环境', en: 'Testing' },
+  { key: 'env.pre', zh: '预发环境', en: 'Staging' },
+  { key: 'env.prod', zh: '生产环境', en: 'Production' },
+  { key: 'cross-env', zh: '跨环境', en: 'Cross-environment' },
+  { key: 'read', zh: '只读', en: 'Read-only' },
+  { key: 'write', zh: '写入', en: 'Write' },
+  { key: 'query', zh: '查询', en: 'Query' },
+  { key: 'exec', zh: '执行', en: 'Execute' },
+  { key: 'deploy', zh: '部署', en: 'Deploy' },
+  { key: 'destructive', zh: '破坏性', en: 'Destructive' },
+  { key: 'memory', zh: '记忆', en: 'Memory' },
+  { key: 'docs', zh: '文档', en: 'Docs' },
+  { key: 'testing', zh: '测试', en: 'Testing' },
+  { key: 'security', zh: '安全', en: 'Security' },
+  { key: 'mysql', zh: 'MySQL', en: 'MySQL' },
+  { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
+  { key: 'elasticsearch', zh: 'Elasticsearch', en: 'Elasticsearch' },
+  { key: 'redis', zh: 'Redis', en: 'Redis' },
+  { key: 'prometheus', zh: 'Prometheus', en: 'Prometheus' },
+  { key: 'apm', zh: 'APM', en: 'APM' },
+  { key: 'gitlab', zh: 'GitLab', en: 'GitLab' },
+  { key: 'browser', zh: '浏览器', en: 'Browser' },
+  { key: 'computer-use', zh: 'Computer Use', en: 'Computer Use' },
+]);
+
+/** The 15-entry default from before categories and tags diverged. */
+const LEGACY_DEFAULT_DICTIONARY: readonly TagDefinition[] = [
+  { key: 'official', zh: '官方', en: 'Official' },
+  { key: 'builtin', zh: '内置', en: 'Built-in' },
   { key: 'database', zh: '数据库', en: 'Database' },
+  { key: 'filesystem', zh: '文件系统', en: 'Filesystem' },
   { key: 'search', zh: '搜索', en: 'Search' },
   { key: 'web', zh: '网页', en: 'Web' },
   { key: 'browser', zh: '浏览器', en: 'Browser' },
   { key: 'ai', zh: '人工智能', en: 'AI' },
   { key: 'dev', zh: '开发', en: 'Development' },
   { key: 'ops', zh: '运维', en: 'Operations' },
-  { key: 'memory', zh: '记忆', en: 'Memory' },
-  { key: 'messaging', zh: '消息', en: 'Messaging' },
   { key: 'docs', zh: '文档', en: 'Docs' },
-  { key: 'testing', zh: '测试', en: 'Testing' },
+  { key: 'messaging', zh: '消息', en: 'Messaging' },
+  { key: 'memory', zh: '记忆', en: 'Memory' },
   { key: 'security', zh: '安全', en: 'Security' },
-]);
+  { key: 'testing', zh: '测试', en: 'Testing' },
+];
+
+function defaultTags(): TagDefinition[] {
+  return DEFAULT_TAG_DICTIONARY.map((tag) => ({ ...tag }));
+}
+
+/** Requires the exact old default, same order and labels; any reorder or relabel is custom. */
+function isLegacyDefault(tags: readonly TagDefinition[]): boolean {
+  if (tags.length !== LEGACY_DEFAULT_DICTIONARY.length) return false;
+  return tags.every((tag, index) => {
+    const expected = LEGACY_DEFAULT_DICTIONARY[index];
+    return (
+      expected !== undefined &&
+      tag.key === expected.key &&
+      tag.zh === expected.zh &&
+      tag.en === expected.en
+    );
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -63,7 +118,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Reads the stored dictionary; malformed entries are ignored, not fatal. */
 export function readTagDictionary(settings: StoredSettings): TagDefinition[] {
   const raw = settings[SETTING_KEY];
-  if (raw === undefined) return DEFAULT_TAG_DICTIONARY.map((tag) => ({ ...tag }));
+  if (raw === undefined) return defaultTags();
   if (!Array.isArray(raw)) return [];
   const tags: TagDefinition[] = [];
   const seen = new Set<string>();
@@ -76,6 +131,9 @@ export function readTagDictionary(settings: StoredSettings): TagDefinition[] {
     seen.add(key);
     tags.push({ key, zh, en });
   }
+  // Settings saved from the old 15-entry default are upgraded in place; anything
+  // else (including `[]`) is the administrator's own dictionary and is kept.
+  if (isLegacyDefault(tags)) return defaultTags();
   return tags;
 }
 
@@ -118,6 +176,30 @@ export function parseTagDictionary(value: unknown): TagDefinition[] {
   return tags;
 }
 
+/** Appends accepted suggestions; an existing key keeps its stored labels. */
+export function appendTagDictionary(
+  settings: StoredSettings,
+  additions: readonly TagDefinition[],
+): { tags: TagDefinition[]; added: TagDefinition[] } {
+  const tags = readTagDictionary(settings);
+  const seen = new Set(tags.map((tag) => tag.key));
+  const added: TagDefinition[] = [];
+  for (const entry of additions) {
+    if (seen.has(entry.key)) continue;
+    if (tags.length >= MAX_TAGS) {
+      throw new AdminApiError(
+        422,
+        'INVALID_TAGS',
+        `tags must contain at most ${MAX_TAGS} entries`,
+      );
+    }
+    seen.add(entry.key);
+    tags.push({ ...entry });
+    added.push({ ...entry });
+  }
+  return { tags, added };
+}
+
 /** `GET /tags` and `PUT /tags`. */
 export function createAdminTagsHandler(deps: AdminTagsDeps): AdminHandler {
   return adminHandler(async (request: AdminRequest): Promise<AdminResponse | null> => {
@@ -137,7 +219,7 @@ export function createAdminTagsHandler(deps: AdminTagsDeps): AdminHandler {
       assertRevision(current.revision, expected);
       const next: StoredSettings = { ...current.settings, [SETTING_KEY]: tags };
       const { revision } = await deps.settings.replace(next, expected);
-      return adminJson(200, { tags, revision });
+      return adminJson(200, { tags: readTagDictionary(next), revision });
     }
 
     return null;

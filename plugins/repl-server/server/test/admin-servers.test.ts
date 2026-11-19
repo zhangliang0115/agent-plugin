@@ -453,6 +453,7 @@ class FakePool implements ServerPoolControl {
 
   async disconnect(id: string): Promise<void> {
     this.calls.push(`disconnect:${id}`);
+    this.states.set(id, { state: 'disabled' });
   }
 
   async restart(id: string): Promise<void> {
@@ -672,6 +673,41 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
   assert.equal(errorCode(duplicate), 'SERVER_EXISTS');
 });
 
+test('POST /servers defaults connectMode to eager; stored lazy rows stay lazy', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+
+  // The discovery page registers servers without a connectMode field.
+  const created = await call(
+    handler,
+    makeRequest('POST', '/servers', { body: { id: 'fresh', command: 'npx' } }),
+  );
+  assert.equal(created.status, 201);
+  const createdServer = bodyOf(created)['server'] as Record<string, unknown>;
+  assert.equal(createdServer['connectMode'], 'eager');
+  const stored = env.db.prepare('SELECT connect_mode FROM servers WHERE id = ?').get('fresh');
+  assert.equal(String(stored?.['connect_mode']), 'eager');
+
+  // A row written before this default stays lazy; no migration rewrites it.
+  await addServer(env.serverStore, { id: 'legacy', connectMode: 'lazy' });
+  const listed = await call(handler, makeRequest('GET', '/servers'));
+  assert.equal(listed.status, 200);
+  const legacy = (bodyOf(listed)['servers'] as Array<Record<string, unknown>>).find(
+    (entry) => entry['id'] === 'legacy',
+  );
+  assert.equal(legacy?.['connectMode'], 'lazy');
+
+  const patched = await call(
+    handler,
+    makeRequest('PATCH', '/servers/legacy', {
+      body: { label: 'Renamed' },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(patched.status, 200);
+  assert.equal((bodyOf(patched)['server'] as Record<string, unknown>)['connectMode'], 'lazy');
+});
+
 test('POST /servers validates transport configuration and unknown fields', async () => {
   const env = testEnv();
   const handler = createServerHandler(env);
@@ -794,6 +830,42 @@ test('PATCH /servers/:id requires If-Match and a non-empty, coherent patch', asy
   );
   assert.equal(missing.status, 404);
   assert.equal(errorCode(missing), 'SERVER_NOT_FOUND');
+});
+
+test('PATCH enabled=false disconnects the server and reports it disabled', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, { id: 'pg' });
+  env.pool.states.set('pg', { state: 'ready', pid: 42 });
+  const revision = await env.serverStore.revision();
+
+  const response = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', { body: { enabled: false }, ifMatch: revision }),
+  );
+
+  assert.equal(response.status, 200);
+  const server = bodyOf(response)['server'] as Record<string, unknown>;
+  assert.equal(server['enabled'], false);
+  assert.equal(server['state'], 'disabled');
+  assert.ok(env.pool.calls.includes('disconnect:pg'));
+});
+
+test('PATCH enabled=false on a builtin server never disconnects', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, { id: '__builtin__', transport: 'builtin', command: null });
+  const revision = await env.serverStore.revision();
+
+  const response = await call(
+    handler,
+    makeRequest('PATCH', '/servers/__builtin__', { body: { enabled: false }, ifMatch: revision }),
+  );
+
+  assert.equal(response.status, 200);
+  const server = bodyOf(response)['server'] as Record<string, unknown>;
+  assert.equal(server['enabled'], false);
+  assert.equal(env.pool.calls.some((entry) => entry.startsWith('disconnect:')), false);
 });
 
 test('PATCH summary moves summary_source and clearing it removes the source', async () => {

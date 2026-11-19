@@ -8,7 +8,7 @@ import type { TestContext } from 'node:test';
 
 import { migrate, openStateDb } from '../src/db/migrate.ts';
 import { getMeta, getRevision } from '../src/db/meta.ts';
-import { createSchemaV1, createSchemaV2, DbValidationError, SCHEMA_VERSION } from '../src/db/schema.ts';
+import { createSchemaV1, createSchemaV2, createSchemaV4, DbValidationError, SCHEMA_VERSION } from '../src/db/schema.ts';
 import { createServer, getServer, updateServer } from '../src/db/servers.ts';
 import { applyToolPatch, getTool, patchTool, upsertTool, writeToolRow } from '../src/db/tools.ts';
 
@@ -59,6 +59,32 @@ function seedV1Database(file: string): void {
   db.close();
 }
 
+/** Builds a real v4 database whose seed rows still carry the pre-v5 category keys. */
+function seedV4Database(file: string): void {
+  const db = new DatabaseSync(file);
+  createSchemaV1(db);
+  createSchemaV2(db);
+  createSchemaV4(db);
+  db.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '4')").run();
+  db.prepare("INSERT INTO meta (key, value) VALUES ('revision', '3')").run();
+  const insertServer = db.prepare(`
+    INSERT INTO servers (id, label, transport, category, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  insertServer.run('__official__', 'Claude Code 官方工具', 'builtin', 'official', LEGACY_TIME, LEGACY_TIME);
+  insertServer.run('__builtin__', '内置聚合工具', 'builtin', 'builtin', LEGACY_TIME, LEGACY_TIME);
+  insertServer.run('custom', 'Custom server', 'stdio', 'official', LEGACY_TIME, LEGACY_TIME);
+  const insertTool = db.prepare(`
+    INSERT INTO tools (server_id, name, schema_json, schema_hash, category, first_seen_at, last_seen_at)
+    VALUES (?, ?, '{"type":"object"}', ?, ?, ?, ?)
+  `);
+  insertTool.run('__official__', 'Read', 'hash-1', 'official', LEGACY_TIME, LEGACY_TIME);
+  insertTool.run('__builtin__', 'run_script', 'hash-2', 'builtin', LEGACY_TIME, LEGACY_TIME);
+  insertTool.run('custom', 'query', 'hash-3', 'official', LEGACY_TIME, LEGACY_TIME);
+  db.exec('PRAGMA user_version = 4');
+  db.close();
+}
+
 function readUserVersion(db: DatabaseSync): number {
   const row = db.prepare('PRAGMA user_version').get();
   return Number(row?.['user_version'] ?? 0);
@@ -89,12 +115,12 @@ const REPORT_INDEX_NAMES = [
   'reports_alert_idx',
 ];
 
-test('a fresh database runs v1 through v4 and exposes every feature set', (t) => {
+test('a fresh database runs v1 through v6 and exposes every feature set', (t) => {
   const { db } = openFixture(t);
 
-  assert.equal(SCHEMA_VERSION, 4);
-  assert.equal(readUserVersion(db), 4);
-  assert.equal(getMeta(db, 'schema_version'), '4');
+  assert.equal(SCHEMA_VERSION, 6);
+  assert.equal(readUserVersion(db), 6);
+  assert.equal(getMeta(db, 'schema_version'), '6');
   assert.equal(count(db, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"), 1);
   assert.equal(count(db, 'SELECT count(*) AS n FROM servers'), 2, 'v1 seeds survive');
 
@@ -102,6 +128,7 @@ test('a fresh database runs v1 through v4 and exposes every feature set', (t) =>
   assert.ok(columns(db, 'tools').includes('discovered_via'));
   assert.ok(columns(db, 'reports').includes('client_name'));
   assert.ok(columns(db, 'reports').includes('client_version'));
+  assert.ok(columns(db, 'client_bindings').includes('token_plain'));
   assert.equal(
     count(db, "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'reports'"),
     1,
@@ -124,8 +151,8 @@ test('an existing v1 database upgrades in place and keeps its rows', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 4);
-  assert.equal(getMeta(db, 'schema_version'), '4');
+  assert.equal(readUserVersion(db), 6);
+  assert.equal(getMeta(db, 'schema_version'), '6');
   assert.equal(getMeta(db, 'revision'), '5', 'the migrations must not reseed the catalog revision');
 
   const server = getServer(db, 'legacy');
@@ -169,8 +196,8 @@ test('repeated migrate is idempotent on an already migrated database', (t) => {
     }
   });
 
-  assert.equal(migrate(second), 4);
-  assert.equal(readUserVersion(second), 4);
+  assert.equal(migrate(second), 6);
+  assert.equal(readUserVersion(second), 6);
   assert.equal(count(second, 'SELECT count(*) AS n FROM reports'), 1);
   assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2, 'no duplicate seed rows');
   assert.equal(count(second, 'SELECT count(*) AS n FROM meta'), 2);
@@ -206,8 +233,8 @@ test('a v3 database backfills client_name/client_version from the legacy client 
     }
   });
 
-  assert.equal(readUserVersion(db), 4);
-  assert.equal(getMeta(db, 'schema_version'), '4');
+  assert.equal(readUserVersion(db), 6);
+  assert.equal(getMeta(db, 'schema_version'), '6');
   assert.equal(getMeta(db, 'revision'), '7', 'the migration must not reseed the catalog revision');
 
   const read = (id: string): { name: string; version: string } => {
@@ -222,13 +249,57 @@ test('a v3 database backfills client_name/client_version from the legacy client 
   assert.deepEqual(read('rep_admin'), { name: 'admin', version: '' });
 });
 
+test('v5 rewrites seed categories and leaves user servers untouched', (t) => {
+  const { dir } = emptyFile(t);
+  const legacy = join(dir, 'state-v4.db');
+  seedV4Database(legacy);
+
+  const db = openStateDb(legacy);
+  t.after(() => {
+    try {
+      db.close();
+    } catch {
+      // closed by the test
+    }
+  });
+
+  assert.equal(readUserVersion(db), 6);
+  assert.equal(getMeta(db, 'schema_version'), '6');
+  assert.equal(getMeta(db, 'revision'), '3', 'the migration must not reseed the catalog revision');
+  assert.ok(columns(db, 'client_bindings').includes('token_plain'));
+
+  const servers = db
+    .prepare('SELECT id, category FROM servers ORDER BY id')
+    .all()
+    .map((row) => ({ id: String(row['id']), category: String(row['category']) }));
+  assert.deepEqual(servers, [
+    { id: '__builtin__', category: 'other' },
+    { id: '__official__', category: 'devtools' },
+    { id: 'custom', category: 'official' },
+  ]);
+
+  const tools = db
+    .prepare('SELECT server_id, name, category FROM tools ORDER BY server_id, name')
+    .all()
+    .map((row) => ({
+      serverId: String(row['server_id']),
+      name: String(row['name']),
+      category: String(row['category']),
+    }));
+  assert.deepEqual(tools, [
+    { serverId: '__builtin__', name: 'run_script', category: 'other' },
+    { serverId: '__official__', name: 'Read', category: 'devtools' },
+    { serverId: 'custom', name: 'query', category: 'official' },
+  ]);
+});
+
 test('a database newer than the supported schema is rejected', (t) => {
   const { file } = emptyFile(t);
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA user_version = 5');
+  db.exec('PRAGMA user_version = 7');
   db.close();
 
-  assert.throws(() => openStateDb(file), /newer than supported 4/);
+  assert.throws(() => openStateDb(file), /newer than supported 6/);
 });
 
 test('server discoveryJson round-trips as opaque JSON text', (t) => {

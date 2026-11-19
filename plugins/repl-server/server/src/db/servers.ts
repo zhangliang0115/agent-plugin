@@ -112,7 +112,7 @@ export function createServer(db: DatabaseSync, input: NewServer): ServerWriteRes
   const headers = requireJsonObject(input.headers, 'headers');
   const discoveryJson = requireDiscoveryJson(input.discoveryJson);
   const tags = requireTags(input.tags);
-  const connectMode = requireConnectMode(input.connectMode ?? 'lazy');
+  const connectMode = requireConnectMode(input.connectMode ?? 'eager');
   const timeoutMs = requirePositiveInteger(input.timeoutMs ?? 60000, 'timeoutMs');
   const maxConcurrency = requirePositiveInteger(input.maxConcurrency ?? 8, 'maxConcurrency');
   const now = isoNow();

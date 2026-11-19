@@ -1,8 +1,10 @@
-/** Admin API for client bindings and one-time tokens.
+/** Admin API for client bindings and locally stored tokens.
  *
  * Routes:
- * - `GET /clients` — bindings (never token hashes) plus active MCP sessions
- * - `POST /clients` — create a binding; the plaintext token is returned exactly once
+ * - `GET /clients` — bindings (never tokens) plus active MCP sessions
+ * - `POST /clients` — create a binding; the plaintext token is in the response
+ * - `GET /clients/:id/token` — read the stored plaintext token (`404 CLIENT_TOKEN_UNAVAILABLE` before v6)
+ * - `POST /clients/:id/token` — rotate the token, invalidating the old one immediately
  * - `PUT /clients/:id` — update workspace/visibility/quota and destroy its execution sessions
  * - `DELETE /clients/:id` — delete the binding, invalidate the token and destroy sessions
  *
@@ -71,12 +73,16 @@ export interface ClientBindingPatch {
   quota?: ClientQuota | null;
 }
 
-/** Persistence contract implemented by RS-02. The store hashes `token`; only the hash is kept. */
+/** Persistence contract implemented by RS-02. The store keeps the hash and the local plaintext. */
 export interface ClientBindingStore {
   list(): Promise<ClientBinding[]>;
   get(id: string): Promise<ClientBinding | null>;
   create(input: ClientBindingInput & { token: string }): Promise<ClientBinding>;
   update(id: string, patch: ClientBindingPatch): Promise<ClientBinding>;
+  /** Stored plaintext token; `null` when the row is gone or predates local storage. */
+  token(id: string): Promise<string | null>;
+  /** Replaces hash and plaintext; `null` when the row is gone. */
+  rotateToken(id: string, token: string): Promise<ClientBinding | null>;
   /** Returns false when the row was already gone. */
   remove(id: string): Promise<boolean>;
 }
@@ -198,7 +204,7 @@ function generateToken(factory: (() => string) | undefined): string {
 /** `client_bindings.token_hash` matches the auth layer's SHA-256 encoding. */
 
 /**
- * Explicit projection: even if a store returns extra columns (for example `token_hash`),
+ * Explicit projection: even if the store returns extra token columns (hash or plaintext),
  * only these fields cross the admin boundary.
  */
 function publicBinding(binding: ClientBinding): ClientBinding {
@@ -357,6 +363,53 @@ export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler 
     return adminJson(200, response);
   }
 
+  async function getToken(id: string): Promise<AdminResponse> {
+    const existing = await deps.bindings.get(id);
+    if (existing === null) {
+      throw new AdminApiError(404, 'CLIENT_NOT_FOUND', `client binding ${id} does not exist`, {
+        bindingId: id,
+      });
+    }
+
+    const token = await deps.bindings.token(id);
+    if (token === null) {
+      throw new AdminApiError(
+        404,
+        'CLIENT_TOKEN_UNAVAILABLE',
+        `client binding ${id} predates local token storage; rotate the token to get a new one`,
+        { bindingId: id },
+      );
+    }
+
+    return adminJson(200, { token }, { 'cache-control': 'no-store' });
+  }
+
+  async function rotateToken(id: string): Promise<AdminResponse> {
+    const existing = await deps.bindings.get(id);
+    if (existing === null) {
+      throw new AdminApiError(404, 'CLIENT_NOT_FOUND', `client binding ${id} does not exist`, {
+        bindingId: id,
+      });
+    }
+
+    const token = generateToken(deps.tokenFactory);
+    const binding = await deps.bindings.rotateToken(id, token);
+    if (binding === null) {
+      throw new AdminApiError(404, 'CLIENT_NOT_FOUND', `client binding ${id} does not exist`, {
+        bindingId: id,
+      });
+    }
+
+    const changed = await notifyBindingChanged(deps, id, 'updated');
+    const response: Record<string, unknown> = {
+      client: publicBinding(binding),
+      token,
+      affectedSessions: changed.affectedSessions,
+    };
+    if (changed.warning !== undefined) response['warning'] = changed.warning;
+    return adminJson(200, response, { 'cache-control': 'no-store' });
+  }
+
   return adminHandler(async (request): Promise<AdminResponse | null> => {
     const segments = requestSegments(request);
     if (segments[0] !== 'clients') return null;
@@ -373,6 +426,14 @@ export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler 
       if (id === undefined) return null;
       if (method === 'PUT') return updateClient(id, request);
       if (method === 'DELETE') return deleteClient(id);
+      return null;
+    }
+
+    if (segments.length === 3 && segments[2] === 'token') {
+      const id = segments[1];
+      if (id === undefined) return null;
+      if (method === 'GET') return getToken(id);
+      if (method === 'POST') return rotateToken(id);
       return null;
     }
 

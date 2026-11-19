@@ -64,7 +64,7 @@
 | `RS-07-admin-base` | 管理端 HTTP 基座：admin-token/Cookie 鉴权、Host/Origin/CSRF、统一错误、/health、/overview 与静态托管 | RS-02-repos | 2d |
 | `RS-08-admin-servers` | servers 管理端点：GET/POST/PATCH/DELETE、connect/disconnect/restart/test、tools/refresh 与 202 operation | RS-07-admin-base, RS-03-secrets, RS-06-catalog | 2d |
 | `RS-09-admin-tools` | 工具端点：GET /servers/:id/tools 生效值、PATCH /tools/:serverId/:name、POST /tools/batch 事务与 GET /search 预览 | RS-07-admin-base, RS-05-retrieval | 2d |
-| `RS-10-admin-clients` | 客户端绑定端点：POST 一次性明文 token、GET 列表、PUT/DELETE 与按 binding 销毁执行会话 | RS-07-admin-base, RS-02-repos | 1d |
+| `RS-10-admin-clients` | 客户端绑定端点：POST 创建绑定并返回 token（token 本机保存，可在管理端查看/轮换；轮换使旧 token 失效）、GET 列表、PUT/DELETE 与按 binding 销毁执行会话 | RS-07-admin-base, RS-02-repos | 1d |
 | `RS-11-admin-config` | secrets 端点与配置导出/导入：键名只读、值写入、剔除 $secret、dry-run 与 202 导入 | RS-07-admin-base, RS-03-secrets, RS-02-repos | 2d |
 | `RS-12-admin-discover` | 本地环境探测端点 POST /discover：配置文件、命令与凭据文件三类探针，只报键名不读值 | RS-07-admin-base | 1d |
 | `RS-13-audit-query` | 审计 JSONL 流式读取与查询：过滤参数、cursor 分页、eval 轨迹与执行会话列表 | RS-07-admin-base | 2d |
@@ -74,7 +74,7 @@
 | `RS-17-web-shell` | React 19 + Ant Design 6 + esbuild 管理端骨架（ADR 0009）：SPA 路由、类型化 API client、主题 token 与 CSRF/鉴权 | RS-07-admin-base | 2d |
 | `RS-18-web-audit` | 审计页：过滤条、概览卡片、趋势图、虚拟列表、调用抽屉、eval 甘特与协议帧并排 | RS-17-web-shell, RS-19-web-resource, RS-13-audit-query, RS-14-audit-frames-export, RS-15-audit-stats, RS-16-sse | 2d |
 | `RS-19-web-resource` | 实时与资源约束模块：5000 条环形缓冲、200ms 批处理、页面可见性暂停、30fps 限制、降采样与 3D 默认关闭 | RS-17-web-shell | 1d |
-| `RS-20-web-manage` | 配置管理页：概览、servers/tools 编辑、clients 与一次性 token、密钥状态、导入导出与 discover | RS-17-web-shell, RS-19-web-resource, RS-08-admin-servers, RS-09-admin-tools, RS-10-admin-clients, RS-11-admin-config, RS-12-admin-discover, RS-16-sse | 2d |
+| `RS-20-web-manage` | 配置管理页：概览、servers/tools 编辑、clients 与 token 查看/轮换、密钥状态、导入导出与 discover | RS-17-web-shell, RS-19-web-resource, RS-08-admin-servers, RS-09-admin-tools, RS-10-admin-clients, RS-11-admin-config, RS-12-admin-discover, RS-16-sse | 2d |
 
 ## 06–08 增量
 

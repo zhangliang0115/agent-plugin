@@ -12,7 +12,12 @@ import type {
   TaskSnapshot,
 } from '../src/ports.ts';
 import { callTool, UnknownToolError, type ToolCallContext, type ToolCallResponse } from '../src/tools/call.ts';
-import type { CallToolResult } from '../src/tools/registry.ts';
+import {
+  buildSearchToolsDefinition,
+  type CallToolResult,
+  type ToolDefinition,
+} from '../src/tools/registry.ts';
+import type { ToolVisibility } from '../src/tools/search.ts';
 import {
   isCreateTaskResult,
   McpTaskStore,
@@ -120,7 +125,14 @@ interface Harness {
   tasks: McpTaskStore;
 }
 
-function harness(options: { identity?: RequestIdentity; tasksDeclared?: boolean } = {}): Harness {
+function harness(
+  options: {
+    identity?: RequestIdentity;
+    tasksDeclared?: boolean;
+    visibility?: ToolVisibility;
+    searchToolsDefinition?: ToolDefinition;
+  } = {},
+): Harness {
   let nextTask = 0;
   const gateway = new FakeGateway();
   const catalog = new FakeCatalog(TOOLS);
@@ -135,6 +147,10 @@ function harness(options: { identity?: RequestIdentity; tasksDeclared?: boolean 
     tasks,
   };
   if (options.tasksDeclared !== undefined) ctx.tasksDeclared = options.tasksDeclared;
+  if (options.visibility !== undefined) ctx.visibility = options.visibility;
+  if (options.searchToolsDefinition !== undefined) {
+    ctx.searchToolsDefinition = options.searchToolsDefinition;
+  }
   return { ctx, gateway, catalog, tasks };
 }
 
@@ -408,6 +424,78 @@ test('describe_tools returns schemas and omitted names', async () => {
     ],
     omitted: ['missing'],
   });
+});
+
+test('search_tools applies the request visibility before matching', async () => {
+  const serverBound = harness({ visibility: { allowedServers: [], allowedTags: null } });
+  const hiddenServers = asCallResult(
+    await callTool('search_tools', { query: 'query' }, serverBound.ctx),
+  );
+  assert.deepEqual(parseText(hiddenServers), [], 'allowedServers: [] hides MCP tools');
+  const builtin = asCallResult(
+    await callTool('search_tools', { query: 'read' }, serverBound.ctx),
+  );
+  assert.deepEqual(
+    (parseText(builtin) as Array<{ name: string }>).map((item) => item.name),
+    ['Read'],
+    'builtins ignore the server allow list',
+  );
+
+  const tagBound = harness({ visibility: { allowedServers: null, allowedTags: [] } });
+  const hiddenAll = asCallResult(await callTool('search_tools', { query: 'read' }, tagBound.ctx));
+  assert.deepEqual(parseText(hiddenAll), [], 'allowedTags: [] hides every tool');
+
+  const filesOnly = harness({ visibility: { allowedServers: null, allowedTags: ['files'] } });
+  const filtered = asCallResult(await callTool('search_tools', { query: 'read' }, filesOnly.ctx));
+  assert.deepEqual(
+    (parseText(filtered) as Array<{ name: string }>).map((item) => item.name),
+    ['Read'],
+  );
+});
+
+test('describe_tools omits tools outside the request visibility', async () => {
+  const h = harness({ visibility: { allowedServers: ['github'], allowedTags: null } });
+  const result = asCallResult(
+    await callTool('describe_tools', { names: ['Read', 'pg.query'] }, h.ctx),
+  );
+  assert.deepEqual(parseText(result), {
+    tools: [
+      { name: 'Read', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } } } },
+    ],
+    omitted: ['pg.query'],
+  });
+});
+
+test('search_tools rejects server, category and tags outside the per-request enums', async () => {
+  const h = harness({
+    searchToolsDefinition: buildSearchToolsDefinition(['database'], ['db', 'read'], ['pg']),
+  });
+
+  const server = asCallResult(await callTool('search_tools', { server: 'github' }, h.ctx));
+  assert.equal(server.isError, true);
+  assert.equal((parseText(server) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');
+  assert.match(textOf(server), /server must be one of/);
+
+  const category = asCallResult(
+    await callTool('search_tools', { category: 'pg' }, h.ctx),
+  );
+  assert.equal(category.isError, true);
+  assert.equal((parseText(category) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');
+  assert.match(textOf(category), /category must be one of/);
+
+  const tags = asCallResult(await callTool('search_tools', { tags: ['db', 'nope'] }, h.ctx));
+  assert.equal(tags.isError, true);
+  assert.equal((parseText(tags) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');
+
+  const allowed = asCallResult(
+    await callTool(
+      'search_tools',
+      { server: 'pg', category: 'database', tags: ['db', 'read'] },
+      h.ctx,
+    ),
+  );
+  assert.equal(allowed.isError, false);
+  assert.equal(h.catalog.calls, 1, 'only the accepted call reaches the catalog');
 });
 
 test('wait_tasks forwards the owner, task ids and timeout, and passes the result through', async () => {

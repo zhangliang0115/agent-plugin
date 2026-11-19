@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import type { CatalogSnapshot, CatalogTool } from '../src/ports.ts';
 import {
+  buildCatalogSnapshot,
   createCatalogService,
   createSearchPreview,
   refreshFts,
@@ -400,14 +401,31 @@ test('stale tools are excluded and counted in a hint', () => {
   assert.ok(outcome.hints.some((hint) => hint.includes('stale')));
 });
 
+test('snapshot tools omit category and summary when the server has none', () => {
+  const db = openMemoryDb();
+  insertServer(db, { id: 'bare' });
+  insertTool(db, 'bare', 'ping', { description: 'Ping' });
+  refreshFts(db, 'bare');
+
+  const tool = findTool(buildCatalogSnapshot(db), 'bare.ping');
+  assert.equal(tool.category, undefined);
+  assert.equal(tool.summary, undefined);
+});
+
 test('catalog snapshots are immutable, revisioned and notify catalog_changed', () => {
   const db = openMemoryDb();
-  insertServer(db, { id: '__official__', transport: 'builtin', tags: ['official'] });
+  insertServer(db, {
+    id: '__official__',
+    transport: 'builtin',
+    category: 'devtools',
+    summary: 'Official tools',
+    tags: ['official'],
+  });
   insertTool(db, '__official__', 'Read', {
     description: 'Read a file',
     tags: ['read'],
   });
-  insertServer(db, { id: 'pg', summary: 'Postgres', tags: ['db'] });
+  insertServer(db, { id: 'pg', summary: 'Postgres', category: 'database', tags: ['db'] });
   insertTool(db, 'pg', 'query', {
     description: 'Run a SQL query',
     concurrency: 'serial',
@@ -429,9 +447,13 @@ test('catalog snapshots are immutable, revisioned and notify catalog_changed', (
   const read = findTool(first, 'Read');
   assert.equal(read.kind, 'builtin');
   assert.equal(read.server, undefined);
+  assert.equal(read.category, 'devtools', 'builtins inherit the server category');
+  assert.equal(read.summary, 'Official tools', 'builtins inherit the server summary');
   const query = findTool(first, 'pg.query');
   assert.equal(query.kind, 'mcp');
   assert.equal(query.server, 'pg');
+  assert.equal(query.category, 'database');
+  assert.equal(query.summary, 'Postgres');
   assert.equal(query.concurrency, 'serial');
   assert.ok(Object.isFrozen(query));
   assert.ok(Object.isFrozen(query.tags));

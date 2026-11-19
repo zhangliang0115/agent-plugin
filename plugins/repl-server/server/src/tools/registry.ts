@@ -63,7 +63,7 @@ function deepFreeze<T>(value: T): T {
  */
 export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch several tool calls, loop over results, or combine outputs before answering. Only the returned value and the text passed to log() come back to you, wrapped in a <repl-output> envelope.
 
-- Tools are async functions: await Read({ path }), await Edit({...}); MCP tools are tools.mcp.<server>.<tool>(args).
+- Tools are async functions: await tools.<name>(args) for built-ins; MCP tools are tools.mcp.<server>.<tool>(args).
 - Top-level declarations persist across calls in the same workspace. Changing workspace starts a new execution session; variables and state do not carry over.
 - timeout is milliseconds: sync runs default to 30000 and max out at 600000. For longer work pass async: true, which dispatches immediately, defaults to and caps at 7200000, and returns <repl-output async="true" task="...">.
 - Collect an async result with wait_tasks using the task id from that envelope.
@@ -71,7 +71,7 @@ export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox ag
 - Use search_tools to find tool names and describe_tools for input schemas.`;
 
 const SEARCH_TOOLS_DESCRIPTION =
-  'Search the tool catalog by keyword, category or tags (an empty query returns the server overview) and return canonical tool names for run_script or describe_tools.';
+  'Search the tool catalog and return canonical tool names for run_script or describe_tools. An empty query without server returns the server overview (id, category, summary, tags, toolCount); an empty query with server returns that server\'s tools. A non-empty query searches tool names, effective tags and tool descriptions; server, category and tags only narrow the results, and tags is all-of. Filter values accept only the values listed in this request\'s schema enums.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
   'Return full input schemas for up to 10 canonical tool names; later schemas are omitted only when the batch would exceed 32000 characters.';
@@ -100,6 +100,7 @@ const SEARCH_TOOLS_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
     query: { type: 'string' },
+    server: { type: 'string' },
     category: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },
     max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
@@ -185,22 +186,81 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly T
 
 export const TOOL_ORDER: readonly ToolName[] = Object.freeze(TOOL_DEFINITIONS.map((tool) => tool.name));
 
+/**
+ * Builds this request's `search_tools` definition. The `server` enum carries the
+ * visible MCP server ids, including idle/0-tool servers; category and tag enums
+ * carry only values present in the visible tool set. Absent sets publish no enum.
+ */
+export function buildSearchToolsDefinition(
+  categories: readonly string[],
+  tags: readonly string[],
+  servers: readonly string[] = [],
+): ToolDefinition {
+  const server: JsonSchemaProperty =
+    servers.length === 0 ? { type: 'string' } : { type: 'string', enum: [...servers] };
+  const category: JsonSchemaProperty =
+    categories.length === 0 ? { type: 'string' } : { type: 'string', enum: [...categories] };
+  const tagItems: JsonSchemaProperty =
+    tags.length === 0 ? { type: 'string' } : { type: 'string', enum: [...tags] };
+  const inputSchema = deepFreeze<ToolInputSchema>({
+    type: 'object',
+    properties: {
+      query: { type: 'string' },
+      server,
+      category,
+      tags: { type: 'array', items: tagItems },
+      max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
+    },
+    additionalProperties: false,
+  });
+  return deepFreeze({
+    name: 'search_tools',
+    description: SEARCH_TOOLS_DESCRIPTION,
+    inputSchema,
+    _meta: { 'anthropic/alwaysLoad': true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
+  });
+}
+
 const BY_NAME = new Map<string, ToolDefinition>(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 
+/** Per-request overrides; omitted fields keep the frozen shared definition. */
+export interface ListToolsOptions {
+  runScriptDescription?: string;
+  searchToolsDescription?: string;
+  searchToolsSchema?: ToolInputSchema;
+}
+
 /**
- * `tools/list` entries. Passing a per-client `run_script` summary returns a
- * rebuilt definition; every other definition stays the frozen shared one.
+ * `tools/list` entries. `run_script` and `search_tools` can be rebuilt for the
+ * request; every other definition stays the frozen shared one.
  */
-export function listTools(runScriptDescription?: string): readonly ToolDefinition[] {
-  if (runScriptDescription === undefined || runScriptDescription === RUN_SCRIPT_DESCRIPTION) {
+export function listTools(options: ListToolsOptions = {}): readonly ToolDefinition[] {
+  const { runScriptDescription, searchToolsDescription, searchToolsSchema } = options;
+  if (
+    (runScriptDescription === undefined || runScriptDescription === RUN_SCRIPT_DESCRIPTION)
+    && searchToolsDescription === undefined
+    && searchToolsSchema === undefined
+  ) {
     return TOOL_DEFINITIONS;
   }
   return Object.freeze(
-    TOOL_DEFINITIONS.map((tool) =>
-      tool.name === 'run_script'
-        ? Object.freeze({ ...tool, description: runScriptDescription })
-        : tool,
-    ),
+    TOOL_DEFINITIONS.map((tool) => {
+      if (tool.name === 'run_script' && runScriptDescription !== undefined) {
+        return Object.freeze({ ...tool, description: runScriptDescription });
+      }
+      if (
+        tool.name === 'search_tools'
+        && (searchToolsDescription !== undefined || searchToolsSchema !== undefined)
+      ) {
+        return Object.freeze({
+          ...tool,
+          ...(searchToolsDescription === undefined ? {} : { description: searchToolsDescription }),
+          ...(searchToolsSchema === undefined ? {} : { inputSchema: searchToolsSchema }),
+        });
+      }
+      return tool;
+    }),
   );
 }
 
@@ -287,11 +347,16 @@ function checkProperty(
 }
 
 /**
- * Validates arguments against the frozen schema. Defaults are intentionally not applied here:
- * run_script's timeout default depends on the dispatch mode (sync vs async).
+ * Validates arguments against the frozen schema, or against `definition` when a
+ * per-request definition (the enum-carrying `search_tools`) has been built.
+ * Defaults are intentionally not applied here: run_script's timeout default
+ * depends on the dispatch mode (sync vs async).
  */
-export function validateToolArguments(toolName: string, input: unknown): ArgumentValidation {
-  const definition = getToolDefinition(toolName);
+export function validateToolArguments(
+  toolName: string,
+  input: unknown,
+  definition: ToolDefinition | undefined = getToolDefinition(toolName),
+): ArgumentValidation {
   if (definition === undefined) {
     return { ok: false, code: 'INVALID_ARGUMENT', message: `unknown tool ${JSON.stringify(toolName)}` };
   }

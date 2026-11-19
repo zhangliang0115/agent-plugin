@@ -102,27 +102,39 @@ const MCP_PARAGRAPH = [
   'describe_tools({ names }) for its full schema.',
 ].join('\n');
 
+/** One visible server inside the discover `instructions` MCP section. */
+function formatServerDetail(server: McpServerOverview): string {
+  const id = clipText(server.id, 48);
+  const category = clipText(server.category, 24) || 'other';
+  const count = `${server.toolCount} tool${server.toolCount === 1 ? '' : 's'}`;
+  const summary = clipText(server.summary, 80);
+  return summary === ''
+    ? `- ${id} [${category}] ${count}`
+    : `- ${id} [${category}] ${count} — ${summary}`;
+}
+
 /**
- * Fills the template's MCP paragraph with the server ids visible to this
- * client. Only names are listed; call shape and search guidance stay the same,
- * and the rest of the template is untouched (design 01 §10.2 #10).
+ * Fills the template's MCP paragraph with the servers visible to this client.
+ * The instructions are not limited to 2KB, so each server carries its category,
+ * tool count and summary. The category/tag filter values live in the
+ * `search_tools` schema; repeating the whole vocabulary here would only bloat
+ * the prompt (design 01 §10.2 #10).
  */
 export function buildInstructions(
   base: string,
   servers: readonly McpServerOverview[],
 ): string {
-  const ids = servers
-    .map((server) => clipText(server.id, 48))
-    .filter((id) => id !== '');
-  const visible =
-    ids.length === 0
+  const lines = servers.map(formatServerDetail);
+  const section =
+    lines.length === 0
       ? 'No MCP servers are visible to this client.'
-      : `MCP servers visible to this client: ${ids.join(', ')}.`;
+      : ['MCP servers visible to this client:', ...lines].join('\n');
   const paragraph = [
     'MCP tools are namespaced: tools.mcp.<server>.<tool>(args).',
-    visible,
+    section,
     'Use search_tools({ query }) to find tools not listed here, and',
-    'describe_tools({ names }) for its full schema.',
+    'describe_tools({ names }) for their full schemas. The search_tools schema lists',
+    'the available server, category and tag filter values.',
   ].join('\n');
   return base.includes(MCP_PARAGRAPH) ? base.replace(MCP_PARAGRAPH, paragraph) : `${base}\n\n${paragraph}`;
 }

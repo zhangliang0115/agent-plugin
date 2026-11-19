@@ -9,13 +9,16 @@ import type { TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { AdminApiError } from '../src/admin/servers.ts';
+import { readCategoryDictionary } from '../src/admin/categories.ts';
+import { readTagDictionary } from '../src/admin/tags.ts';
 import { applyAnnotation } from '../src/ai/apply.ts';
 import type { AiRunAuditEvent, AiService } from '../src/ai/service.ts';
 import { createAiService } from '../src/ai/service.ts';
 import { DEFAULT_AI_SETTINGS, putAiSettings } from '../src/ai/settings.ts';
+import { normalizeAnnotation, restrictAnnotationToDictionary } from '../src/ai/validate.ts';
 import { DbServerStore, DbSettingsStore, DbToolStore } from '../src/assembly-stores.ts';
 import { openStateDb } from '../src/db/migrate.ts';
-import { getRevision } from '../src/db/meta.ts';
+import { getRevision, listSettings } from '../src/db/meta.ts';
 import { createServer, getServer } from '../src/db/servers.ts';
 import { deleteTool, getTool, upsertTool } from '../src/db/tools.ts';
 import type { Clock } from '../src/ports.ts';
@@ -40,6 +43,7 @@ class MutableClock implements Clock {
 
 interface Fixture {
   db: DatabaseSync;
+  settings: DbSettingsStore;
   service: AiService;
   rebuilds: string[][];
   audits: AiRunAuditEvent[];
@@ -89,7 +93,7 @@ async function makeFixture(
     onAiRun: (event) => audits.push(event),
   });
 
-  return { db, service, rebuilds, audits, clock };
+  return { db, settings, service, rebuilds, audits, clock };
 }
 
 function seedServer(
@@ -141,12 +145,12 @@ const QUERY_DESCRIPTION = 'Run a read-only SQL query; 执行只读 SQL 查询';
 const APPLY = {
   summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
   category: 'database',
-  tags: ['db', 'sql', 'write'],
+  tags: ['postgresql', 'query', 'write'],
   toolOverrides: [
     {
       name: 'query',
       description: QUERY_DESCRIPTION,
-      tags: ['read', 'sql'],
+      tags: ['read', 'query'],
     },
   ],
 };
@@ -171,10 +175,12 @@ test('preview returns proposed metadata without writing', async (t) => {
   });
   assert.equal(preview.proposed.summary, APPLY.summary);
   assert.equal(preview.proposed.category, 'database');
-  assert.deepEqual(preview.proposed.tags, ['db', 'sql', 'write']);
+  assert.equal(preview.proposed.categorySuggestion, null);
+  assert.deepEqual(preview.proposed.tags, ['postgresql', 'query', 'write']);
+  assert.deepEqual(preview.proposed.tagSuggestions, []);
   assert.equal(preview.proposed.toolOverrides?.[0]?.name, 'query');
   assert.equal(preview.omittedTools, 0);
-  assert.equal(preview.meta.promptVersion, 1);
+  assert.equal(preview.meta.promptVersion, 5);
 
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'pg')?.summary, null);
@@ -230,7 +236,7 @@ test('apply writes metadata and tool overrides in one revision bump', async (t) 
   assert.equal(response.revision, before + 1);
   assert.equal(getRevision(fixture.db), before + 1);
   assert.equal(response.server.summarySource, 'ai');
-  assert.deepEqual(response.server.tags, ['db', 'sql', 'write']);
+  assert.deepEqual(response.server.tags, ['postgresql', 'query', 'write']);
   assert.equal(fixture.rebuilds.length, rebuildsBefore + 1);
   assert.deepEqual(fixture.rebuilds.at(-1), ['pg']);
 
@@ -245,14 +251,14 @@ test('apply writes metadata and tool overrides in one revision bump', async (t) 
   const tool = getTool(fixture.db, 'pg', 'query');
   assert.ok(tool !== null);
   assert.equal(tool?.descriptionOverride, QUERY_DESCRIPTION);
-  assert.deepEqual(tool?.tags, ['read', 'sql']);
+  assert.deepEqual(tool?.tags, ['read', 'query']);
 
   const index = fixture.db
     .prepare('SELECT index_description, index_tags_json FROM tools WHERE server_id = ? AND name = ?')
     .get('pg', 'query');
   assert.ok(String(index?.['index_description']).includes('执行只读 SQL 查询'));
   const indexTags = JSON.parse(String(index?.['index_tags_json'])) as string[];
-  assert.deepEqual([...indexTags].sort(), ['db', 'read', 'sql', 'write']);
+  assert.deepEqual([...indexTags].sort(), ['postgresql', 'query', 'read', 'write']);
   assert.equal(
     response.tools.find((entry) => entry.name === 'query')?.descriptionOverride,
     QUERY_DESCRIPTION,
@@ -273,6 +279,457 @@ test('apply with no actual change writes nothing and does not bump', async (t) =
   assert.equal(response.revision, afterFirst);
   assert.equal(getRevision(fixture.db), afterFirst);
   assert.equal(fixture.rebuilds.length, rebuildsAfterFirst);
+});
+
+test('apply merges server and tool tags; empty arrays never clear existing tags', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db, { tags: ['env.prod', 'official'] });
+  upsertTool(fixture.db, 'pg', {
+    name: 'query',
+    description: 'Run a read-only SQL query.',
+    inputSchema: { type: 'object' },
+    tags: ['read'],
+  });
+
+  await fixture.service.annotateApply('pg', APPLY, getRevision(fixture.db));
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, [
+    'env.prod',
+    'official',
+    'postgresql',
+    'query',
+    'write',
+  ]);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['read', 'query']);
+
+  const revision = getRevision(fixture.db);
+  const response = await fixture.service.annotateApply(
+    'pg',
+    { tags: [], toolOverrides: [{ name: 'query', tags: [] }] },
+    revision,
+  );
+  assert.deepEqual(response.changed, []);
+  assert.equal(response.revision, revision);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, [
+    'env.prod',
+    'official',
+    'postgresql',
+    'query',
+    'write',
+  ]);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['read', 'query']);
+});
+
+test('accepted suggestions are written to both dictionaries in one revision bump', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+
+  const response = await fixture.service.annotateApply(
+    'pg',
+    {
+      categorySuggestion: { key: 'vector-db', zh: '向量数据库', en: 'Vector database' },
+      tagSuggestions: [
+        { key: 'vector', zh: '向量', en: 'Vector' },
+        { key: 'embedding', zh: '嵌入', en: 'Embedding' },
+      ],
+    },
+    before,
+  );
+
+  assert.equal(response.revision, before + 1);
+  assert.deepEqual(response.changed, [
+    'dictionary.categories',
+    'dictionary.tags',
+    'server.category',
+    'server.tags',
+  ]);
+  const stored = getServer(fixture.db, 'pg');
+  assert.equal(stored?.category, 'vector-db');
+  assert.deepEqual(stored?.tags, ['vector', 'embedding']);
+
+  const settings = listSettings(fixture.db);
+  assert.deepEqual(
+    readCategoryDictionary(settings).find((entry) => entry.key === 'vector-db'),
+    { key: 'vector-db', zh: '向量数据库', en: 'Vector database' },
+  );
+  assert.deepEqual(
+    readTagDictionary(settings).find((entry) => entry.key === 'vector'),
+    { key: 'vector', zh: '向量', en: 'Vector' },
+  );
+});
+
+test('suggestions for existing dictionary keys are treated as the existing item', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+
+  const response = await fixture.service.annotateApply(
+    'pg',
+    {
+      categorySuggestion: { key: 'database', zh: '换个标签', en: 'Different label' },
+      tagSuggestions: [{ key: 'read', zh: '换个标签', en: 'Different label' }],
+    },
+    before,
+  );
+
+  assert.deepEqual(response.changed, ['server.category', 'server.tags']);
+  assert.equal(getServer(fixture.db, 'pg')?.category, 'database');
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['read']);
+  const settings = listSettings(fixture.db);
+  assert.deepEqual(
+    readCategoryDictionary(settings).find((entry) => entry.key === 'database'),
+    { key: 'database', zh: '数据库', en: 'Database' },
+  );
+  assert.deepEqual(
+    readTagDictionary(settings).find((entry) => entry.key === 'read'),
+    { key: 'read', zh: '只读', en: 'Read-only' },
+  );
+});
+
+test('duplicate suggestions are added once', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const suggestion = { key: 'vector', zh: '向量', en: 'Vector' };
+
+  await fixture.service.annotateApply(
+    'pg',
+    { tagSuggestions: [suggestion, suggestion] },
+    getRevision(fixture.db),
+  );
+
+  const tags = readTagDictionary(listSettings(fixture.db));
+  assert.equal(tags.filter((entry) => entry.key === 'vector').length, 1);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['vector']);
+});
+
+test('illegal suggestions are rejected before any write', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+
+  const cases = [
+    { categorySuggestion: { key: 'Bad Key', zh: '坏', en: 'Bad' } },
+    { categorySuggestion: { key: 'ok', zh: '', en: 'Ok' } },
+    { tagSuggestions: [{ key: 'ok', zh: '好', en: '' }] },
+    { tagSuggestions: [{ key: 'ok', zh: '好', en: 'x'.repeat(41) }] },
+    { tagSuggestions: 'nope' },
+  ];
+  for (const body of cases) {
+    await expectApiError(
+      fixture.service.annotateApply('pg', body, before),
+      'AI_ANNOTATION_INVALID',
+      422,
+    );
+  }
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(readTagDictionary(listSettings(fixture.db)), readTagDictionary({}));
+  assert.deepEqual(readCategoryDictionary(listSettings(fixture.db)), readCategoryDictionary({}));
+});
+
+test('forbidden suggestions never re-enter a customised tag dictionary', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  await fixture.settings.replace(
+    { tagDictionary: [{ key: 'read', zh: '只读', en: 'Read-only' }] },
+    getRevision(fixture.db),
+  );
+  const before = getRevision(fixture.db);
+
+  for (const key of ['env.prod', 'cross-env', 'official', 'builtin']) {
+    await expectApiError(
+      fixture.service.annotateApply(
+        'pg',
+        { tagSuggestions: [{ key, zh: '来源', en: 'Source' }] },
+        before,
+      ),
+      'AI_ANNOTATION_INVALID',
+      422,
+    );
+  }
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(
+    readTagDictionary(listSettings(fixture.db)).map((entry) => entry.key),
+    ['read'],
+  );
+});
+
+test('a failed apply leaves accepted suggestions out of the dictionaries', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+  const body = {
+    categorySuggestion: { key: 'vector-db', zh: '向量数据库', en: 'Vector database' },
+    tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+    toolOverrides: [{ name: 'missing', tags: ['read'] }],
+  };
+
+  await expectApiError(fixture.service.annotateApply('pg', body, before), 'AI_UNKNOWN_TOOL', 422);
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(readCategoryDictionary(listSettings(fixture.db)), readCategoryDictionary({}));
+  assert.deepEqual(readTagDictionary(listSettings(fixture.db)), readTagDictionary({}));
+
+  await expectApiError(
+    fixture.service.annotateApply(
+      'pg',
+      {
+        categorySuggestion: { key: 'vector-db', zh: '向量数据库', en: 'Vector database' },
+        tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+      },
+      before - 1,
+    ),
+    'REVISION_CONFLICT',
+    409,
+  );
+  assert.deepEqual(readCategoryDictionary(listSettings(fixture.db)), readCategoryDictionary({}));
+});
+
+test('a failure after the dictionary write rolls the dictionary back', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+  fixture.db.exec(`
+    CREATE TRIGGER fail_revision BEFORE UPDATE ON meta
+    WHEN OLD.key = 'revision'
+    BEGIN SELECT RAISE(ABORT, 'revision write failed'); END;
+  `);
+  assert.throws(() =>
+    applyAnnotation(
+      fixture.db,
+      {
+        serverId: 'pg',
+        patch: { tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }] },
+      },
+      before,
+    ),
+  );
+  fixture.db.exec('DROP TRIGGER fail_revision');
+
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(readTagDictionary(listSettings(fixture.db)), readTagDictionary({}));
+});
+
+test('preview splits existing values from suggestions and warns about dropped ones', async (t) => {
+  const fixture = await makeFixture(t, {
+    extraEnv: {
+      FAKE_CLAUDE_MODE: 'payload',
+      FAKE_CLAUDE_PAYLOAD: JSON.stringify({
+        summary: '向量检索 (vector search)',
+        category: null,
+        categorySuggestion: {
+          key: 'vector-db',
+          zh: '向量数据库',
+          en: 'Vector database',
+        },
+        tags: ['postgresql', 'sql'],
+        tagSuggestions: [
+          { key: 'env.prod', zh: '生产环境', en: 'Production' },
+          { key: 'vector', zh: '向量', en: 'Vector' },
+        ],
+        toolOverrides: [{ name: 'query', tags: ['read', 'vector'] }],
+        warnings: [],
+      }),
+    },
+  });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.equal(preview.proposed.category, null);
+  assert.deepEqual(preview.proposed.categorySuggestion, {
+    key: 'vector-db',
+    zh: '向量数据库',
+    en: 'Vector database',
+  });
+  assert.deepEqual(preview.proposed.tags, ['postgresql']);
+  assert.deepEqual(preview.proposed.tagSuggestions, [
+    { key: 'vector', zh: '向量', en: 'Vector' },
+  ]);
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['read', 'vector']);
+  assert.ok(preview.warnings.some((warning) => warning.includes('sql')));
+  assert.ok(preview.warnings.some((warning) => warning.includes('env.prod')));
+});
+
+test('categories and tags stay separate and provenance tags are rejected at both layers', async (t) => {
+  const fixture = await makeFixture(t, {
+    extraEnv: {
+      FAKE_CLAUDE_MODE: 'payload',
+      FAKE_CLAUDE_PAYLOAD: JSON.stringify({
+        summary: '数据库 (database)',
+        category: null,
+        categorySuggestion: { key: 'official', zh: '官方', en: 'Official' },
+        tags: ['env.prod', 'database', 'postgresql'],
+        tagSuggestions: [{ key: 'database', zh: '数据库', en: 'Database' }],
+        toolOverrides: [{ name: 'query', tags: ['env.prod', 'database', 'read'] }],
+        warnings: [],
+      }),
+    },
+  });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.equal(preview.proposed.categorySuggestion, null);
+  assert.deepEqual(preview.proposed.tags, ['postgresql']);
+  assert.deepEqual(preview.proposed.tagSuggestions, []);
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['read']);
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('official') && warning.includes('由管理员维护'),
+    ),
+  );
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('env.prod') && warning.includes('由管理员维护'),
+    ),
+  );
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('database') && warning.includes('分类 key 不能当标签'),
+    ),
+  );
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, []);
+
+  // A client may resubmit the raw draft; the HTTP path drops these values with
+  // a warning, so apply must reject instead of writing them silently.
+  const before = getRevision(fixture.db);
+  const rejected = [
+    { tags: ['env.prod'] },
+    { tags: ['database'] },
+    { categorySuggestion: { key: 'official', zh: '官方', en: 'Official' } },
+    { categorySuggestion: { key: 'browser', zh: '浏览器', en: 'Browser' } },
+    {
+      categorySuggestion: { key: 'vector', zh: '向量', en: 'Vector' },
+      tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+    },
+    { tagSuggestions: [{ key: 'database', zh: '数据库', en: 'Database' }] },
+    { toolOverrides: [{ name: 'query', tags: ['env.prod'] }] },
+    { toolOverrides: [{ name: 'query', tags: ['database'] }] },
+  ];
+  for (const body of rejected) {
+    await expectApiError(
+      fixture.service.annotateApply('pg', body, before),
+      'AI_ANNOTATION_INVALID',
+      422,
+    );
+  }
+  assert.equal(getRevision(fixture.db), before);
+
+  // The low-level apply is the last line of defense for callers that skip the
+  // service-level restriction.
+  for (const patch of rejected) {
+    assert.throws(
+      () => applyAnnotation(fixture.db, { serverId: 'pg', patch }, before),
+      (error: unknown) =>
+        error instanceof AdminApiError && error.code === 'AI_ANNOTATION_INVALID',
+    );
+  }
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, []);
+
+  // Ordinary dictionary tags still merge through the low-level path.
+  const applied = applyAnnotation(
+    fixture.db,
+    { serverId: 'pg', patch: { tags: ['postgresql'] } },
+    before,
+  );
+  assert.deepEqual(applied.changed, ['server.tags']);
+  assert.equal(applied.revision, before + 1);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['postgresql']);
+});
+
+test('preview rejects category keys used as tags and tag keys used as categories', async (t) => {
+  const fixture = await makeFixture(t, {
+    extraEnv: {
+      FAKE_CLAUDE_MODE: 'payload',
+      FAKE_CLAUDE_PAYLOAD: JSON.stringify({
+        summary: '数据库 (database)',
+        category: null,
+        categorySuggestion: { key: 'browser', zh: '浏览器', en: 'Browser' },
+        tags: ['database'],
+        tagSuggestions: [{ key: 'database', zh: '数据库', en: 'Database' }],
+        toolOverrides: [{ name: 'query', tags: ['database'] }],
+        warnings: [],
+      }),
+    },
+  });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.equal(preview.proposed.categorySuggestion, null);
+  assert.deepEqual(preview.proposed.tags, []);
+  assert.deepEqual(preview.proposed.tagSuggestions, []);
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, []);
+  assert.ok(
+    preview.warnings.some((warning) => warning.includes('browser') && warning.includes('标签 key')),
+  );
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('database') && warning.includes('分类 key 不能当标签'),
+    ),
+  );
+});
+
+test('preview rejects a key suggested as both category and tag', async (t) => {
+  const fixture = await makeFixture(t, {
+    extraEnv: {
+      FAKE_CLAUDE_MODE: 'payload',
+      FAKE_CLAUDE_PAYLOAD: JSON.stringify({
+        summary: '向量检索 (vector search)',
+        category: null,
+        categorySuggestion: { key: 'vector', zh: '向量', en: 'Vector' },
+        tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+        warnings: [],
+      }),
+    },
+  });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.equal(preview.proposed.categorySuggestion, null);
+  assert.deepEqual(preview.proposed.tagSuggestions, [
+    { key: 'vector', zh: '向量', en: 'Vector' },
+  ]);
+  assert.ok(
+    preview.warnings.some((warning) => warning.includes('vector') && warning.includes('重名')),
+  );
+});
+
+test('category keys accept every dictionary key shape', () => {
+  for (const key of ['my.cat', 'my_cat', '1cat']) {
+    assert.equal(normalizeAnnotation({ category: key }, []).category, key);
+    assert.equal(
+      normalizeAnnotation(
+        { categorySuggestion: { key, zh: '自定义', en: 'Custom' } },
+        [],
+      ).categorySuggestion?.key,
+      key,
+    );
+  }
+
+  const missing = restrictAnnotationToDictionary(
+    normalizeAnnotation({ category: 'my.cat' }, []),
+    { categories: new Set(), tags: new Set() },
+  );
+  assert.equal(missing.annotation.category, null);
+
+  const promoted = restrictAnnotationToDictionary(
+    normalizeAnnotation(
+      { categorySuggestion: { key: 'my.cat', zh: '自定义', en: 'Custom' } },
+      [],
+    ),
+    { categories: new Set(['my.cat']), tags: new Set() },
+  );
+  assert.equal(promoted.annotation.category, 'my.cat');
+  assert.equal(promoted.annotation.categorySuggestion, null);
 });
 
 test('apply shape errors: empty patch, missing patch, bad tools and tags', async (t) => {

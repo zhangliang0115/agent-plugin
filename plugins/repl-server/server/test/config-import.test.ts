@@ -312,6 +312,19 @@ test('import upserts by server id and removes servers absent from the document',
   assert.equal(await store.get('old'), null);
 });
 
+test('import defaults a missing connectMode to eager', async (t) => {
+  const { handler, store } = await setup(t, []);
+
+  const response = await post(handler, {
+    servers: [{ id: 'fresh', label: 'Fresh', transport: 'stdio', command: 'node' }],
+  });
+
+  assert.equal(response.status, 200);
+  const fresh = await store.get('fresh');
+  assert.ok(fresh !== null);
+  assert.equal(fresh.connectMode, 'eager');
+});
+
 test('import keeps summary_source in sync when a summary changes', async (t) => {
   const { handler, store } = await setup(t, [
     stdioServer('pg', { summary: 'AI 摘要', summarySource: 'ai' }),
@@ -584,6 +597,7 @@ test('dry-run can be requested with the frozen ?dry-run=true query', async (t) =
           transport: 'stdio',
           command: 'npx',
           args: ['-y', 'pg'],
+          connectMode: 'lazy',
         },
       ],
     },

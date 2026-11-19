@@ -1,4 +1,4 @@
-/** Clients page: bindings, visibility/quota editing and one-time tokens. */
+/** Clients page: bindings, visibility/quota editing and locally stored tokens. */
 import {
   Alert,
   App as AntApp,
@@ -34,7 +34,6 @@ import {
   buildClaudeMcpAddCommand,
   buildMcpConfigText,
   mcpEndpoint,
-  TOKEN_PLACEHOLDER,
 } from '../../lib/mcp-config.ts';
 
 type ClientQuotaKey =
@@ -98,6 +97,25 @@ const QUOTA_LABELS: Record<ClientQuotaKey, string> = {
   maxQueuedCallsPerBindingPerServer: '单服务端排队调用',
 };
 
+interface McpReveal {
+  clientId: string;
+  label: string;
+  token: string | null;
+  loading: boolean;
+  unavailable: boolean;
+}
+
+interface TokenResponse {
+  token: string;
+}
+
+interface RotateTokenResponse {
+  client: ClientBinding;
+  token: string;
+  affectedSessions?: number;
+  warning?: string;
+}
+
 export function ClientsPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
@@ -108,8 +126,9 @@ export function ClientsPage(): React.ReactElement {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ClientBinding | null>(null);
   const [saving, setSaving] = useState(false);
-  /** `token` is present only right after creation; existing bindings get a placeholder. */
-  const [mcpReveal, setMcpReveal] = useState<{ label: string; token: string | null } | null>(null);
+  /** Loaded on demand; `unavailable` marks bindings created before local token storage. */
+  const [mcpReveal, setMcpReveal] = useState<McpReveal | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
   const [form] = Form.useForm<ClientFormValues>();
   const alive = useRef(true);
 
@@ -220,7 +239,7 @@ export function ClientsPage(): React.ReactElement {
         width: 220,
         render: (_value: unknown, client: ClientBinding) => (
           <Space size={0}>
-            <Button size="small" type="link" icon={<CopyOutlined />} onClick={() => showMcpConfig(client)}>
+            <Button size="small" type="link" icon={<CopyOutlined />} onClick={() => void showMcpConfig(client)}>
               MCP 配置
             </Button>
             <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditor(client)}>
@@ -242,8 +261,58 @@ export function ClientsPage(): React.ReactElement {
     [tagDefinitions],
   );
 
-  function showMcpConfig(client: ClientBinding): void {
-    setMcpReveal({ label: client.label, token: null });
+  async function showMcpConfig(client: ClientBinding): Promise<void> {
+    const base = { clientId: client.id, label: client.label };
+    setMcpReveal({ ...base, token: null, loading: true, unavailable: false });
+    try {
+      const response = await api.get<TokenResponse>(`/clients/${encodeURIComponent(client.id)}/token`);
+      if (!alive.current) return;
+      setMcpReveal((current) =>
+        current === null || current.clientId !== client.id
+          ? current
+          : { ...base, token: response.token, loading: false, unavailable: false },
+      );
+    } catch (error) {
+      if (!alive.current) return;
+      if (error instanceof ApiError && error.code === 'CLIENT_TOKEN_UNAVAILABLE') {
+        setMcpReveal((current) =>
+          current === null || current.clientId !== client.id
+            ? current
+            : { ...base, token: null, loading: false, unavailable: true },
+        );
+        return;
+      }
+      setMcpReveal(null);
+      message.error(failureText(error));
+    }
+  }
+
+  async function regenerateToken(): Promise<void> {
+    const current = mcpReveal;
+    if (current === null) return;
+    setRegenerating(true);
+    try {
+      const response = await api.post<RotateTokenResponse>(
+        `/clients/${encodeURIComponent(current.clientId)}/token`,
+      );
+      if (!alive.current) return;
+      setMcpReveal({
+        ...current,
+        token: response.token,
+        loading: false,
+        unavailable: false,
+      });
+      const text = `已重新生成 token；销毁活跃执行会话 ${formatNumber(
+        response.affectedSessions ?? 0,
+      )} 个；旧 token 已失效，客户端需更新配置`;
+      if (response.warning === undefined) message.success(text);
+      else message.warning(`${text}；${response.warning}`);
+      await load();
+    } catch (error) {
+      if (alive.current) message.error(failureText(error));
+    } finally {
+      if (alive.current) setRegenerating(false);
+    }
   }
 
   function openEditor(client: ClientBinding | null): void {
@@ -305,8 +374,14 @@ export function ClientsPage(): React.ReactElement {
       if (target === null) {
         const response = await api.post<{ client: ClientBinding; token: string }>('/clients', body);
         if (!alive.current) return;
-        setMcpReveal({ label: response.client.label, token: response.token });
-        message.success('已创建绑定；MCP 配置与明文 token 只显示这一次');
+        setMcpReveal({
+          clientId: response.client.id,
+          label: response.client.label,
+          token: response.token,
+          loading: false,
+          unavailable: false,
+        });
+        message.success('已创建绑定；token 保存在本机，可在 MCP 配置里随时查看/复制');
       } else {
         const response = await api.put<{
           client: ClientBinding;
@@ -357,7 +432,7 @@ export function ClientsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="客户端"
-        description="客户端绑定（binding）的可见范围、标签、配额与 token。明文 token 只在创建后显示一次，离开本页即清除。"
+        description="客户端绑定（binding）的可见范围、标签、配额与 token。token 保存在本机，可在 MCP 配置里查看/复制。"
         actions={
           <Space wrap>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
@@ -388,7 +463,7 @@ export function ClientsPage(): React.ReactElement {
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="还没有客户端绑定；创建后明文 token 只返回一次"
+                description="还没有客户端绑定；创建后 token 保存在本机，可随时查看/复制"
               />
             ),
           }}
@@ -473,8 +548,8 @@ export function ClientsPage(): React.ReactElement {
             style={{ marginBottom: 16 }}
             message={
               editing === null
-                ? '明文 token 只在创建成功后返回一次；请立即保存。'
-                : '保存会按 binding 销毁其活跃执行会话；旧 token 仍按每请求复核保持有效。'
+                ? 'token 保存在本机；创建成功后可在 MCP 配置里查看/复制。'
+                : '保存会按 binding 销毁其活跃执行会话；token 不受影响。'
             }
           />
           <Form.Item
@@ -538,6 +613,10 @@ export function ClientsPage(): React.ReactElement {
         open={mcpReveal !== null}
         label={mcpReveal?.label ?? ''}
         token={mcpReveal?.token ?? null}
+        loading={mcpReveal?.loading ?? false}
+        unavailable={mcpReveal?.unavailable ?? false}
+        regenerating={regenerating}
+        onRegenerate={regenerateToken}
         onClose={() => setMcpReveal(null)}
       />
     </div>
@@ -549,18 +628,25 @@ function McpConfigModal({
   open,
   label,
   token,
+  loading,
+  unavailable,
+  regenerating,
+  onRegenerate,
   onClose,
 }: {
   open: boolean;
   label: string;
   token: string | null;
+  loading: boolean;
+  unavailable: boolean;
+  regenerating: boolean;
+  onRegenerate: () => Promise<void>;
   onClose: () => void;
 }): React.ReactElement {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const url = mcpEndpoint(window.location.origin);
-  const value = token ?? TOKEN_PLACEHOLDER;
-  const configText = buildMcpConfigText({ url, token: value });
-  const command = buildClaudeMcpAddCommand({ url, token: value });
+  const configText = token === null ? '' : buildMcpConfigText({ url, token });
+  const command = token === null ? '' : buildClaudeMcpAddCommand({ url, token });
 
   async function copy(text: string, success: string): Promise<void> {
     try {
@@ -571,6 +657,17 @@ function McpConfigModal({
     }
   }
 
+  function confirmRegenerate(): void {
+    modal.confirm({
+      title: '重新生成 token？',
+      content: '旧 token 会立即失效，所有使用它的客户端都需要更新配置。',
+      okText: '重新生成',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: onRegenerate,
+    });
+  }
+
   return (
     <Modal
       open={open}
@@ -579,64 +676,75 @@ function McpConfigModal({
       onCancel={onClose}
       footer={
         <Button type="primary" onClick={onClose}>
-          {token === null ? '关闭' : '我已保存'}
+          关闭
         </Button>
       }
     >
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        <Alert
-          type={token === null ? 'info' : 'warning'}
-          showIcon
-          message={
-            token === null
-              ? 'token 只在创建时显示一次，丢失请删除绑定后重新创建（等同于重新生成 token）。'
-              : '明文 token 只显示这一次；关闭窗口或离开本页后无法再次查看。'
-          }
-        />
-        <div>
-          <Typography.Text strong>MCP 配置（JSON）</Typography.Text>
-          <Input.TextArea
-            readOnly
-            className="mono"
-            style={{ marginTop: 8 }}
-            autoSize={{ minRows: 7, maxRows: 14 }}
-            value={configText}
-          />
-          <Button
-            style={{ marginTop: 8 }}
-            icon={<CopyOutlined />}
-            onClick={() => void copy(configText, '已复制 MCP 配置')}
-          >
-            复制配置
-          </Button>
-        </div>
-        <div>
-          <Typography.Text strong>Claude Code 一键配置命令</Typography.Text>
-          <Input.TextArea
-            readOnly
-            className="mono"
-            style={{ marginTop: 8 }}
-            autoSize={{ minRows: 2, maxRows: 4 }}
-            value={command}
-          />
-          <Space style={{ marginTop: 8 }}>
-            <Button icon={<CopyOutlined />} onClick={() => void copy(command, '已复制 Claude Code 命令')}>
-              复制命令
-            </Button>
-            <Typography.Text type="secondary">复制后粘贴到终端执行，不会自动运行。</Typography.Text>
-          </Space>
-        </div>
-        {token === null ? null : (
-          <div>
-            <Typography.Text strong>明文 token</Typography.Text>
-            <Input.TextArea
-              readOnly
-              className="mono"
-              style={{ marginTop: 8 }}
-              autoSize={{ minRows: 2, maxRows: 4 }}
-              value={token}
+        {loading ? (
+          <Alert type="info" showIcon message="正在读取 token…" />
+        ) : unavailable || token === null ? (
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              message="此绑定创建于 token 本机保存之前，明文 token 无法恢复。重新生成后旧 token 立即失效，客户端需更新配置。"
             />
-          </div>
+            <Button danger type="primary" loading={regenerating} onClick={confirmRegenerate}>
+              重新生成 token
+            </Button>
+          </>
+        ) : (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              message="token 保存在本机 state.db，可直接查看/复制；重新生成会使旧 token 失效。"
+            />
+            <div>
+              <Typography.Text strong>MCP 配置（JSON）</Typography.Text>
+              <Input.TextArea
+                readOnly
+                className="mono"
+                style={{ marginTop: 8 }}
+                autoSize={{ minRows: 7, maxRows: 14 }}
+                value={configText}
+              />
+              <Button
+                style={{ marginTop: 8 }}
+                icon={<CopyOutlined />}
+                onClick={() => void copy(configText, '已复制 MCP 配置')}
+              >
+                复制配置
+              </Button>
+            </div>
+            <div>
+              <Typography.Text strong>Claude Code 一键配置命令</Typography.Text>
+              <Input.TextArea
+                readOnly
+                className="mono"
+                style={{ marginTop: 8 }}
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                value={command}
+              />
+              <Space style={{ marginTop: 8 }}>
+                <Button icon={<CopyOutlined />} onClick={() => void copy(command, '已复制 Claude Code 命令')}>
+                  复制命令
+                </Button>
+                <Typography.Text type="secondary">复制后粘贴到终端执行，不会自动运行。</Typography.Text>
+              </Space>
+            </div>
+            <div>
+              <Typography.Text strong>明文 token</Typography.Text>
+              <Input.TextArea
+                readOnly
+                className="mono"
+                style={{ marginTop: 8 }}
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                value={token}
+              />
+            </div>
+          </>
         )}
       </Space>
     </Modal>

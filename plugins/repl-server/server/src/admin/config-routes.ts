@@ -283,7 +283,7 @@ function configFromRecord(
     url: record.url ?? null,
     headers: cloneField(record.headers),
     enabled: record.enabled ?? true,
-    connectMode: record.connectMode ?? 'lazy',
+    connectMode: record.connectMode ?? 'eager',
     summary: record.summary ?? null,
     summarySource:
       summarySource !== undefined
@@ -322,7 +322,7 @@ function patchFromRecord(record: ServerConfigRecord): ServerConfigPatch {
     url: record.url ?? null,
     headers: cloneField(record.headers),
     enabled: record.enabled ?? true,
-    connectMode: record.connectMode ?? 'lazy',
+    connectMode: record.connectMode ?? 'eager',
     summary: record.summary ?? null,
     category: record.category ?? null,
     tags: [...(record.tags ?? [])],

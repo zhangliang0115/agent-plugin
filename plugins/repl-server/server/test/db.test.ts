@@ -25,9 +25,11 @@ import {
   deleteClientBinding,
   findBindingByToken,
   getClientBinding,
+  getClientToken,
   hashToken,
   listClientBindings,
   resolveWorkspacePath,
+  rotateClientToken,
   touchBinding,
   updateClientBinding,
 } from '../src/db/clients.ts';
@@ -70,15 +72,19 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const first = openStateDb(file);
   try {
-    assert.equal(readUserVersion(first), 4);
+    assert.equal(readUserVersion(first), 6);
     assert.equal(count(first, 'SELECT count(*) AS n FROM servers'), 2);
     const seeds = first
-      .prepare('SELECT id, transport FROM servers ORDER BY id')
+      .prepare('SELECT id, transport, category FROM servers ORDER BY id')
       .all()
-      .map((row) => ({ id: String(row['id']), transport: String(row['transport']) }));
+      .map((row) => ({
+        id: String(row['id']),
+        transport: String(row['transport']),
+        category: String(row['category']),
+      }));
     assert.deepEqual(seeds, [
-      { id: '__builtin__', transport: 'builtin' },
-      { id: '__official__', transport: 'builtin' },
+      { id: '__builtin__', transport: 'builtin', category: 'other' },
+      { id: '__official__', transport: 'builtin', category: 'devtools' },
     ]);
     assert.equal(
       count(first, "SELECT count(*) AS n FROM meta WHERE key = 'revision' AND value = '0'"),
@@ -100,7 +106,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const second = openStateDb(file);
   try {
-    assert.equal(readUserVersion(second), 4);
+    assert.equal(readUserVersion(second), 6);
     assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2);
     assert.equal(
       count(second, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"),
@@ -132,18 +138,51 @@ test('V3 backfills untouched seed rows and preserves edited ones', (t) => {
 
   const upgraded = openStateDb(file);
   try {
-    assert.equal(readUserVersion(upgraded), 4);
+    assert.equal(readUserVersion(upgraded), 6);
     const official = upgraded
       .prepare("SELECT label, category, tags_json FROM servers WHERE id = '__official__'")
       .get();
     assert.equal(official?.['label'], 'Claude Code 官方工具');
-    assert.equal(official?.['category'], 'official');
+    assert.equal(official?.['category'], 'devtools');
     assert.equal(official?.['tags_json'], '["official"]');
     const builtin = upgraded
       .prepare("SELECT label, category FROM servers WHERE id = '__builtin__'")
       .get();
     assert.equal(builtin?.['label'], '自定义内置', 'an edited label is not overwritten');
     assert.equal(builtin?.['category'], null);
+  } finally {
+    upgraded.close();
+  }
+});
+
+test('V3 backfills the new seed categories', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'repl-server-db-'));
+  const file = join(dir, 'state.db');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const v2 = openStateDb(file);
+  v2.prepare(
+    "UPDATE servers SET label = 'Official Claude Code tools', summary = NULL, category = NULL, tags_json = '[]' WHERE id = '__official__'",
+  ).run();
+  v2.prepare(
+    "UPDATE servers SET label = 'Built-in composite tools', summary = NULL, category = NULL, tags_json = '[]' WHERE id = '__builtin__'",
+  ).run();
+  v2.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+  v2.exec('PRAGMA user_version = 2');
+  v2.close();
+
+  const upgraded = openStateDb(file);
+  try {
+    const rows = upgraded
+      .prepare("SELECT id, category FROM servers WHERE id IN ('__official__', '__builtin__') ORDER BY id")
+      .all();
+    assert.deepEqual(
+      rows.map((row) => ({ id: String(row['id']), category: String(row['category']) })),
+      [
+        { id: '__builtin__', category: 'other' },
+        { id: '__official__', category: 'devtools' },
+      ],
+    );
   } finally {
     upgraded.close();
   }
@@ -338,6 +377,9 @@ test('client bindings hash tokens, resolve workspaces and round-trip quotas', (t
   assert.equal(created.token, 'plain-token');
   assert.equal(created.binding.tokenHash, hashToken('plain-token'));
   assert.notEqual(created.binding.tokenHash, 'plain-token');
+  assert.equal(getClientToken(db, created.binding.id), 'plain-token');
+  assert.equal('tokenPlain' in created.binding, false, 'public records never carry the plaintext');
+  assert.equal(JSON.stringify(listClientBindings(db)).includes('plain-token'), false);
   assert.equal(created.binding.defaultWorkspace, canonical);
   assert.deepEqual(created.binding.allowedServers, ['pg']);
   assert.deepEqual(created.binding.allowedTags, ['db', 'read']);
@@ -350,6 +392,12 @@ test('client bindings hash tokens, resolve workspaces and round-trip quotas', (t
   assert.equal(findBindingByToken(db, 'unknown-token'), null);
   assert.equal(getClientBinding(db, created.binding.id)?.label, 'Cursor');
   assert.equal(listClientBindings(db).length, 1);
+
+  const rotated = rotateClientToken(db, created.binding.id, 'rotated-token');
+  assert.equal(rotated?.id, created.binding.id);
+  assert.equal(findBindingByToken(db, 'plain-token'), null, 'the old token stops matching');
+  assert.equal(findBindingByToken(db, 'rotated-token')?.id, created.binding.id);
+  assert.equal(getClientToken(db, created.binding.id), 'rotated-token');
 
   assert.equal(touchBinding(db, created.binding.id, '2026-11-18T00:00:00.000Z'), true);
   assert.equal(getClientBinding(db, created.binding.id)?.lastSeenAt, '2026-11-18T00:00:00.000Z');
@@ -366,12 +414,26 @@ test('client bindings hash tokens, resolve workspaces and round-trip quotas', (t
   assert.deepEqual(updated?.allowedTags, ['db', 'read'], 'omitted fields stay unchanged');
   assert.deepEqual(updated?.quota, { maxQueuedCallsPerBindingPerServer: 32 });
 
+  createClientBinding(db, { label: 'Other', token: 'other-token' });
+  assert.throws(
+    () => rotateClientToken(db, created.binding.id, 'other-token'),
+    (error: unknown) => error instanceof DbValidationError && error.code === 'CONFLICT',
+  );
+  assert.equal(getClientToken(db, created.binding.id), 'rotated-token', 'a failed rotation leaves the token intact');
+
+  db.prepare('UPDATE client_bindings SET token_plain = NULL WHERE id = ?').run(created.binding.id);
+  assert.equal(getClientToken(db, created.binding.id), null, 'pre-v6 bindings cannot recover the token');
+  assert.equal(findBindingByToken(db, 'rotated-token')?.id, created.binding.id);
+
   const generated = createClientBinding(db, { label: 'Generated' });
   assert.ok(generated.token.length >= 32);
   assert.equal(findBindingByToken(db, generated.token)?.id, generated.binding.id);
+  assert.equal(getClientToken(db, generated.binding.id), generated.token);
 
   assert.equal(deleteClientBinding(db, generated.binding.id).deleted, true);
   assert.equal(findBindingByToken(db, generated.token), null);
+  assert.equal(getClientToken(db, generated.binding.id), null);
+  assert.equal(rotateClientToken(db, 'cb_missing', 'missing-token'), null);
   assert.equal(deleteClientBinding(db, generated.binding.id).deleted, false);
 });
 

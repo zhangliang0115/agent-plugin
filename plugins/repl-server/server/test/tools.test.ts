@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { CatalogSnapshot, CatalogTool } from '../src/ports.ts';
 import { describeTools } from '../src/tools/describe.ts';
 import {
+  buildSearchToolsDefinition,
   canonicalToolName,
   getToolDefinition,
   listTools,
@@ -18,6 +19,8 @@ function makeTool(overrides: Partial<CatalogTool> & Pick<CatalogTool, 'name' | '
     kind: overrides.kind,
     server: overrides.server,
     description: overrides.description,
+    category: overrides.category,
+    summary: overrides.summary,
     tags: overrides.tags,
     inputSchema: overrides.inputSchema ?? { type: 'object', properties: {} },
     concurrency: overrides.concurrency ?? 'parallel',
@@ -67,6 +70,9 @@ test('run_script description stays within the 2KB ceiling and mentions the async
   assert.ok(bytes <= 2048, `description is ${bytes} bytes`);
   assert.match(tool.description, /async/);
   assert.match(tool.description, /wait_tasks/);
+  assert.match(tool.description, /await tools\.<name>\(args\) for built-ins/);
+  assert.match(tool.description, /tools\.mcp\.<server>\.<tool>\(args\)/);
+  assert.doesNotMatch(tool.description, /await Read\(/);
 });
 
 test('the frozen schemas match docs/protocol.md §4', () => {
@@ -87,6 +93,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     type: 'object',
     properties: {
       query: { type: 'string' },
+      server: { type: 'string' },
       category: { type: 'string' },
       tags: { type: 'array', items: { type: 'string' } },
       max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
@@ -200,12 +207,21 @@ test('canonicalToolName prefixes MCP tools exactly once', () => {
 const SNAPSHOT: CatalogSnapshot = {
   revision: 7,
   tools: [
-    makeTool({ name: 'Read', kind: 'builtin', description: 'Read a file from disk', tags: ['files', 'read'] }),
+    makeTool({
+      name: 'Read',
+      kind: 'builtin',
+      description: 'Read a file from disk',
+      category: 'devtools',
+      summary: 'Official Claude Code tools',
+      tags: ['files', 'read'],
+    }),
     makeTool({
       name: 'pg.query',
       kind: 'mcp',
       server: 'pg',
       description: 'Run a read-only SQL query',
+      category: 'database',
+      summary: 'Postgres tools',
       tags: ['db', 'read'],
     }),
     makeTool({
@@ -213,6 +229,8 @@ const SNAPSHOT: CatalogSnapshot = {
       kind: 'mcp',
       server: 'pg',
       description: 'Insert a row',
+      category: 'database',
+      summary: 'Postgres tools',
       tags: ['db', 'write'],
     }),
     makeTool({
@@ -220,6 +238,8 @@ const SNAPSHOT: CatalogSnapshot = {
       kind: 'mcp',
       server: 'github',
       description: 'Create an issue',
+      category: 'vcs',
+      summary: 'GitHub tools',
       tags: ['vcs', 'write'],
     }),
     makeTool({
@@ -227,6 +247,8 @@ const SNAPSHOT: CatalogSnapshot = {
       kind: 'mcp',
       server: 'pg',
       description: 'Delete everything',
+      category: 'database',
+      summary: 'Postgres tools',
       tags: ['db', 'destructive'],
       enabled: false,
     }),
@@ -252,18 +274,121 @@ test('search_tools matches names, descriptions and tags', () => {
 
 test('search_tools applies category, tags and max filters', () => {
   assert.deepEqual(
-    searchTools(SNAPSHOT, { query: 'db', category: 'pg' }).map((item) => item.name),
+    searchTools(SNAPSHOT, { query: 'db', category: 'database' }).map((item) => item.name),
     ['pg.insert_row', 'pg.query'],
   );
   assert.deepEqual(
-    searchTools(SNAPSHOT, { query: 'db', category: 'github' }).map((item) => item.name),
+    searchTools(SNAPSHOT, { query: 'db', category: 'vcs' }).map((item) => item.name),
     [],
   );
   assert.deepEqual(
     searchTools(SNAPSHOT, { query: 'db', tags: ['db', 'read'] }).map((item) => item.name),
     ['pg.query'],
   );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'db', tags: ['db', 'write'] }).map((item) => item.name),
+    ['pg.insert_row'],
+  );
   assert.deepEqual(searchTools(SNAPSHOT, { query: 'db', max: 1 }).map((item) => item.name), ['pg.insert_row']);
+});
+
+test('category matches the tool category, never the server id', () => {
+  assert.deepEqual(searchTools(SNAPSHOT, { query: 'query', category: 'pg' }), []);
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'query', category: 'database' }).map((item) => item.name),
+    ['pg.query'],
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'disk', category: 'devtools' }).map((item) => item.name),
+    ['Read'],
+  );
+
+  const uncategorized: CatalogSnapshot = {
+    revision: 1,
+    tools: [
+      makeTool({ name: 'plain', kind: 'builtin' }),
+      makeTool({ name: 'query', kind: 'mcp', server: 'pg', category: 'database' }),
+    ],
+  };
+  assert.deepEqual(searchTools(uncategorized, { query: 'plain', category: 'database' }), []);
+});
+
+test('search_tools filters MCP tools by server and excludes builtins', () => {
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'write', server: 'pg' }).map((item) => item.name),
+    ['pg.insert_row'],
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'write', server: 'github' }).map((item) => item.name),
+    ['github.create_issue'],
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'read', server: 'pg' }).map((item) => item.name),
+    ['pg.query'],
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: 'read', server: 'devtools' }),
+    [],
+    'the server filter never matches built-in groupings',
+  );
+});
+
+test('an empty query with server lists that server tools; a keyword never matches the server id', () => {
+  const snapshot: CatalogSnapshot = {
+    revision: 1,
+    tools: [
+      makeTool({
+        name: 'list',
+        kind: 'mcp',
+        server: 'es',
+        description: 'List documents',
+        category: 'search',
+        summary: 'Elasticsearch',
+      }),
+      makeTool({
+        name: 'get',
+        kind: 'mcp',
+        server: 'es',
+        description: 'Get a document',
+        category: 'search',
+        summary: 'Elasticsearch',
+        tags: ['docs'],
+      }),
+      makeTool({ name: 'query', kind: 'mcp', server: 'pg', description: 'Run SQL' }),
+    ],
+  };
+
+  const scoped = searchTools(snapshot, { query: '', server: 'es' });
+  assert.deepEqual(scoped.map((item) => item.name), ['es.get', 'es.list']);
+  assert.equal(scoped[0]?.category, 'search');
+  assert.equal(scoped[0]?.summary, 'Elasticsearch');
+  assert.deepEqual(searchTools(snapshot, { query: '', server: 'es', tags: ['docs'] }).map((i) => i.name), ['es.get']);
+  assert.deepEqual(searchTools(snapshot, { query: '', server: 'es', max: 1 }).map((i) => i.name), ['es.get']);
+
+  assert.deepEqual(searchTools(snapshot, { query: 'es' }), [], 'the server id is not a search term');
+  assert.deepEqual(
+    searchTools(snapshot, { query: 'es', server: 'es' }),
+    [],
+    'the keyword still has to match a tool name, tag or description',
+  );
+
+  const overview = searchTools(snapshot, { query: '' });
+  assert.deepEqual(overview.map((item) => item.name), ['es', 'pg']);
+});
+
+test('server summary never drives keyword matching', () => {
+  assert.deepEqual(searchTools(SNAPSHOT, { query: 'postgres' }), []);
+
+  const items = searchTools(SNAPSHOT, { query: 'insert' });
+  assert.deepEqual(items[0], {
+    name: 'pg.insert_row',
+    kind: 'mcp',
+    server: 'pg',
+    category: 'database',
+    summary: 'Postgres tools',
+    description: 'Insert a row',
+    tags: ['db', 'write'],
+  });
 });
 
 test('search_tools returns the server overview for an empty query', () => {
@@ -273,17 +398,50 @@ test('search_tools returns the server overview for an empty query', () => {
       name: 'github',
       kind: 'mcp',
       server: 'github',
+      toolCount: 1,
       description: '1 tool; call tools.mcp.github.<tool>(args)',
+      category: 'vcs',
+      summary: 'GitHub tools',
       tags: ['vcs', 'write'],
     },
     {
       name: 'pg',
       kind: 'mcp',
       server: 'pg',
+      toolCount: 2,
       description: '2 tools; call tools.mcp.pg.<tool>(args)',
+      category: 'database',
+      summary: 'Postgres tools',
       tags: ['db', 'read', 'write'],
     },
   ]);
+});
+
+test('search_tools visibility: allowedServers hides MCP tools but not builtins', () => {
+  const names = (allowedServers: readonly string[] | null) =>
+    searchTools(SNAPSHOT, { query: 'read', allowedServers }).map((item) => item.name);
+
+  assert.deepEqual(names(null), ['Read', 'pg.query']);
+  assert.deepEqual(names([]), ['Read']);
+  assert.deepEqual(names(['pg']), ['Read', 'pg.query']);
+  assert.deepEqual(names(['github']), ['Read']);
+});
+
+test('search_tools visibility: allowedTags is any-of over every tool', () => {
+  const names = (allowedTags: readonly string[] | null) =>
+    searchTools(SNAPSHOT, { query: 'read', allowedTags }).map((item) => item.name);
+
+  assert.deepEqual(names(['files']), ['Read']);
+  assert.deepEqual(names(['db']), ['pg.query']);
+  assert.deepEqual(names(['DB', 'files']).sort(), ['Read', 'pg.query']);
+  assert.deepEqual(names([]), []);
+  assert.deepEqual(names(['nope']), []);
+
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: '', allowedServers: [] }),
+    [],
+    'the overview is empty without visible MCP servers',
+  );
 });
 
 test('search_tools excludes disabled tools and honors the default max', () => {
@@ -348,4 +506,113 @@ test('a single oversize schema is returned alone without an omission hint', () =
   assert.equal(result.tools[0]?.name, 'huge');
   assert.deepEqual(result.tools[0]?.inputSchema, schema);
   assert.equal(result.omitted, undefined);
+});
+
+test('describe_tools omits tools hidden by the request visibility', () => {
+  const snapshot: CatalogSnapshot = {
+    revision: 1,
+    tools: [
+      makeTool({ name: 'Read', kind: 'builtin', tags: ['files'] }),
+      makeTool({ name: 'query', kind: 'mcp', server: 'pg', tags: ['db'] }),
+      makeTool({ name: 'issues', kind: 'mcp', server: 'github', tags: ['vcs'] }),
+    ],
+  };
+
+  const serverBound = describeTools(snapshot, ['Read', 'pg.query', 'github.issues'], 32_000, {
+    allowedServers: ['pg'],
+  });
+  assert.deepEqual(serverBound.tools.map((tool) => tool.name), ['Read', 'pg.query']);
+  assert.deepEqual(serverBound.omitted, ['github.issues']);
+
+  const tagBound = describeTools(snapshot, ['Read', 'pg.query'], 32_000, {
+    allowedTags: [],
+  });
+  assert.deepEqual(tagBound.tools, []);
+  assert.deepEqual(tagBound.omitted, ['Read', 'pg.query']);
+});
+
+test('dynamic search_tools schema carries the visible server, category and tag enums', () => {
+  const definition = buildSearchToolsDefinition(
+    ['database', 'vcs'],
+    ['db', 'read'],
+    ['github', 'pg'],
+  );
+  assert.deepEqual(definition.inputSchema.properties.server, {
+    type: 'string',
+    enum: ['github', 'pg'],
+  });
+  assert.deepEqual(definition.inputSchema.properties.category, {
+    type: 'string',
+    enum: ['database', 'vcs'],
+  });
+  assert.deepEqual(definition.inputSchema.properties.tags, {
+    type: 'array',
+    items: { type: 'string', enum: ['db', 'read'] },
+  });
+  assert.deepEqual(definition.inputSchema.properties.query, { type: 'string' });
+  assert.deepEqual(definition.inputSchema.properties.max, {
+    type: 'integer',
+    minimum: 1,
+    maximum: 50,
+    default: 10,
+  });
+  assert.match(definition.description, /empty query without server returns the server overview/i);
+  assert.match(definition.description, /empty query with server returns that server's tools/i);
+  assert.match(definition.description, /tool names, effective tags and tool descriptions/i);
+  assert.match(definition.description, /only narrow the results/i);
+  assert.match(definition.description, /all-of/);
+  assert.match(definition.description, /schema enums/);
+  assert.equal(Object.isFrozen(definition.inputSchema.properties.category), true);
+
+  const bare = buildSearchToolsDefinition([], []);
+  assert.deepEqual(bare.inputSchema.properties.server, { type: 'string' });
+  assert.deepEqual(bare.inputSchema.properties.category, { type: 'string' });
+  assert.deepEqual(bare.inputSchema.properties.tags, {
+    type: 'array',
+    items: { type: 'string' },
+  });
+});
+
+test('validateToolArguments enforces the per-request search_tools enums', () => {
+  const definition = buildSearchToolsDefinition(['database'], ['db', 'read'], ['pg']);
+
+  assert.equal(
+    validateToolArguments('search_tools', { server: 'pg', category: 'database' }, definition).ok,
+    true,
+  );
+  assert.equal(validateToolArguments('search_tools', { tags: ['db', 'read'] }, definition).ok, true);
+
+  const server = validateToolArguments('search_tools', { server: 'mysql' }, definition);
+  assert.equal(server.ok, false);
+  if (!server.ok) assert.match(server.message, /server must be one of/);
+
+  const category = validateToolArguments('search_tools', { category: 'pg' }, definition);
+  assert.equal(category.ok, false);
+  if (!category.ok) assert.match(category.message, /category must be one of/);
+
+  const tags = validateToolArguments('search_tools', { tags: ['db', 'nope'] }, definition);
+  assert.equal(tags.ok, false);
+  if (!tags.ok) assert.match(tags.message, /tags\[1\] must be one of/);
+
+  // Without a per-request definition the frozen enum-less schema stays permissive.
+  assert.equal(validateToolArguments('search_tools', { category: 'anything' }).ok, true);
+});
+
+test('listTools applies per-request run_script and search_tools overrides only', () => {
+  const definition = buildSearchToolsDefinition(['database'], ['db']);
+  const tools = listTools({
+    runScriptDescription: 'dynamic run_script',
+    searchToolsDescription: definition.description,
+    searchToolsSchema: definition.inputSchema,
+  });
+
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  assert.equal(byName.get('run_script')?.description, 'dynamic run_script');
+  assert.deepEqual(
+    byName.get('search_tools')?.inputSchema.properties.category,
+    { type: 'string', enum: ['database'] },
+  );
+  for (const name of ['describe_tools', 'wait_tasks', 'report_problem'] as const) {
+    assert.equal(byName.get(name), getToolDefinition(name), `${name} stays frozen`);
+  }
 });

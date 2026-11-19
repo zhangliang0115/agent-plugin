@@ -28,6 +28,7 @@ export interface McpToolSource {
 export interface McpServerOverview {
   readonly id: string;
   readonly category: string;
+  /** Shown in discover `instructions`; never in the 2KB `run_script` description. */
   readonly summary: string;
   readonly tags: readonly string[];
   readonly toolCount: number;
@@ -49,14 +50,12 @@ export const DESCRIPTION_MAX_BYTES = 2048;
 const NO_SERVERS = 'No MCP servers are visible to this client.';
 const FIXED_GUIDANCE = [
   'Call: tools.mcp.<server>.<tool>(args)',
-  'Find: search_tools({ query })',
+  'Find: search_tools({ query, server?, category?, tags? })',
   'Args: describe_tools({ names })',
 ].join('\n');
 const ID_MAX_CHARS = 48;
 const CATEGORY_MAX_CHARS = 24;
 const ABOUT_MAX_CHARS = 80;
-const TOOL_NAME_MAX_CHARS = 32;
-const TOOL_NAMES_MAX = 4;
 
 /** Collapses untrusted admin/AI text to one line and clips it. */
 export function clipText(value: string | null | undefined, maxChars: number): string {
@@ -124,20 +123,15 @@ export function collectVisibleMcpServers(input: VisibleServerInput): McpServerOv
   return overviews;
 }
 
-/** One `## MCP servers` line. Missing summary falls back to the first tool names. */
+/**
+ * One `## MCP servers` line: `<id>  [<category>]  <N> tools`. Summary, tool
+ * names and tags stay out of the 2KB description; the overview in `search_tools`
+ * carries them instead.
+ */
 export function formatServerLine(server: McpServerOverview): string {
   const id = clipText(server.id, ID_MAX_CHARS) || '(unnamed server)';
-  const category = server.category === '' ? 'other' : server.category;
-  const count = `${server.toolCount} ${server.toolCount === 1 ? 'tool' : 'tools'}`;
-  const names = server.toolNames
-    .slice(0, TOOL_NAMES_MAX)
-    .map((name) => clipText(name, TOOL_NAME_MAX_CHARS))
-    .filter((name) => name !== '');
-  const summary = clipText(server.summary, ABOUT_MAX_CHARS);
-  const about = summary === '' ? names.join(', ') : summary;
-  return about === ''
-    ? `${id}  ${category} (${count})`
-    : `${id}  ${category} — ${about} (${count})`;
+  const category = clipText(server.category, CATEGORY_MAX_CHARS) || 'other';
+  return `${id}  [${category}]  ${server.toolCount} tools`;
 }
 
 /**
@@ -153,14 +147,14 @@ export function buildRunScriptDescription(
   base: string,
   servers: readonly McpServerOverview[],
 ): string {
-  const header = '\n\n## MCP servers\n\n';
+  const header = '\n\n## MCP servers (server id, category, visible tool count)\n\n';
   const suffix = `\n\n${FIXED_GUIDANCE}`;
   const budget = DESCRIPTION_MAX_BYTES
     - Buffer.byteLength(base, 'utf8')
     - Buffer.byteLength(header, 'utf8')
     - Buffer.byteLength(suffix, 'utf8');
-  // The frozen base plus the fixed guidance already fills the ceiling.
-  if (budget <= 0) return base;
+  // The fixed core and guidance are reserved first; only the server lines are optional.
+  if (budget <= 0) return `${base}${suffix}`;
 
   const lines = servers.length === 0 ? [NO_SERVERS] : servers.map(formatServerLine);
   const kept: string[] = [];

@@ -17,6 +17,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  BookOutlined,
   CloudDownloadOutlined,
   EditOutlined,
   ReloadOutlined,
@@ -27,9 +28,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
+import { TagPillEditor } from '../components/PillEditors.tsx';
+import { ToolSchemaDoc } from '../components/ToolSchemaDoc.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
-import { ApiError } from '../../lib/api.ts';
+import { ApiError, isTimeoutError, timeoutSignal } from '../../lib/api.ts';
 import { formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
 import { navigate } from '../router.ts';
 
@@ -43,7 +46,9 @@ interface ToolRecord {
   descriptionOverride: string | null;
   enabled: boolean;
   concurrency: ToolConcurrency;
+  /** @deprecated Still returned by the API; the page no longer reads or writes it. */
   type: string | null;
+  schema: unknown;
   tags: string[];
   category: string | null;
   discoveredVia?: 'static' | 'search';
@@ -110,7 +115,6 @@ interface ToolFormValues {
   enabled: boolean;
   concurrency: ToolConcurrency;
   tags?: string[];
-  type?: string;
   category?: string;
   staleOverride: boolean;
 }
@@ -180,11 +184,15 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
   const [toolServer, setToolServer] = useState<ToolsResponse['server'] | null>(null);
   const [toolNotice, setToolNotice] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  // Counts, not flags: two queued edits on the same field must not clear the
+  // pending state when the first one finishes.
+  const [inlinePending, setInlinePending] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingTool, setEditingTool] = useState<ToolRecord | null>(null);
+  const [docTool, setDocTool] = useState<ToolRecord | null>(null);
   const [saving, setSaving] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [preview, setPreview] = useState<DiscoveryPreview | null>(null);
@@ -195,6 +203,10 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
   const [toolForm] = Form.useForm<ToolFormValues>();
   const [discoverForm] = Form.useForm<DiscoverFormValues>();
   const alive = useRef(true);
+  // Inline edits read the revision from a ref so a queued edit sends the value
+  // the previous edit just produced, not a stale render closure.
+  const revisionRef = useRef(0);
+  const inlineQueue = useRef<Promise<void>>(Promise.resolve());
   const messageKeys = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -236,7 +248,9 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         setTools(Array.isArray(response.tools) ? response.tools : []);
         setToolServer(response.server);
         setToolNotice(typeof response.notice === 'string' ? response.notice : null);
-        setRevision(typeof response.revision === 'number' ? response.revision : 0);
+        const nextRevision = typeof response.revision === 'number' ? response.revision : 0;
+        revisionRef.current = nextRevision;
+        setRevision(nextRevision);
       } catch (error) {
         if (!alive.current) return;
         setTools([]);
@@ -294,7 +308,6 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         (tool.descriptionOverride ?? '').toLowerCase().includes(needle) ||
         (tool.effective?.description ?? '').toLowerCase().includes(needle) ||
         (tool.category ?? '').toLowerCase().includes(needle) ||
-        (tool.type ?? '').toLowerCase().includes(needle) ||
         tool.tags.some((tag) => tag.toLowerCase().includes(needle)),
     );
   }, [query, tools]);
@@ -326,29 +339,54 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         title: '启用',
         dataIndex: 'enabled',
         width: 76,
-        render: (value: boolean) => (
-          <Tag bordered={false} color={value ? 'success' : 'default'}>
-            {value ? '启用' : '停用'}
-          </Tag>
-        ),
+        render: (value: boolean, tool: ToolRecord) => {
+          const pending = (inlinePending[inlineKey(tool, 'enabled')] ?? 0) > 0;
+          return (
+            <div onClick={(event) => event.stopPropagation()}>
+              <Switch
+                size="small"
+                checked={value}
+                checkedChildren={pending ? '保存中' : '启用'}
+                unCheckedChildren={pending ? '保存中' : '停用'}
+                loading={pending}
+                onChange={(checked) => void patchInline(tool, { enabled: checked }, 'enabled')}
+              />
+            </div>
+          );
+        },
       },
       {
         title: '并发',
         dataIndex: 'concurrency',
-        width: 96,
-        render: (value: ToolConcurrency) => (
-          <Tag bordered={false} color={concurrencyColor(value)}>
-            {value}
-          </Tag>
+        width: 110,
+        render: (value: ToolConcurrency, tool: ToolRecord) => (
+          <div onClick={(event) => event.stopPropagation()}>
+            <Select
+              size="small"
+              style={{ width: '100%' }}
+              value={value}
+              options={CONCURRENCY_OPTIONS}
+              loading={(inlinePending[inlineKey(tool, 'concurrency')] ?? 0) > 0}
+              onChange={(next: ToolConcurrency) =>
+                void patchInline(tool, { concurrency: next }, 'concurrency')
+              }
+            />
+          </div>
         ),
       },
-      { title: '类型', dataIndex: 'type', width: 90, render: (value: string | null) => value ?? '—' },
       {
-        title: '生效标签',
+        title: '标签（含继承）',
         dataIndex: 'tags',
-        width: 180,
-        render: (_value: string[], tool: ToolRecord) => (
-          <TagList tags={tool.effective?.tags ?? tool.tags} dictionary={tagDefinitions} />
+        width: 300,
+        render: (value: string[], tool: ToolRecord) => (
+          <TagPillEditor
+            dictionary={tagDefinitions}
+            value={value}
+            inherited={toolServer?.tags ?? []}
+            disabled={(inlinePending[inlineKey(tool, 'tags')] ?? 0) > 0}
+            clearLabel="清空工具标签"
+            onChange={(next) => void patchInline(tool, { tags: next }, 'tags')}
+          />
         ),
       },
       {
@@ -380,16 +418,21 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '操作',
-        width: 80,
+        width: 120,
         render: (_value: unknown, tool: ToolRecord) => (
-          <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openToolEditor(tool)}>
-            编辑
-          </Button>
+          <Space size={0}>
+            <Button size="small" type="link" icon={<BookOutlined />} onClick={() => setDocTool(tool)}>
+              说明
+            </Button>
+            <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openToolEditor(tool)}>
+              编辑
+            </Button>
+          </Space>
         ),
       },
     ],
-    // openToolEditor is stable enough for this render-only callback.
-    [tagDefinitions],
+    // openToolEditor, patchInline and the state setters are stable enough for this render-only callback.
+    [inlinePending, tagDefinitions, toolServer],
   );
 
   function openToolEditor(tool: ToolRecord): void {
@@ -401,7 +444,6 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       enabled: tool.enabled,
       concurrency: tool.concurrency,
       tags: tool.tags,
-      type: tool.type ?? '',
       category: tool.category ?? '',
       staleOverride: tool.staleOverride,
     });
@@ -420,13 +462,13 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
           enabled: values.enabled,
           concurrency: values.concurrency,
           tags: values.tags ?? [],
-          type: nullIfEmpty(values.type),
           category: nullIfEmpty(values.category),
           staleOverride: values.staleOverride,
         },
         { headers: { 'If-Match': String(revision) } },
       );
       if (!alive.current) return;
+      revisionRef.current = response.revision;
       setRevision(response.revision);
       message.success(`已保存工具 ${tool.serverId}/${tool.name}；下一次 eval 生效`);
       setEditorOpen(false);
@@ -443,6 +485,62 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
     } finally {
       if (alive.current) setSaving(false);
     }
+  }
+
+  // Inline edits bypass the drawer. Requests are chained through one promise so
+  // each one sends the revision the previous response produced.
+  function patchInline(
+    tool: ToolRecord,
+    patch: Record<string, unknown>,
+    fieldKey: string,
+  ): Promise<void> {
+    const key = inlineKey(tool, fieldKey);
+    const run = async (): Promise<void> => {
+      if (!alive.current) return;
+      setInlinePending((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }));
+      try {
+        const response = await api.patch<{ tool: ToolRecord; revision: number }>(
+          `/tools/${encodeURIComponent(tool.serverId)}/${encodeURIComponent(tool.name)}`,
+          patch,
+          {
+            headers: { 'If-Match': String(revisionRef.current) },
+            signal: timeoutSignal(15_000),
+          },
+        );
+        if (!alive.current) return;
+        revisionRef.current = response.revision;
+        setRevision(response.revision);
+        setTools((prev) =>
+          prev.map((item) =>
+            item.serverId === tool.serverId && item.name === tool.name ? response.tool : item,
+          ),
+        );
+      } catch (error) {
+        if (!alive.current) return;
+        if (isTimeoutError(error)) {
+          message.error('保存超时（15 秒），已刷新列表；请确认结果后再修改。');
+          await loadTools(tool.serverId);
+        } else if (isConflictError(error)) {
+          message.error('工具目录已被他人修改（revision 冲突），已刷新列表；请重新操作。');
+          await loadTools(tool.serverId);
+        } else {
+          message.error(failureText(error));
+        }
+      } finally {
+        if (alive.current) {
+          setInlinePending((prev) => {
+            const count = (prev[key] ?? 1) - 1;
+            if (count > 0) return { ...prev, [key]: count };
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+        }
+      }
+    };
+    const next = inlineQueue.current.then(run);
+    inlineQueue.current = next.catch(() => undefined);
+    return next;
   }
 
   async function followOperation(
@@ -521,6 +619,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
     setSelectedId(nextId);
     setQuery('');
     setEditingTool(null);
+    setDocTool(null);
     setEditorOpen(false);
     setDiscoverOpen(false);
     setPreview(null);
@@ -667,6 +766,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       message.success(
         `已应用 ${result.applied} 个工具：新增 ${result.created}、更新 ${result.updated}、标记 stale ${result.stale}`,
       );
+      revisionRef.current = result.revision;
       setPreview(null);
       setSelectedNames([]);
       setDiscoverOpen(false);
@@ -721,7 +821,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             <Input
               allowClear
               prefix={<SearchOutlined />}
-              placeholder="搜索名称 / 描述 / 标签 / 类型"
+              placeholder="搜索名称 / 描述 / 标签"
               style={{ width: 240 }}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -793,7 +893,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             dataSource={filtered}
             columns={columns}
             pagination={false}
-            scroll={{ y: 'calc(100vh - 300px)' }}
+            scroll={{ x: 1280, y: 'calc(100vh - 300px)' }}
             locale={{
               emptyText: (
                 <Empty
@@ -845,9 +945,6 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
           <Form.Item name="tags" label="tags（标签）">
             <TagsField dictionary={tagDefinitions} />
           </Form.Item>
-          <Form.Item name="type" label="type（类型）">
-            <Input placeholder="query / action" />
-          </Form.Item>
           <Form.Item name="category" label="category（分类）" extra="留空继承 server 的 category。">
             <CategorySelect dictionary={categoryDefinitions} placeholder="从分类字典选择（留空继承 server）" />
           </Form.Item>
@@ -860,6 +957,15 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             <Switch />
           </Form.Item>
         </Form>
+      </Drawer>
+
+      <Drawer
+        open={docTool !== null}
+        onClose={() => setDocTool(null)}
+        title={docTool === null ? '工具说明' : `工具说明 · ${docTool.serverId}/${docTool.name}`}
+        width={820}
+      >
+        {docTool === null ? null : <ToolSchemaDoc tool={docTool} />}
       </Drawer>
 
       <Drawer
@@ -1087,29 +1193,8 @@ function TagsField({
   );
 }
 
-function TagList({
-  tags,
-  dictionary,
-}: {
-  tags: string[];
-  dictionary: readonly TagDefinition[];
-}): React.ReactElement {
-  if (tags.length === 0) return <span className="muted">—</span>;
-  return (
-    <Space size={4} wrap>
-      {tags.map((tag) => (
-        <Tag key={tag} bordered={false} title={tag}>
-          {tagLabel(dictionary, tag)}
-        </Tag>
-      ))}
-    </Space>
-  );
-}
-
-function concurrencyColor(value: ToolConcurrency): string {
-  if (value === 'serial') return 'gold';
-  if (value === 'exclusive') return 'orange';
-  return 'blue';
+function inlineKey(tool: ToolRecord, field: string): string {
+  return `${tool.serverId}:${tool.name}:${field}`;
 }
 
 function nullIfEmpty(value: string | undefined): string | null {

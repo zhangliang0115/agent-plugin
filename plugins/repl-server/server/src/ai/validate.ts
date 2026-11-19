@@ -23,7 +23,9 @@ export { PROVIDER_TOKEN_RULES } from './redact.ts';
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
-const CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+// Mirrors the category dictionary key rule in `admin/categories.ts`, so every
+// key the administrator can store is also representable in an AI draft.
+const CATEGORY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/u;
 const TAG_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,127}$/;
 const RESERVED_SERVER_IDS = new Set(['__official__', '__builtin__']);
@@ -415,7 +417,7 @@ export function normalizeProposalServer(value: unknown): ProposalServer {
   const enabled =
     value['enabled'] === undefined ? true : readBoolean(value['enabled'], 'server.enabled');
 
-  const connectMode = value['connectMode'] === undefined ? 'lazy' : value['connectMode'];
+  const connectMode = value['connectMode'] === undefined ? 'eager' : value['connectMode'];
   if (connectMode !== 'lazy' && connectMode !== 'eager') {
     throw proposalInvalid(['server.connectMode must be "lazy" or "eager"'], [
       'server.connectMode',
@@ -589,10 +591,19 @@ export interface NormalizedToolOverride {
   tags?: string[];
 }
 
+/** A proposed dictionary entry the administrator may accept on apply. */
+export interface DictionarySuggestion {
+  key: string;
+  zh: string;
+  en: string;
+}
+
 export interface NormalizedAnnotation {
   summary?: string | null;
   category?: string | null;
+  categorySuggestion?: DictionarySuggestion | null;
   tags?: string[];
+  tagSuggestions?: DictionarySuggestion[];
   toolOverrides?: NormalizedToolOverride[];
   warnings: string[];
 }
@@ -600,11 +611,15 @@ export interface NormalizedAnnotation {
 const ANNOTATION_FIELDS: ReadonlySet<string> = new Set([
   'summary',
   'category',
+  'categorySuggestion',
   'tags',
+  'tagSuggestions',
   'toolOverrides',
   'warnings',
 ]);
 const TOOL_OVERRIDE_FIELDS: ReadonlySet<string> = new Set(['name', 'description', 'tags']);
+const SUGGESTION_LABEL_MAX = 40;
+const MAX_TAG_SUGGESTIONS = MAX_TAGS;
 
 function annotationTags(value: unknown, field: string, prefix: string): string[] {
   if (!Array.isArray(value)) throw annotationInvalid([`${field} must be an array`], [prefix]);
@@ -700,6 +715,50 @@ function readToolOverrides(
   return overrides;
 }
 
+function readSuggestion(
+  value: unknown,
+  field: string,
+  pattern: RegExp,
+): DictionarySuggestion {
+  if (!isPlainObject(value)) {
+    throw annotationInvalid([`${field} must be an object`], [field]);
+  }
+  const key = typeof value['key'] === 'string' ? value['key'].trim() : '';
+  const zh = typeof value['zh'] === 'string' ? value['zh'].trim() : '';
+  const en = typeof value['en'] === 'string' ? value['en'].trim() : '';
+  if (!pattern.test(key)) {
+    throw annotationInvalid([`${field}.key must match ${String(pattern)}`], [`${field}.key`]);
+  }
+  if (zh === '' || en === '') {
+    throw annotationInvalid([`${field} requires both zh and en labels`], [field]);
+  }
+  if (zh.length > SUGGESTION_LABEL_MAX || en.length > SUGGESTION_LABEL_MAX) {
+    throw annotationInvalid(
+      [`${field} labels exceed ${SUGGESTION_LABEL_MAX} characters`],
+      [field],
+    );
+  }
+  return { key, zh, en };
+}
+
+function readTagSuggestions(value: unknown): DictionarySuggestion[] {
+  if (!Array.isArray(value)) {
+    throw annotationInvalid(['tagSuggestions must be an array'], ['tagSuggestions']);
+  }
+  if (value.length > MAX_TAG_SUGGESTIONS) {
+    throw annotationInvalid(
+      [`tagSuggestions must have at most ${MAX_TAG_SUGGESTIONS} items`],
+      ['tagSuggestions'],
+    );
+  }
+  const suggestions: DictionarySuggestion[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const suggestion = readSuggestion(value[index], `tagSuggestions[${index}]`, TAG_PATTERN);
+    if (!suggestions.some((entry) => entry.key === suggestion.key)) suggestions.push(suggestion);
+  }
+  return suggestions;
+}
+
 export function normalizeAnnotation(
   value: unknown,
   knownTools: readonly string[],
@@ -738,8 +797,18 @@ export function normalizeAnnotation(
     result.category = category;
   }
 
+  if ('categorySuggestion' in value) {
+    const suggestion = value['categorySuggestion'];
+    result.categorySuggestion =
+      suggestion === null ? null : readSuggestion(suggestion, 'categorySuggestion', CATEGORY_PATTERN);
+  }
+
   if ('tags' in value) {
     result.tags = annotationTags(value['tags'], 'tags', 'tags');
+  }
+
+  if ('tagSuggestions' in value) {
+    result.tagSuggestions = readTagSuggestions(value['tagSuggestions']);
   }
 
   if ('toolOverrides' in value) {
@@ -774,14 +843,152 @@ export function normalizeAnnotation(
   return result;
 }
 
-/** True when no server-level or tool-level change was proposed. */
+/** True when no server-level, dictionary-suggestion or tool-level change was proposed. */
 export function annotationIsEmpty(annotation: NormalizedAnnotation): boolean {
   return (
     (annotation.summary ?? null) === null &&
     (annotation.category ?? null) === null &&
+    (annotation.categorySuggestion ?? null) === null &&
     (annotation.tags?.length ?? 0) === 0 &&
+    (annotation.tagSuggestions?.length ?? 0) === 0 &&
     (annotation.toolOverrides?.length ?? 0) === 0
   );
+}
+
+export interface AnnotationDictionaryKeys {
+  categories: ReadonlySet<string>;
+  tags: ReadonlySet<string>;
+}
+
+export interface RestrictedAnnotation {
+  annotation: NormalizedAnnotation;
+  /** Human-readable reasons for every value dropped from the draft. */
+  dropped: string[];
+}
+
+const AI_FORBIDDEN_TAGS: ReadonlySet<string> = new Set(['cross-env', 'official', 'builtin']);
+
+/** Environment and provenance are deployment facts the model cannot see. */
+export function isAiForbiddenTag(tag: string): boolean {
+  return tag.startsWith('env.') || AI_FORBIDDEN_TAGS.has(tag);
+}
+
+/**
+ * Splits a draft into existing values and new dictionary suggestions. Unknown
+ * existing values are dropped with a warning; a suggestion whose key already
+ * exists becomes an ordinary existing value. Forbidden environment/provenance
+ * keys never become suggestions, and category keys are never accepted as tags
+ * or tag suggestions. Tool override tags may reference either set.
+ */
+export function restrictAnnotationToDictionary(
+  annotation: NormalizedAnnotation,
+  keys: AnnotationDictionaryKeys,
+): RestrictedAnnotation {
+  const restricted: NormalizedAnnotation = {
+    ...annotation,
+    warnings: [...annotation.warnings],
+  };
+  const dropped: string[] = [];
+
+  if (
+    restricted.category !== undefined &&
+    restricted.category !== null &&
+    !keys.categories.has(restricted.category)
+  ) {
+    dropped.push(`分类 ${restricted.category} 不在分类字典中，已丢弃`);
+    restricted.category = null;
+  }
+
+  if (restricted.categorySuggestion !== undefined && restricted.categorySuggestion !== null) {
+    const suggestion = restricted.categorySuggestion;
+    if (isAiForbiddenTag(suggestion.key)) {
+      dropped.push(`分类建议 ${suggestion.key} 是环境或来源标签，由管理员维护，已丢弃`);
+      restricted.categorySuggestion = null;
+    } else if (keys.tags.has(suggestion.key)) {
+      dropped.push(`分类建议 ${suggestion.key} 已是标签 key，标签 key 不能作为分类`);
+      restricted.categorySuggestion = null;
+    } else if (
+      restricted.tagSuggestions?.some((entry) => entry.key === suggestion.key) === true
+    ) {
+      dropped.push(`分类建议 ${suggestion.key} 与标签建议重名，不能同时写入两个字典`);
+      restricted.categorySuggestion = null;
+    } else if (keys.categories.has(suggestion.key)) {
+      if (restricted.category === undefined || restricted.category === null) {
+        restricted.category = suggestion.key;
+      }
+      restricted.categorySuggestion = null;
+    } else if (restricted.category !== undefined && restricted.category !== null) {
+      dropped.push(`已给出分类 ${restricted.category}，建议分类 ${suggestion.key} 已忽略`);
+      restricted.categorySuggestion = null;
+    }
+  }
+
+  if (restricted.tags !== undefined) {
+    restricted.tags = restricted.tags.filter((tag) => {
+      if (isAiForbiddenTag(tag)) {
+        dropped.push(`标签 ${tag} 是环境或来源标签，由管理员维护，AI 生成值已丢弃`);
+        return false;
+      }
+      if (keys.categories.has(tag)) {
+        dropped.push(`标签 ${tag} 是分类 key，分类 key 不能当标签，已丢弃`);
+        return false;
+      }
+      if (!keys.tags.has(tag)) {
+        dropped.push(`标签 ${tag} 不在标签字典中，已丢弃`);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  if (restricted.tagSuggestions !== undefined) {
+    const kept: DictionarySuggestion[] = [];
+    for (const suggestion of restricted.tagSuggestions) {
+      if (isAiForbiddenTag(suggestion.key)) {
+        dropped.push(`标签 ${suggestion.key} 由管理员维护，不能作为建议新增`);
+        continue;
+      }
+      if (keys.categories.has(suggestion.key)) {
+        dropped.push(`标签建议 ${suggestion.key} 是分类 key，分类 key 不能当标签`);
+        continue;
+      }
+      if (keys.tags.has(suggestion.key)) {
+        restricted.tags ??= [];
+        if (!restricted.tags.includes(suggestion.key)) restricted.tags.push(suggestion.key);
+        continue;
+      }
+      if (!kept.some((entry) => entry.key === suggestion.key)) kept.push(suggestion);
+    }
+    restricted.tagSuggestions = kept;
+  }
+
+  if (restricted.toolOverrides !== undefined) {
+    const allowed = new Set<string>([
+      ...keys.tags,
+      ...(restricted.tagSuggestions ?? []).map((suggestion) => suggestion.key),
+    ]);
+    restricted.toolOverrides = restricted.toolOverrides.map((override) => {
+      if (override.tags === undefined) return override;
+      const tags = override.tags.filter((tag) => {
+        if (isAiForbiddenTag(tag)) {
+          dropped.push(`工具标签 ${tag} 由管理员维护，AI 生成值已丢弃`);
+          return false;
+        }
+        if (keys.categories.has(tag)) {
+          dropped.push(`工具标签 ${tag} 是分类 key，分类 key 不能当标签，已丢弃`);
+          return false;
+        }
+        if (!allowed.has(tag)) {
+          dropped.push(`工具标签 ${tag} 不在标签字典或建议中，已丢弃`);
+          return false;
+        }
+        return true;
+      });
+      return { ...override, tags };
+    });
+  }
+
+  return { annotation: restricted, dropped };
 }
 
 // ---------------------------------------------------------------------------

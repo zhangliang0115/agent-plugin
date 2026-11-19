@@ -77,12 +77,14 @@ function okAnnotation() {
   return {
     summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
     category: 'database',
-    tags: ['db', 'sql', 'write'],
+    categorySuggestion: null,
+    tags: ['postgresql', 'query', 'write'],
+    tagSuggestions: [],
     toolOverrides: [
       {
         name: 'query',
         description: 'Run a read-only SQL query; 执行只读 SQL 查询',
-        tags: ['read', 'sql'],
+        tags: ['read', 'query'],
       },
     ],
     warnings: [],

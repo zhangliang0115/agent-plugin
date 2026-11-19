@@ -645,7 +645,7 @@ function readTransport(value: unknown): Exclude<ServerTransport, 'builtin'> {
 }
 
 function readConnectMode(value: unknown): ConnectMode {
-  if (value === undefined) return 'lazy';
+  if (value === undefined) return 'eager';
   if (value === 'lazy' || value === 'eager') return value;
   throw invalidField('connectMode', 'must be "lazy" or "eager"');
 }
@@ -1206,6 +1206,18 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
     // server-store transaction; assembly refreshes the catalog snapshot after
     // the write, so no extra hook is needed here.
     const { server, revision } = await deps.servers.update(id, patch, expected);
+
+    // Disconnect after the write: enabled=false is the gate that rejects new
+    // calls, and a failed close must not turn a committed PATCH into a 500.
+    if (current.enabled && !server.enabled && server.transport !== 'builtin') {
+      try {
+        await deps.pool.disconnect(id);
+      } catch (error) {
+        deps.log?.(
+          `disconnect(${id}) after disabling failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     return adminJson(200, {
       server: viewServer(server, await deps.pool.state(server.id)),

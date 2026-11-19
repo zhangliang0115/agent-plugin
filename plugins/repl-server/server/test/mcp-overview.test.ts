@@ -89,7 +89,7 @@ test('an idle server stays visible when its own tags match', () => {
   assert.equal(result[0]?.toolCount, 0);
 });
 
-test('server lines fall back for missing fields and clip untrusted text', () => {
+test('server lines are compact and never print summary, tool names or env tags', () => {
   const missing = formatServerLine({
     id: 'pg',
     category: '',
@@ -98,7 +98,7 @@ test('server lines fall back for missing fields and clip untrusted text', () => 
     toolCount: 2,
     toolNames: ['query', 'insert', 'list', 'migrate', 'drop'],
   });
-  assert.equal(missing, 'pg  other — query, insert, list, migrate (2 tools)');
+  assert.equal(missing, 'pg  [other]  2 tools');
 
   const bare = formatServerLine({
     id: 'pg',
@@ -108,18 +108,20 @@ test('server lines fall back for missing fields and clip untrusted text', () => 
     toolCount: 0,
     toolNames: [],
   });
-  assert.equal(bare, 'pg  database (0 tools)');
+  assert.equal(bare, 'pg  [database]  0 tools');
 
-  const messy = formatServerLine({
+  const detailed = formatServerLine({
     id: 'gh',
     category: 'vcs',
-    summary: `line one\nline two\t${'x'.repeat(200)}`,
-    tags: [],
+    summary: 'GitHub repository tools',
+    tags: ['vcs', 'env.dev', 'env.test'],
     toolCount: 1,
     toolNames: ['issues'],
   });
-  assert.ok(!messy.includes('\n'));
-  assert.ok(messy.length < 140, `line was ${messy.length} chars`);
+  assert.equal(detailed, 'gh  [vcs]  1 tools');
+  assert.ok(!detailed.includes('GitHub'));
+  assert.ok(!detailed.includes('issues'));
+  assert.ok(!detailed.includes('env.'));
 });
 
 test('run_script description appends the visible servers and fixed guidance', () => {
@@ -130,11 +132,12 @@ test('run_script description appends the visible servers and fixed guidance', ()
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers);
 
   assert.ok(description.startsWith(RUN_SCRIPT_DESCRIPTION));
-  assert.match(description, /## MCP servers/);
-  assert.match(description, /pg {2}database — Postgres \(1 tool\)/);
+  assert.match(description, /## MCP servers \(server id, category, visible tool count\)/);
+  assert.match(description, /pg {2}\[database\] {2}1 tools/);
+  assert.ok(!description.includes('Postgres'), 'the summary is not part of the description');
   assert.match(description, /Call: tools\.mcp\.<server>\.<tool>\(args\)/);
-  assert.match(description, /Find: search_tools/);
-  assert.match(description, /Args: describe_tools/);
+  assert.match(description, /Find: search_tools\(\{ query, server\?, category\?, tags\? \}\)/);
+  assert.match(description, /Args: describe_tools\(\{ names \}\)/);
 });
 
 test('run_script description says when no server is visible', () => {
@@ -161,17 +164,28 @@ test('over-budget server lists are truncated from the tail and guidance survives
   assert.ok(!description.includes('srv099'));
   assert.ok(description.includes('Args: describe_tools({ names })'));
   assert.ok(description.includes('Call: tools.mcp.<server>.<tool>(args)'));
+  assert.ok(description.includes('Find: search_tools({ query, server?, category?, tags? })'));
 });
 
-test('buildInstructions lists only the visible server names', () => {
+test('buildInstructions lists visible servers with category, count and summary', () => {
   const servers = visible(
-    [server({ id: 'pg' }), server({ id: 'gh' }), server({ id: 'off', enabled: false })],
-    [],
+    [
+      server({ id: 'pg', category: 'database', summary: 'Postgres tools' }),
+      server({ id: 'gh', category: 'vcs', summary: 'GitHub tools', tags: ['env.dev'] }),
+      server({ id: 'off', enabled: false }),
+    ],
+    [tool('pg', 'query'), tool('gh', 'issues')],
   );
   const instructions = buildInstructions(INSTRUCTIONS, servers);
 
-  assert.ok(instructions.includes('MCP servers visible to this client: pg, gh.'));
-  assert.ok(!instructions.includes('off,'));
+  assert.ok(instructions.includes('MCP servers visible to this client:'));
+  assert.ok(instructions.includes('- pg [database] 1 tool — Postgres tools'));
+  assert.ok(instructions.includes('- gh [vcs] 1 tool — GitHub tools'));
+  assert.ok(!instructions.includes('[env.dev]'), 'env tags stay in the search_tools overview');
+  assert.ok(!instructions.includes('- off'));
+  assert.ok(instructions.includes('The search_tools schema lists'));
+  assert.ok(instructions.includes('the available server, category and tag filter values'));
+  assert.ok(!instructions.includes('database, vcs'), 'the category vocabulary is not repeated');
   assert.ok(instructions.includes('## Return values'), 'the rest of the template is unchanged');
   assert.ok(instructions.includes('## Top-level MCP tools'));
 });

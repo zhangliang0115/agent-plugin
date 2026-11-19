@@ -7,12 +7,14 @@
 
 import { systemClock, type Clock } from '../ports.ts';
 import { AI_ANNOTATION_MAX, AI_ANNOTATION_TTL_MS } from './constants.ts';
-import type { NormalizedToolOverride } from './validate.ts';
+import type { DictionarySuggestion, NormalizedToolOverride } from './validate.ts';
 
 export interface AnnotationProposed {
   summary: string | null;
   category: string | null;
+  categorySuggestion: DictionarySuggestion | null;
   tags: string[];
+  tagSuggestions: DictionarySuggestion[];
   toolOverrides: NormalizedToolOverride[];
 }
 

@@ -15,7 +15,7 @@ import {
 } from './constants.ts';
 
 /** Bumped whenever either template changes; reported by `GET /ai/config`. */
-export const PROMPT_VERSION = 1;
+export const PROMPT_VERSION = 5;
 
 /** 8 hex characters, unique per run. */
 export function createPromptNonce(): string {
@@ -48,6 +48,17 @@ export interface AnnotatePromptResult {
   tools: PromptToolView[];
 }
 
+/** Dictionary entries the annotate prompt may choose from. */
+export interface AnnotateDictionaryEntry {
+  key: string;
+  zh: string;
+}
+
+export interface AnnotateDictionaries {
+  categories: readonly AnnotateDictionaryEntry[];
+  tags: readonly AnnotateDictionaryEntry[];
+}
+
 /** Template A: one-line description or a pasted MCP config → server draft. */
 export function buildProposePrompt(input: string, nonce: string): string {
   return `你是 repl-server 的 MCP 配置生成器。你的唯一任务是把用户输入转换成 repl-server 的服务器配置。
@@ -60,7 +71,8 @@ export function buildProposePrompt(input: string, nonce: string): string {
 5. 参数放在 args 数组里，不要拼成 shell 命令。args 中的凭据同样用 {"$secret":"KEY_NAME"}。
 6. url 只允许 http/https，且不得内嵌用户名或密码；非回环地址必须用 https。
 7. 无法确定时不要编造：把不确定项写进 warnings，并给出最保守的配置。
-8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 用小写英文短横线词，最多 8 个；category 用小写英文，建议从 database/filesystem/web/search/devtools/communication/observability/cloud/other 中选。
+8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 用小写英文短横线词，最多 8 个；category 用小写英文，建议从 database/observability/devtools/ui-automation/filesystem/search/messaging/cloud/ai/other 中选。
+9. connectMode 默认 "eager"（启动即连接）；只有用户明确要求延迟连接、按需启动或节省资源时才用 "lazy"。
 
 输出 JSON 的字段：
 {
@@ -90,14 +102,21 @@ ${input}
 </user_input_${nonce}>`;
 }
 
+function renderDictionary(entries: readonly AnnotateDictionaryEntry[]): string {
+  return entries.map((entry) => `${entry.key}=${entry.zh}`).join(', ');
+}
+
 function renderAnnotatePrompt(
   server: Record<string, unknown>,
   tools: readonly PromptToolView[],
+  dictionaries: AnnotateDictionaries,
   nonce: string,
   omittedTools: number,
 ): string {
   const serverJson = JSON.stringify(server, null, 2);
   const toolsJson = JSON.stringify(tools, null, 2);
+  const categoryKeys = renderDictionary(dictionaries.categories);
+  const tagKeys = renderDictionary(dictionaries.tags);
   const omittedLine =
     omittedTools > 0
       ? `\n如果存在未列出的工具，另起一行写：另有 ${omittedTools} 个工具未列出，不要为它们生成 toolOverrides。`
@@ -109,18 +128,32 @@ function renderAnnotatePrompt(
 2. 只输出一个 JSON 对象，不要 Markdown 围栏或额外文本。
 3. 不得编造输入中不存在的工具名。toolOverrides 只能使用 tools 数组里出现过的 name。
 4. 不输出密钥；输入里也不会包含密钥值，只有键名。
-5. summary 中文 + 英文关键词，≤160 字符；category 小写英文；tags 小写英文短横线词，最多 8 个，不要重复 server 已有标签。
-6. 工具描述用一句英文动作短语加分号加一句中文说明，≤200 字符；保留工具名和关键英文词，便于 BM25 检索。
-7. 如果 descriptionOverride 非 null（descriptionSource="override"），它是人工覆盖；不要主动改写，除非与 upstreamDescription 明显矛盾，改写时在 warnings 里说明。
-8. 无法判断的字段用 null 或空数组，不要猜。
+5. summary 中文 + 英文关键词，≤160 字符；tags 最多 8 个，不要重复 server 已有标签。
+6. category 尽量从下面的分类字典 key 中选；如果都不合适，把 category 设为 null，并在 categorySuggestion 给出推荐的新分类 {key, zh, en}。
+7. tags 只从下面的标签字典 key 中选；需要的新标签放进 tagSuggestions，每项 {key, zh, en}。toolOverrides[].tags 可以引用标签字典的 key 或 tagSuggestions 里的 key。
+8. 建议的 key 以小写字母或数字开头，只含小写字母、数字、点、下划线与短横线，≤32 字符；zh 与 en 都必须非空且 ≤40 字符。
+9. 禁止生成 env.*、cross-env、official、builtin：这些是部署环境与来源事实，你看不到，必须由管理员维护，也不要放进 tagSuggestions。
+10. 工具描述用一句英文动作短语加分号加一句中文说明，≤200 字符；保留工具名和关键英文词，便于 BM25 检索。
+11. 如果 descriptionOverride 非 null（descriptionSource="override"），它是人工覆盖；不要主动改写，除非与 upstreamDescription 明显矛盾，改写时在 warnings 里说明。
+12. 无法判断的字段用 null 或空数组，不要猜。
+13. 分类 key 与标签 key 不能重名；不要把分类字典里的 key 当作 tags 或 tagSuggestions 的 key。
+14. categorySuggestion 同样不能用 env.*、cross-env、official、builtin：这些由管理员维护。
+
+分类字典（category 只能从这里选）：
+${categoryKeys}
+
+标签字典（tags 只能从这里选）：
+${tagKeys}
 
 输出 JSON：
 {
   "summary": "中文摘要 (english keywords)",
   "category": "database",
-  "tags": ["db", "sql"],
+  "categorySuggestion": null,
+  "tags": ["postgresql", "query", "write"],
+  "tagSuggestions": [],
   "toolOverrides": [
-    {"name": "query", "description": "Run a read-only SQL query; 执行只读 SQL 查询", "tags": ["read", "sql"]}
+    {"name": "query", "description": "Run a read-only SQL query; 执行只读 SQL 查询", "tags": ["read", "query"]}
   ],
   "warnings": ["..."]
 }
@@ -141,6 +174,7 @@ ${toolsJson}${omittedLine}
 export function buildAnnotatePrompt(
   server: Record<string, unknown>,
   tools: readonly PromptToolView[],
+  dictionaries: AnnotateDictionaries,
   nonce: string,
   omittedBeforeCap = 0,
 ): AnnotatePromptResult {
@@ -148,7 +182,7 @@ export function buildAnnotatePrompt(
   let omitted = omittedBeforeCap + Math.max(0, tools.length - AI_MAX_TOOLS);
 
   for (;;) {
-    const prompt = renderAnnotatePrompt(server, selected, nonce, omitted);
+    const prompt = renderAnnotatePrompt(server, selected, dictionaries, nonce, omitted);
     if (Buffer.byteLength(prompt, 'utf8') <= AI_PROMPT_MAX_BYTES || selected.length === 0) {
       return { prompt, omittedTools: omitted, tools: selected };
     }

@@ -1,5 +1,5 @@
 /** Category dictionary hook plus the single-select used by server/tool forms. */
-import { Select } from 'antd';
+import { Select, type SelectProps } from 'antd';
 
 import { dictionarySelectOptions, type DictionaryEntry } from '../../lib/dictionary.ts';
 import { useDictionaryResource } from './dictionary-resource.ts';
@@ -24,14 +24,20 @@ export function CategorySelect({
   onChange,
   dictionary,
   placeholder = '从分类字典选择',
+  size,
+  style,
 }: {
   value?: string;
   onChange?: (value: string) => void;
   dictionary: readonly DictionaryEntry[];
   placeholder?: string;
+  size?: SelectProps['size'];
+  style?: SelectProps['style'];
 }): React.ReactElement {
   return (
     <Select
+      size={size}
+      style={style}
       allowClear
       showSearch
       optionFilterProp="label"

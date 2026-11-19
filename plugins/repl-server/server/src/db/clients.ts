@@ -1,4 +1,4 @@
-/** Client binding repository: token hashing, workspace realpath and quotas. @module */
+/** Client binding repository: token hashing/local plaintext, workspace realpath and quotas. @module */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -52,7 +52,7 @@ export interface ClientBindingRecord {
 export interface CreateClientBindingInput {
   id?: string;
   label: string;
-  /** Plaintext token. Generated when omitted; the caller returns it once. */
+  /** Plaintext token. Generated when omitted; kept locally so the admin UI can show it. */
   token?: string;
   defaultWorkspace?: string | null;
   allowedServers?: string[] | null;
@@ -119,7 +119,7 @@ export function getClientBinding(db: DatabaseSync, id: string): ClientBindingRec
   return row ? toBinding(row) : null;
 }
 
-/** Looks a token up by SHA-256; the plaintext is never stored. */
+/** Looks a token up by SHA-256; the plaintext lives separately in `token_plain` for the local admin UI. */
 export function findBindingByToken(db: DatabaseSync, token: string): ClientBindingRecord | null {
   if (typeof token !== 'string' || token.length === 0) return null;
   const row = db.prepare('SELECT * FROM client_bindings WHERE token_hash = ?').get(hashToken(token));
@@ -151,14 +151,15 @@ export function createClientBinding(
     if (clash) throw new DbValidationError('token is already bound to another client', 'CONFLICT');
     db.prepare(`
       INSERT INTO client_bindings (
-        id, label, token_hash, default_workspace,
+        id, label, token_hash, token_plain, default_workspace,
         allowed_servers_json, allowed_tags_json, quota_json,
         created_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     `).run(
       id,
       label,
       tokenHash,
+      token,
       defaultWorkspace,
       serializeNullableArray(allowedServers),
       serializeNullableArray(allowedTags),
@@ -166,6 +167,38 @@ export function createClientBinding(
       createdAt,
     );
     return { binding: mustGetBinding(db, id), token };
+  });
+}
+
+/** Plaintext token for the admin UI; `null` when the row or the stored token is missing. */
+export function getClientToken(db: DatabaseSync, id: string): string | null {
+  const row = db.prepare('SELECT token_plain FROM client_bindings WHERE id = ?').get(id);
+  return row ? readText(row, 'token_plain') : null;
+}
+
+/** Replaces hash and plaintext in one transaction; `null` when the binding does not exist. */
+export function rotateClientToken(
+  db: DatabaseSync,
+  id: string,
+  token: string,
+): ClientBindingRecord | null {
+  if (typeof token !== 'string' || token.length === 0) {
+    throw new DbValidationError('token must not be empty');
+  }
+  const tokenHash = hashToken(token);
+  return withTransaction(db, () => {
+    const existing = db.prepare('SELECT id FROM client_bindings WHERE id = ?').get(id);
+    if (!existing) return null;
+    const clash = db
+      .prepare('SELECT id FROM client_bindings WHERE token_hash = ? AND id <> ?')
+      .get(tokenHash, id);
+    if (clash) throw new DbValidationError('token is already bound to another client', 'CONFLICT');
+    db.prepare('UPDATE client_bindings SET token_hash = ?, token_plain = ? WHERE id = ?').run(
+      tokenHash,
+      token,
+      id,
+    );
+    return mustGetBinding(db, id);
   });
 }
 

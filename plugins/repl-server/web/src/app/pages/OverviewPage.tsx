@@ -1031,7 +1031,7 @@ function stepTodoDetail(id: OnboardingStepId): string {
     case 'tools':
       return '工具数为 0；连接服务端后点「刷新工具」。';
     case 'clients':
-      return '还没有客户端绑定；创建后明文 token 只显示一次。';
+      return '还没有客户端绑定；token 保存在本机，可在 MCP 配置里随时查看/复制。';
   }
 }
 

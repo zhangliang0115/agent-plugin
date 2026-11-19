@@ -5,9 +5,21 @@ import { canonicalToolName } from './registry.ts';
 
 export interface SearchToolsInput {
   query?: string;
+  /** MCP server id filter; excludes built-in tools when set. */
+  server?: string;
   category?: string;
   tags?: string[];
   max?: number;
+  /** Binding server allow list: null/undefined is unrestricted, [] hides every MCP tool. */
+  allowedServers?: readonly string[] | null;
+  /** Binding tag allow list (any-of): null/undefined is unrestricted, [] hides every tool. */
+  allowedTags?: readonly string[] | null;
+}
+
+/** Visibility shared by `search_tools` and `describe_tools`. */
+export interface ToolVisibility {
+  allowedServers?: readonly string[] | null;
+  allowedTags?: readonly string[] | null;
 }
 
 /** One protocol-level result item; MCP names are `<server>.<tool>`, built-ins are bare. */
@@ -15,6 +27,9 @@ export interface SearchToolItem {
   name: string;
   kind: 'builtin' | 'mcp';
   server?: string;
+  category?: string;
+  summary?: string;
+  toolCount?: number;
   description?: string;
   tags?: string[];
 }
@@ -28,24 +43,35 @@ function compareNames(left: string, right: string): number {
   return 0;
 }
 
+function normalizeTags(tags: readonly string[]): string[] {
+  return tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag !== '');
+}
+
 /**
- * Category is server-level in the config model but CatalogTool does not expose it yet, so a
- * snapshot may still carry the extra field at runtime. Fall back to the server id for MCP tools;
- * built-ins are their own group.
+ * Applies the binding allow lists. `allowedServers` constrains MCP tools only;
+ * `allowedTags` is any-of over the effective tags and constrains builtins too.
+ * Empty lists hide everything they cover.
  */
-type CatalogToolWithCategory = CatalogTool & { category?: string };
+export function isToolVisible(tool: CatalogTool, visibility: ToolVisibility = {}): boolean {
+  const { allowedServers, allowedTags } = visibility;
+  if (allowedServers != null && tool.kind === 'mcp') {
+    if (allowedServers.length === 0) return false;
+    if (tool.server === undefined || !allowedServers.includes(tool.server)) return false;
+  }
+  if (allowedTags != null) {
+    if (allowedTags.length === 0) return false;
+    const allowed = new Set(normalizeTags(allowedTags));
+    const tags = normalizeTags(tool.tags ?? []);
+    if (!tags.some((tag) => allowed.has(tag))) return false;
+  }
+  return true;
+}
 
 function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
-  if (input.category !== undefined) {
-    const declared = (tool as CatalogToolWithCategory).category;
-    if (declared !== undefined) {
-      if (declared !== input.category) return false;
-    } else if (tool.kind === 'mcp') {
-      if (tool.server !== input.category) return false;
-    } else if (input.category !== 'builtin') {
-      return false;
-    }
+  if (input.server !== undefined) {
+    if (tool.kind !== 'mcp' || tool.server !== input.server) return false;
   }
+  if (input.category !== undefined && tool.category !== input.category) return false;
   if (input.tags !== undefined && input.tags.length > 0) {
     const toolTags = tool.tags ?? [];
     for (const tag of input.tags) {
@@ -58,53 +84,78 @@ function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
 function toItem(tool: CatalogTool, name: string): SearchToolItem {
   const item: SearchToolItem = { name, kind: tool.kind };
   if (tool.kind === 'mcp' && tool.server !== undefined) item.server = tool.server;
+  if (tool.category !== undefined) item.category = tool.category;
+  if (tool.summary !== undefined) item.summary = tool.summary;
   if (tool.description !== undefined) item.description = tool.description;
   if (tool.tags !== undefined && tool.tags.length > 0) item.tags = [...tool.tags];
   return item;
 }
 
-/** Ranking only compares scores, so the absolute scale is irrelevant; zero means no match. */
+/**
+ * Ranking only compares scores, so the absolute scale is irrelevant; zero means
+ * no match. Canonical names match exactly (`pg.query`), but substring matching
+ * uses the bare tool name so the server id never becomes a keyword.
+ */
 function scoreTool(tool: CatalogTool, canonicalName: string, terms: readonly string[]): number {
   const canonical = canonicalName.toLowerCase();
   const bareName = tool.name.toLowerCase();
   const tags = (tool.tags ?? []).map((tag) => tag.toLowerCase());
-  const server = (tool.server ?? '').toLowerCase();
   const description = (tool.description ?? '').toLowerCase();
 
   let score = 0;
   for (const term of terms) {
     if (canonical === term || bareName === term) score += 10;
-    else if (canonical.includes(term)) score += 4;
     else if (bareName.includes(term)) score += 3;
 
     if (tags.some((tag) => tag === term)) score += 2;
     else if (tags.some((tag) => tag.includes(term))) score += 1;
-    if (server.includes(term)) score += 1.5;
     if (description.includes(term)) score += 1;
   }
   return score;
 }
 
-function enabledTools(snapshot: CatalogSnapshot): CatalogTool[] {
-  return snapshot.tools.filter((tool) => tool.enabled);
+function visibleTools(snapshot: CatalogSnapshot, input: SearchToolsInput): CatalogTool[] {
+  return snapshot.tools.filter(
+    (tool) => tool.enabled && isToolVisible(tool, input) && matchesFilters(tool, input),
+  );
 }
 
 /**
- * Empty query returns the server overview: one item per MCP server with its tool count and the
- * call form. Non-empty queries score name, tags, server and description and return at most `max`.
+ * Discovery semantics:
+ * - empty query, no `server`: server overview (category, summary, tags, tool count);
+ * - empty query, `server` set: that server's tools, alphabetically, up to `max`;
+ * - non-empty query: tool search over name, tags and description, with
+ *   server/category/tags as structural narrowing only.
+ * Server summary and server id never participate in keyword matching.
  */
 export function searchTools(snapshot: CatalogSnapshot, input: SearchToolsInput): SearchToolItem[] {
-  const tools = enabledTools(snapshot).filter((tool) => matchesFilters(tool, input));
+  const tools = visibleTools(snapshot, input);
   const limit = input.max ?? SEARCH_DEFAULT_MAX;
   const query = (input.query ?? '').trim();
 
   if (query === '') {
-    const servers = new Map<string, { count: number; tags: Set<string> }>();
+    if (input.server !== undefined) {
+      return tools
+        .map((tool) => ({ tool, name: canonicalToolName(tool) }))
+        .sort((left, right) => compareNames(left.name, right.name))
+        .slice(0, limit)
+        .map((entry) => toItem(entry.tool, entry.name));
+    }
+    const servers = new Map<
+      string,
+      { count: number; tags: Set<string>; category?: string; summary?: string }
+    >();
     for (const tool of tools) {
       if (tool.kind !== 'mcp' || tool.server === undefined || tool.server === '') continue;
       const summary = servers.get(tool.server) ?? { count: 0, tags: new Set<string>() };
       summary.count += 1;
       for (const tag of tool.tags ?? []) summary.tags.add(tag);
+      if (summary.category === undefined && tool.category !== undefined) {
+        summary.category = tool.category;
+      }
+      if (summary.summary === undefined && tool.summary !== undefined) {
+        summary.summary = tool.summary;
+      }
       servers.set(tool.server, summary);
     }
     return [...servers.entries()]
@@ -115,8 +166,11 @@ export function searchTools(snapshot: CatalogSnapshot, input: SearchToolsInput):
           name: server,
           kind: 'mcp',
           server,
+          toolCount: summary.count,
           description: `${summary.count} tool${summary.count === 1 ? '' : 's'}; call tools.mcp.${server}.<tool>(args)`,
         };
+        if (summary.category !== undefined) item.category = summary.category;
+        if (summary.summary !== undefined) item.summary = summary.summary;
         if (summary.tags.size > 0) {
           item.tags = [...summary.tags].sort((left, right) => compareNames(left, right));
         }

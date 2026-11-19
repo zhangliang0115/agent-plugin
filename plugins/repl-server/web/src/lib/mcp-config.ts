@@ -1,15 +1,12 @@
-/** MCP client snippets for a client binding. The token is only ever held in memory. @module */
+/** MCP client snippets for a client binding. @module */
 
 /** Server name used by the docs and the JSON snippet. */
 export const MCP_SERVER_NAME = 'repl';
 
-/** Stand-in shown when the plaintext token can no longer be read. */
-export const TOKEN_PLACEHOLDER = '<TOKEN>';
-
 export interface McpSnippetInput {
   /** MCP endpoint; it lives on the same origin as the admin UI. */
   url: string;
-  /** Plaintext binding token, or {@link TOKEN_PLACEHOLDER}. */
+  /** Plaintext binding token. */
   token: string;
 }
 

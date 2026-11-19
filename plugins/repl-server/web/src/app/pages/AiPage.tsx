@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { useCategoryDictionary } from '../components/CategorySelect.tsx';
+import { tagLabel, useTagDictionary } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatTimestamp } from '../../lib/format.ts';
@@ -49,10 +50,18 @@ interface ToolOverride {
   tags?: string[];
 }
 
+interface DictionarySuggestion {
+  key: string;
+  zh: string;
+  en: string;
+}
+
 interface AnnotationProposed {
   summary: string | null;
   category: string | null;
+  categorySuggestion?: DictionarySuggestion | null;
   tags: string[];
+  tagSuggestions?: DictionarySuggestion[];
   toolOverrides: ToolOverride[];
 }
 
@@ -109,7 +118,8 @@ interface AnnotationReview {
 export function AiPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
-  const { categories: categoryDefinitions } = useCategoryDictionary();
+  const { categories: categoryDefinitions, reload: reloadCategories } = useCategoryDictionary();
+  const { tags: tagDefinitions, reload: reloadTags } = useTagDictionary();
   const [config, setConfig] = useState<AiConfigView | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
   const [pending, setPending] = useState<PendingAnnotationView[]>([]);
@@ -280,7 +290,60 @@ export function AiPage(): React.ReactElement {
     });
   }
 
+  function editCategorySuggestion(field: keyof DictionarySuggestion, value: string): void {
+    setReview((current) => {
+      const suggestion = current?.proposed.categorySuggestion;
+      if (current === null || suggestion === null || suggestion === undefined) return current;
+      return {
+        ...current,
+        proposed: {
+          ...current.proposed,
+          categorySuggestion: { ...suggestion, [field]: value },
+        },
+      };
+    });
+  }
+
+  function editTagSuggestion(index: number, field: keyof DictionarySuggestion, value: string): void {
+    setReview((current) => {
+      const suggestions = [...(current?.proposed.tagSuggestions ?? [])];
+      const target = suggestions[index];
+      if (current === null || target === undefined) return current;
+      suggestions[index] = { ...target, [field]: value };
+      const proposed: AnnotationProposed = { ...current.proposed, tagSuggestions: suggestions };
+      if (field === 'key') {
+        proposed.toolOverrides = renameToolTagReferences(
+          current.proposed.toolOverrides,
+          target.key,
+          value,
+        );
+      }
+      return { ...current, proposed };
+    });
+  }
+
+  function rejectCategorySuggestion(): void {
+    setReview((current) =>
+      current === null || current.proposed.categorySuggestion == null
+        ? current
+        : { ...current, proposed: { ...current.proposed, categorySuggestion: null } },
+    );
+  }
+
+  function rejectTagSuggestion(index: number): void {
+    setReview((current) => {
+      if (current === null) return current;
+      const dictionaryKeys = new Set(tagDefinitions.map((tag) => tag.key));
+      return { ...current, proposed: rejectTagSuggestionAt(current.proposed, index, dictionaryKeys) };
+    });
+  }
+
   async function applyAnnotation(target: AnnotationReview): Promise<void> {
+    const invalid = suggestionValidationError(target.proposed, categoryDefinitions);
+    if (invalid !== null) {
+      message.error(invalid);
+      return;
+    }
     const ok = await confirm(
       '应用标注',
       `把 ${target.serverId} 的标注建议写入 catalog（summary/category/tags 与工具覆盖）？`,
@@ -295,10 +358,7 @@ export function AiPage(): React.ReactElement {
         message.error('没有读取到服务端配置的 revision，请刷新后重试。');
         return;
       }
-      const server = Array.isArray(serversResponse.servers)
-        ? serversResponse.servers.find((entry) => entry.id === target.serverId)
-        : undefined;
-      const body = buildApplyBody(target.proposed, server?.tags ?? []);
+      const body = buildApplyBody(target.proposed);
       if (Object.keys(body).length === 0) {
         message.error('这条标注没有可应用的字段。');
         return;
@@ -312,7 +372,7 @@ export function AiPage(): React.ReactElement {
       if (changed === 0) message.info('标注没有变化。');
       else message.success(`已应用标注：${changed} 项变更。`);
       setReview(null);
-      await Promise.all([loadPending(), loadServers()]);
+      await Promise.all([loadPending(), loadServers(), reloadCategories(), reloadTags()]);
     } catch (error) {
       message.error(aiErrorText(error));
     } finally {
@@ -342,14 +402,24 @@ export function AiPage(): React.ReactElement {
     {
       title: '标签（tags）',
       width: 220,
-      render: (_value, record) =>
-        record.proposed.tags.length === 0
-          ? '—'
-          : record.proposed.tags.map((tag) => (
-              <Tag key={tag} bordered={false}>
-                {tag}
+      render: (_value, record) => {
+        const suggestions = record.proposed.tagSuggestions ?? [];
+        if (record.proposed.tags.length === 0 && suggestions.length === 0) return '—';
+        return (
+          <Space size={4} wrap>
+            {record.proposed.tags.map((tag) => (
+              <Tag key={tag} bordered={false} title={tag}>
+                {tagLabel(tagDefinitions, tag)}
               </Tag>
-            )),
+            ))}
+            {suggestions.map((suggestion) => (
+              <Tag key={`new-${suggestion.key}`} color="gold" bordered={false} title={suggestion.en}>
+                {suggestion.zh}（建议）
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
     },
     {
       title: '提示',
@@ -478,7 +548,8 @@ export function AiPage(): React.ReactElement {
           </Button>
         </Space>
         <Typography.Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0 }}>
-          调用会把工具名与描述发送给模型；结果先预览，应用前人工核对。
+          调用会把工具名与描述发送给模型；结果先预览，应用前人工核对。一句话生成 MCP
+          配置在“服务端”页的“AI 生成配置”。
         </Typography.Paragraph>
       </Card>
       <Card
@@ -557,16 +628,96 @@ export function AiPage(): React.ReactElement {
                 {review.current.summary ?? '—'} → {review.proposed.summary ?? '—'}
               </Descriptions.Item>
               <Descriptions.Item label="category">
-                {review.current.category === null
-                  ? '—'
-                  : dictionaryLabel(categoryDefinitions, review.current.category)}{' '}
-                →{' '}
-                {review.proposed.category === null
-                  ? '—'
-                  : dictionaryLabel(categoryDefinitions, review.proposed.category)}
+                <Space wrap size={6}>
+                  <span>
+                    {review.current.category === null
+                      ? '—'
+                      : dictionaryLabel(categoryDefinitions, review.current.category)}
+                  </span>
+                  <span>→</span>
+                  {review.proposed.category !== null ? (
+                    <Tag color="blue" bordered={false}>
+                      {dictionaryLabel(categoryDefinitions, review.proposed.category)}
+                    </Tag>
+                  ) : review.proposed.categorySuggestion == null ? (
+                    <span className="muted">—</span>
+                  ) : (
+                    <Tag color="gold" bordered={false}>
+                      建议新分类 {review.proposed.categorySuggestion.key}
+                    </Tag>
+                  )}
+                </Space>
+                {review.proposed.categorySuggestion == null ? null : (
+                  <Space wrap size={6} style={{ marginTop: 8 }}>
+                    <Input
+                      size="small"
+                      style={{ width: 140 }}
+                      placeholder="key"
+                      value={review.proposed.categorySuggestion.key}
+                      onChange={(event) => editCategorySuggestion('key', event.target.value)}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 140 }}
+                      placeholder="中文"
+                      value={review.proposed.categorySuggestion.zh}
+                      onChange={(event) => editCategorySuggestion('zh', event.target.value)}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 160 }}
+                      placeholder="English"
+                      value={review.proposed.categorySuggestion.en}
+                      onChange={(event) => editCategorySuggestion('en', event.target.value)}
+                    />
+                    <Button size="small" danger onClick={rejectCategorySuggestion}>
+                      拒绝
+                    </Button>
+                  </Space>
+                )}
               </Descriptions.Item>
               <Descriptions.Item label="tags">
-                {review.current.tags.join(', ') || '—'} ∪ {review.proposed.tags.join(', ') || '—'}
+                <AnnotationTags
+                  current={review.current.tags}
+                  proposed={review.proposed.tags}
+                  suggestions={review.proposed.tagSuggestions ?? []}
+                  dictionary={tagDefinitions}
+                />
+                {(review.proposed.tagSuggestions ?? []).map((suggestion, index) => (
+                  <Space key={index} wrap size={6} style={{ marginTop: 6, display: 'flex' }}>
+                    <Tag color="gold" bordered={false}>
+                      建议新标签
+                    </Tag>
+                    <Input
+                      size="small"
+                      style={{ width: 140 }}
+                      placeholder="key"
+                      value={suggestion.key}
+                      onChange={(event) => editTagSuggestion(index, 'key', event.target.value)}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 140 }}
+                      placeholder="中文"
+                      value={suggestion.zh}
+                      onChange={(event) => editTagSuggestion(index, 'zh', event.target.value)}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: 160 }}
+                      placeholder="English"
+                      value={suggestion.en}
+                      onChange={(event) => editTagSuggestion(index, 'en', event.target.value)}
+                    />
+                    <Button size="small" danger onClick={() => rejectTagSuggestion(index)}>
+                      拒绝
+                    </Button>
+                  </Space>
+                ))}
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                  已有标签全部保留，AI 只做新增；建议的新分类/新标签在应用时自动写入字典，不需要的可在行内点“拒绝”移除。
+                  env.*、official、builtin 由管理员维护，不会被 AI 删除或新增。
+                </Typography.Text>
               </Descriptions.Item>
             </Descriptions>
             <Table<ToolOverride>
@@ -600,8 +751,8 @@ export function AiPage(): React.ReactElement {
                     value === undefined || value.length === 0
                       ? '—'
                       : value.map((tag) => (
-                          <Tag key={tag} bordered={false}>
-                            {tag}
+                          <Tag key={tag} bordered={false} title={tag}>
+                            {tagLabel(tagDefinitions, tag)}
                           </Tag>
                         )),
                 },
@@ -633,12 +784,131 @@ function reviewFromPending(
   };
 }
 
-function buildApplyBody(proposed: AnnotationProposed, currentTags: readonly string[]): Record<string, unknown> {
+/** Category dictionary rule (`server/src/ai/validate.ts` CATEGORY_PATTERN). */
+const CATEGORY_SUGGESTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+/** Tag dictionary rule (`server/src/ai/validate.ts` TAG_PATTERN). */
+const TAG_SUGGESTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+const SUGGESTION_LABEL_MAX = 40;
+/** Deployment/provenance keys the server refuses as new tag suggestions. */
+const RESERVED_SUGGESTION_KEYS = new Set(['official', 'builtin', 'cross-env']);
+
+function isReservedSuggestionKey(key: string): boolean {
+  return key.startsWith('env.') || RESERVED_SUGGESTION_KEYS.has(key);
+}
+
+/** Editing a suggestion key must follow the tool overrides that reference it. */
+export function renameToolTagReferences(
+  overrides: readonly ToolOverride[],
+  previousKey: string,
+  nextKey: string,
+): ToolOverride[] {
+  if (previousKey === nextKey) return [...overrides];
+  return overrides.map((override) =>
+    override.tags === undefined
+      ? { ...override }
+      : {
+          ...override,
+          tags: [...new Set(override.tags.map((tag) => (tag === previousKey ? nextKey : tag)))],
+        },
+  );
+}
+
+/** Drops one tag suggestion and keeps tool overrides valid when the key was only a suggestion. */
+export function rejectTagSuggestionAt(
+  proposed: AnnotationProposed,
+  index: number,
+  dictionaryKeys: ReadonlySet<string>,
+): AnnotationProposed {
+  const suggestions = proposed.tagSuggestions ?? [];
+  const rejected = suggestions[index];
+  if (rejected === undefined) return proposed;
+  const tagSuggestions = suggestions.filter((_, position) => position !== index);
+  if (dictionaryKeys.has(rejected.key)) return { ...proposed, tagSuggestions };
+  const toolOverrides = proposed.toolOverrides.map((override) =>
+    override.tags === undefined
+      ? override
+      : { ...override, tags: override.tags.filter((tag) => tag !== rejected.key) },
+  );
+  return { ...proposed, tagSuggestions, toolOverrides };
+}
+
+function suggestionShapeError(
+  label: string,
+  suggestion: DictionarySuggestion,
+  pattern: RegExp,
+): string | null {
+  const key = suggestion.key.trim();
+  if (key === '') return `${label} key 不能为空。`;
+  if (!pattern.test(key)) {
+    return `${label} key 不合法：需以小写字母或数字开头，仅含小写字母、数字、点、下划线、连接线，最长 32 个字符。`;
+  }
+  if (suggestion.zh.trim() === '') return `${label} 中文名不能为空。`;
+  if (suggestion.en.trim() === '') return `${label} 英文名不能为空。`;
+  if (suggestion.zh.trim().length > SUGGESTION_LABEL_MAX) {
+    return `${label} 中文名不能超过 ${SUGGESTION_LABEL_MAX} 个字符。`;
+  }
+  if (suggestion.en.trim().length > SUGGESTION_LABEL_MAX) {
+    return `${label} 英文名不能超过 ${SUGGESTION_LABEL_MAX} 个字符。`;
+  }
+  return null;
+}
+
+/** Mirrors the server-side validation so obviously invalid suggestions never reach a 422. */
+export function suggestionValidationError(
+  proposed: AnnotationProposed,
+  categories: readonly { key: string }[],
+): string | null {
+  const categoryKeys = new Set(categories.map((entry) => entry.key));
+  // buildApplyBody only sends the suggestion when no concrete category was chosen.
+  const categorySuggestion = proposed.category === null ? proposed.categorySuggestion ?? null : null;
+  if (categorySuggestion !== null) {
+    const error = suggestionShapeError(
+      '建议分类',
+      categorySuggestion,
+      CATEGORY_SUGGESTION_KEY_PATTERN,
+    );
+    if (error !== null) return error;
+    const key = categorySuggestion.key.trim();
+    // A key already in the dictionary is an existing category, not a new reserved name.
+    if (!categoryKeys.has(key) && isReservedSuggestionKey(key)) {
+      return '建议分类 key 不能是 official、builtin、cross-env，也不能以 env. 开头。';
+    }
+  }
+  for (const [index, suggestion] of (proposed.tagSuggestions ?? []).entries()) {
+    const label = `建议标签第 ${index + 1} 项`;
+    const error = suggestionShapeError(label, suggestion, TAG_SUGGESTION_KEY_PATTERN);
+    if (error !== null) return error;
+    const key = suggestion.key.trim();
+    if (isReservedSuggestionKey(key)) {
+      return `${label} key 不能是 official、builtin、cross-env，也不能以 env. 开头。`;
+    }
+    if (categoryKeys.has(key)) return `${label} key 与现有分类 ${key} 重复。`;
+  }
+  return null;
+}
+
+function trimSuggestion(suggestion: DictionarySuggestion): DictionarySuggestion {
+  return {
+    key: suggestion.key.trim(),
+    zh: suggestion.zh.trim(),
+    en: suggestion.en.trim(),
+  };
+}
+
+export function buildApplyBody(proposed: AnnotationProposed): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (proposed.summary !== null) body['summary'] = proposed.summary;
-  if (proposed.category !== null) body['category'] = proposed.category;
-  const tags = [...new Set([...currentTags, ...proposed.tags])];
+  if (proposed.category !== null) {
+    body['category'] = proposed.category;
+  } else if (proposed.categorySuggestion != null) {
+    body['categorySuggestion'] = trimSuggestion(proposed.categorySuggestion);
+  }
+  // The server merges tags into the existing set; sending only the proposal
+  // keeps "AI cannot delete tags" a server-side guarantee.
+  const tags = [...new Set(proposed.tags)];
   if (tags.length > 0) body['tags'] = tags;
+  const tagSuggestions = (proposed.tagSuggestions ?? []).map(trimSuggestion);
+  if (tagSuggestions.length > 0) body['tagSuggestions'] = tagSuggestions;
   const overrides: Array<Record<string, unknown>> = [];
   for (const override of proposed.toolOverrides) {
     const entry: Record<string, unknown> = { name: override.name };
@@ -650,6 +920,44 @@ function buildApplyBody(proposed: AnnotationProposed, currentTags: readonly stri
   }
   if (overrides.length > 0) body['toolOverrides'] = overrides;
   return body;
+}
+
+/** Existing tags kept as-is plus the model's new existing tags and suggestions. */
+function AnnotationTags({
+  current,
+  proposed,
+  suggestions,
+  dictionary,
+}: {
+  current: readonly string[];
+  proposed: readonly string[];
+  suggestions: readonly DictionarySuggestion[];
+  dictionary: readonly { key: string; zh: string; en: string }[];
+}): React.ReactElement {
+  const currentSet = new Set(current);
+  const added = proposed.filter((tag) => !currentSet.has(tag));
+  if (current.length === 0 && added.length === 0 && suggestions.length === 0) {
+    return <span className="muted">—</span>;
+  }
+  return (
+    <Space size={4} wrap>
+      {current.map((tag) => (
+        <Tag key={`keep-${tag}`} bordered={false} title={tag}>
+          {tagLabel(dictionary, tag)}（保留）
+        </Tag>
+      ))}
+      {added.map((tag) => (
+        <Tag key={`add-${tag}`} color="green" bordered={false} title={tag}>
+          {tagLabel(dictionary, tag)}（新增）
+        </Tag>
+      ))}
+      {suggestions.map((suggestion) => (
+        <Tag key={`new-${suggestion.key}`} color="gold" bordered={false} title={suggestion.en}>
+          {suggestion.zh}（建议新标签）
+        </Tag>
+      ))}
+    </Space>
+  );
 }
 
 function emptyToNull(value: string): string | null {

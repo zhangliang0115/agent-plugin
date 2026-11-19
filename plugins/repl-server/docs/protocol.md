@@ -97,7 +97,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 返回 5 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`。每个工具带：
 
-- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节，超出从列表尾部截断；其余一句话（`report_problem` ≤500 字符）
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call`/`Find`/`Args` 优先保留，server 行从列表尾部截断。其余工具一句话（`report_problem` ≤500 字符）
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
@@ -177,20 +177,27 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ### `search_tools`
 
+`tools/list` 每次请求生成该定义：`server` 的 `enum` 是本次请求可见的 MCP server id（含 idle / 0 工具 server，去重排序）；`category` / `tags.items` 的 `enum` 只含本次请求可见工具里实际存在的值（去重排序）。对应集合为空时属性保留但不给 `enum`。`tools/call` 用同一份定义校验，enum 外的值返回 `INVALID_ARGUMENT`。
+
 ```json
 {
   "type": "object",
   "properties": {
     "query": { "type": "string" },
-    "category": { "type": "string" },
-    "tags": { "type": "array", "items": { "type": "string" } },
+    "server": { "type": "string", "enum": ["<可见 MCP server id>"] },
+    "category": { "type": "string", "enum": ["<可见分类>"] },
+    "tags": { "type": "array", "items": { "type": "string", "enum": ["<可见标签>"] } },
     "max": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
   },
   "additionalProperties": false
 }
 ```
 
-结果项：`{ "name": "<server>.<tool>", "kind": "builtin"|"mcp", "server?": "...", "description?": "...", "tags?": [] }`。空 `query` 返回 server 概览。
+- 空 `query` 未传 `server`：返回 server 概览，每项 `{ "name", "kind": "mcp", "server", "category?", "summary?", "tags?", "toolCount", "description" }`。
+- 空 `query` 传 `server`：返回该 server 的 MCP 工具列表（仍受 `category`/`tags`/`max` 收窄），按规范名排序。
+- 非空 `query`：在工具名、有效 tags、工具 description 中匹配；`server`/`category`/`tags` 只做结构化收窄，server id 与 server summary 不参与关键词匹配。`tags` 是 all-of。
+- 结果项 `{ "name": "<server>.<tool>", "kind": "builtin"|"mcp", "server?", "category?", "summary?", "description?", "tags?" }`。
+- 可见性：`allowed_servers` 只约束 MCP 工具（builtin 不受约束）；`allowed_tags` 对有效 tags 做 any-of 且同样约束 builtin；空列表表示全部不可见。
 
 ### `describe_tools`
 
@@ -263,7 +270,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ## 5. `instructions`
 
-`instructions` 放完整提示词（02 §4.2 的模板），其中 MCP 段按当前请求可见的 server 列表替换；`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
+`instructions` 放完整提示词（02 §4.2 的模板），其中 MCP 段按当前请求可见的 server 列表替换，逐个列出 server id、category、工具数和 summary；不重复整份分类/标签词表，只说明过滤值见 `search_tools` 的 schema。`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
 
 ## 6. 任务方法
 

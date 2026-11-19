@@ -3,10 +3,16 @@
 import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import type { ReportService } from '../reports/service.ts';
-import { describeTools, type DescribeToolsInput } from './describe.ts';
+import { DESCRIBE_BUDGET_CHARS, describeTools, type DescribeToolsInput } from './describe.ts';
 import { reportProblemCall } from './report.ts';
-import { toCallToolResult, validateToolArguments, type CallToolResult } from './registry.ts';
-import { searchTools, type SearchToolsInput } from './search.ts';
+import {
+  getToolDefinition,
+  toCallToolResult,
+  validateToolArguments,
+  type CallToolResult,
+  type ToolDefinition,
+} from './registry.ts';
+import { searchTools, type SearchToolsInput, type ToolVisibility } from './search.ts';
 import {
   McpTaskStore,
   ownerOf,
@@ -30,6 +36,10 @@ export interface ToolCallContext {
   tasksDeclared?: boolean;
   /** Wired by assembly; absent in focused tests, which makes report_problem fail closed. */
   reports?: ReportService;
+  /** Binding allow lists applied to search_tools and describe_tools for this request. */
+  visibility?: ToolVisibility;
+  /** This request's search_tools definition, carrying the catalog-derived enums. */
+  searchToolsDefinition?: ToolDefinition;
 }
 
 export type ToolCallResponse = CallToolResult | CreateTaskResult;
@@ -193,9 +203,13 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
 }
 
 async function searchToolsCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
-  const validation = validateToolArguments('search_tools', input);
+  const definition = ctx.searchToolsDefinition ?? getToolDefinition('search_tools');
+  const validation = validateToolArguments('search_tools', input, definition);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
-  const items = searchTools(ctx.catalog.snapshot(), validation.value as SearchToolsInput);
+  const items = searchTools(ctx.catalog.snapshot(), {
+    ...(validation.value as SearchToolsInput),
+    ...(ctx.visibility ?? {}),
+  });
   return jsonResult(items, false);
 }
 
@@ -203,7 +217,10 @@ async function describeToolsCall(input: unknown, ctx: ToolCallContext): Promise<
   const validation = validateToolArguments('describe_tools', input);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
   const args = validation.value as unknown as DescribeToolsInput;
-  return jsonResult(describeTools(ctx.catalog.snapshot(), args.names), false);
+  return jsonResult(
+    describeTools(ctx.catalog.snapshot(), args.names, DESCRIBE_BUDGET_CHARS, ctx.visibility),
+    false,
+  );
 }
 
 function waitTasksFailure(error: unknown): { ok: false; error: Record<string, unknown> } | undefined {

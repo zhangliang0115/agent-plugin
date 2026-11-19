@@ -24,7 +24,9 @@ import {
   createClientBinding,
   deleteClientBinding,
   getClientBinding,
+  getClientToken,
   listClientBindings,
+  rotateClientToken,
   updateClientBinding,
   type ClientBindingRecord,
 } from './db/clients.ts';
@@ -256,6 +258,15 @@ export class DbClientBindingStore implements ClientBindingStore {
     const row = updateClientBinding(this.db, id, patch as Parameters<typeof updateClientBinding>[2]);
     if (row === null) throw new Error(`client ${id} not found`);
     return toAdminBinding(row);
+  }
+
+  async token(id: string): Promise<string | null> {
+    return getClientToken(this.db, id);
+  }
+
+  async rotateToken(id: string, token: string): Promise<AdminClientBinding | null> {
+    const row = rotateClientToken(this.db, id, token);
+    return row === null ? null : toAdminBinding(row);
   }
 
   async remove(id: string): Promise<boolean> {

@@ -89,7 +89,14 @@ function makeHandler(
     annotatePreview: async (serverId) => ({
       serverId,
       current: { summary: null, summarySource: null, category: null, tags: [] },
-      proposed: { summary: 's', category: 'database', tags: ['db'], toolOverrides: [] },
+      proposed: {
+        summary: 's',
+        category: 'database',
+        categorySuggestion: null,
+        tags: ['db'],
+        tagSuggestions: [],
+        toolOverrides: [],
+      },
       warnings: [],
       omittedTools: 0,
       meta: { model: null, durationMs: 1, promptVersion: 1, costUsd: null },
@@ -99,7 +106,22 @@ function makeHandler(
       return { server: SERVER_VIEW, tools: [], revision: expected + 1, changed: ['server.summary'] };
     },
     pendingAnnotations: async () => ({
-      items: [{ serverId: 'pg', proposed: { summary: 's', category: null, tags: [], toolOverrides: [] }, warnings: [], omittedTools: 0, createdAt: 'x' }],
+      items: [
+        {
+          serverId: 'pg',
+          proposed: {
+            summary: 's',
+            category: null,
+            categorySuggestion: null,
+            tags: [],
+            tagSuggestions: [],
+            toolOverrides: [],
+          },
+          warnings: [],
+          omittedTools: 0,
+          createdAt: 'x',
+        },
+      ],
     }),
     onServerCreated: () => undefined,
     onToolsIndexed: async () => undefined,

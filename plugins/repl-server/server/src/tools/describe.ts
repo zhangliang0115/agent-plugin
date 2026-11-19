@@ -2,6 +2,7 @@
 
 import type { CatalogSnapshot } from '../ports.ts';
 import { canonicalToolName } from './registry.ts';
+import { isToolVisible, type ToolVisibility } from './search.ts';
 
 /** The batch budget from docs/protocol.md §4: 32000 characters, measured on serialized entries. */
 export const DESCRIBE_BUDGET_CHARS = 32_000;
@@ -24,15 +25,18 @@ export interface DescribeToolsResult {
  * Individual schemas are never truncated. Entries are packed in request order until the budget is
  * reached; the rest are reported in `omitted`. A single schema that exceeds the budget by itself
  * is returned alone without an omission hint, so retrying with fewer names cannot dead-loop.
+ * Tools hidden by the request visibility are treated like unknown names.
  */
 export function describeTools(
   snapshot: CatalogSnapshot,
   names: readonly string[],
   budget: number = DESCRIBE_BUDGET_CHARS,
+  visibility: ToolVisibility = {},
 ): DescribeToolsResult {
   const available = new Map<string, DescribedTool>();
   for (const tool of snapshot.tools) {
     if (!tool.enabled) continue;
+    if (!isToolVisible(tool, visibility)) continue;
     const name = canonicalToolName(tool);
     available.set(name, { name, inputSchema: tool.inputSchema });
   }

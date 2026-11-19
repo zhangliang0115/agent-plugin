@@ -962,6 +962,7 @@ test('C-01..C-05: applied rows reach search_tools/describe_tools and honour stal
       name: 'lazy',
       kind: 'mcp',
       server: 'lazy',
+      toolCount: 3,
       description: '3 tools; call tools.mcp.lazy.<tool>(args)',
     },
   ]);

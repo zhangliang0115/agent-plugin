@@ -1,4 +1,4 @@
-/** MCP snippet builders: JSON shape, placeholder mode and the Claude Code command. */
+/** MCP snippet builders: JSON shape and the Claude Code command. */
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -6,7 +6,6 @@ import {
   buildClaudeMcpAddCommand,
   buildMcpConfigText,
   mcpEndpoint,
-  TOKEN_PLACEHOLDER,
 } from '../src/lib/mcp-config.ts';
 
 const URL = 'http://127.0.0.1:8787/mcp';
@@ -20,11 +19,6 @@ test('buildMcpConfigText emits an mcpServers entry with the bearer header', () =
   assert.equal(server.type, 'http');
   assert.equal(server.url, URL);
   assert.equal(server.headers['Authorization'], 'Bearer secret-token');
-});
-
-test('buildMcpConfigText keeps the placeholder verbatim for existing bindings', () => {
-  const text = buildMcpConfigText({ url: URL, token: TOKEN_PLACEHOLDER });
-  assert.ok(text.includes('"Authorization": "Bearer <TOKEN>"'));
 });
 
 test('buildClaudeMcpAddCommand matches the verified `claude mcp add` syntax', () => {

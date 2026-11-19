@@ -299,7 +299,13 @@ test('run_script description and instructions follow the client binding visibili
     allowedTags: ['git'],
   });
 
-  async function look(token?: string): Promise<{ description: string; instructions: string }> {
+  async function look(
+    token?: string,
+  ): Promise<{
+    description: string;
+    instructions: string;
+    searchSchema: Record<string, unknown>;
+  }> {
     const headers: Record<string, string> =
       token === undefined ? {} : { authorization: `Bearer ${token}` };
     const list = await rpc(
@@ -309,9 +315,14 @@ test('run_script description and instructions follow the client binding visibili
       headers,
     );
     const listed = (await list.json()) as {
-      result: { tools: Array<{ name: string; description: string }> };
+      result: {
+        tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+      };
     };
-    const description = listed.result.tools.find((tool) => tool.name === 'run_script')?.description ?? '';
+    const runScript = listed.result.tools.find((tool) => tool.name === 'run_script');
+    const searchTools = listed.result.tools.find((tool) => tool.name === 'search_tools');
+    const description = runScript?.description ?? '';
+    const searchSchema = searchTools?.inputSchema ?? {};
 
     const discover = await rpc(
       app.base,
@@ -320,27 +331,87 @@ test('run_script description and instructions follow the client binding visibili
       headers,
     );
     const discovered = (await discover.json()) as { result: { instructions: string } };
-    return { description, instructions: discovered.result.instructions };
+    return { description, instructions: discovered.result.instructions, searchSchema };
+  }
+
+  async function search(
+    token: string | undefined,
+    args: Record<string, unknown>,
+  ): Promise<{
+    isError: boolean;
+    text: string;
+    items: Array<{ name: string; category?: string; summary?: string }>;
+  }> {
+    const headers: Record<string, string> =
+      token === undefined ? {} : { authorization: `Bearer ${token}` };
+    const response = await rpc(
+      app.base,
+      {
+        jsonrpc: '2.0',
+        id: 13,
+        method: 'tools/call',
+        params: { name: 'search_tools', arguments: args },
+      },
+      undefined,
+      headers,
+    );
+    const body = (await response.json()) as {
+      result: { isError: boolean; content: Array<{ type: string; text: string }> };
+    };
+    const text = body.result.content[0]?.text ?? 'null';
+    return {
+      isError: body.result.isError,
+      text,
+      items: JSON.parse(text) as Array<{ name: string; category?: string; summary?: string }>,
+    };
   }
 
   const alpha = await look(alphaClient.token);
-  assert.ok(alpha.description.includes('alpha  database — Alpha database tools (1 tool)'));
+  assert.ok(alpha.description.includes('alpha  [database]  1 tools'));
+  assert.ok(!alpha.description.includes('Alpha database tools'), 'summary stays out of the 2KB line');
   assert.ok(!alpha.description.includes('beta'));
   assert.ok(!alpha.description.includes('issues'));
-  assert.ok(alpha.instructions.includes('MCP servers visible to this client: alpha.'));
+  assert.ok(alpha.instructions.includes('- alpha [database] 1 tool — Alpha database tools'));
   assert.ok(!alpha.instructions.includes('beta'));
 
+  const alphaProperties = alpha.searchSchema['properties'] as Record<string, Record<string, unknown>>;
+  assert.deepEqual(alphaProperties['server']?.['enum'], ['alpha']);
+  assert.deepEqual(alphaProperties['category']?.['enum'], ['database']);
+  assert.deepEqual((alphaProperties['tags']?.['items'] as Record<string, unknown>)?.['enum'], ['db']);
+
+  const byServer = await search(alphaClient.token, { server: 'alpha' });
+  assert.equal(byServer.isError, false);
+  assert.deepEqual(byServer.items.map((item) => item.name), ['alpha.query']);
+  assert.equal(byServer.items[0]?.category, 'database');
+  assert.equal(byServer.items[0]?.summary, 'Alpha database tools');
+
+  const invisibleServer = await search(alphaClient.token, { server: 'beta' });
+  assert.equal(invisibleServer.isError, true);
+  assert.match(invisibleServer.text, /INVALID_ARGUMENT/);
+
+  const invisibleCategory = await search(alphaClient.token, { category: 'vcs' });
+  assert.equal(invisibleCategory.isError, true, 'enum-out category is INVALID_ARGUMENT');
+
   const git = await look(gitClient.token);
-  assert.ok(git.description.includes('beta  vcs — Beta repository tools (1 tool)'));
+  assert.ok(git.description.includes('beta  [vcs]  1 tools'));
   assert.ok(!git.description.includes('alpha'));
-  assert.ok(git.instructions.includes('MCP servers visible to this client: beta.'));
+  assert.ok(git.instructions.includes('- beta [vcs] 1 tool — Beta repository tools'));
   assert.ok(!git.instructions.includes('alpha'));
+  const gitProperties = git.searchSchema['properties'] as Record<string, Record<string, unknown>>;
+  assert.deepEqual(gitProperties['server']?.['enum'], ['beta']);
+  assert.deepEqual((gitProperties['tags']?.['items'] as Record<string, unknown>)?.['enum'], ['git']);
 
   const unrestricted = await look();
-  assert.ok(unrestricted.description.includes('alpha  database'));
-  assert.ok(unrestricted.description.includes('beta  vcs'));
-  assert.ok(unrestricted.instructions.includes('MCP servers visible to this client: alpha, beta.'));
+  assert.ok(unrestricted.description.includes('alpha  [database]'));
+  assert.ok(unrestricted.description.includes('beta  [vcs]'));
+  assert.ok(unrestricted.instructions.includes('- alpha [database] 1 tool'));
+  assert.ok(unrestricted.instructions.includes('- beta [vcs] 1 tool'));
   assert.ok(Buffer.byteLength(unrestricted.description, 'utf8') <= 2048);
+  const unrestrictedProperties = unrestricted.searchSchema['properties'] as Record<
+    string,
+    Record<string, unknown>
+  >;
+  assert.deepEqual(unrestrictedProperties['server']?.['enum'], ['alpha', 'beta']);
 });
 
 test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {

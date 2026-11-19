@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 6;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -20,7 +20,7 @@ CREATE TABLE servers (
   url TEXT,
   headers_json TEXT,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-  connect_mode TEXT NOT NULL DEFAULT 'lazy',
+  connect_mode TEXT NOT NULL DEFAULT 'eager',
   summary TEXT,
   summary_source TEXT,
   category TEXT,
@@ -190,6 +190,22 @@ export function createSchemaV4(db: DatabaseSync): void {
         ELSE ''
       END;
   `);
+}
+
+/**
+ * Adds the locally kept plaintext token so the admin UI can show it again.
+ * The column is optional: bindings created before v6 cannot recover it.
+ */
+export function createSchemaV6(db: DatabaseSync): void {
+  const columns = new Set(
+    db
+      .prepare('PRAGMA table_info(client_bindings)')
+      .all()
+      .map((row) => String(row['name'])),
+  );
+  if (!columns.has('token_plain')) {
+    db.exec('ALTER TABLE client_bindings ADD COLUMN token_plain TEXT');
+  }
 }
 
 /** Raised when repository input violates a storage invariant. */

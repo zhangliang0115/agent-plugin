@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createSchemaV1, createSchemaV2, createSchemaV4, SCHEMA_VERSION } from './schema.ts';
+import { createSchemaV1, createSchemaV2, createSchemaV4, createSchemaV6, SCHEMA_VERSION } from './schema.ts';
 
 export interface OpenStateDbOptions {
   /** Create the parent directory (mode 0700) when it does not exist. Default true. */
@@ -67,6 +67,14 @@ export function migrate(db: DatabaseSync): number {
       applyV4(db);
       current = 4;
     }
+    if (current < 5) {
+      applyV5(db);
+      current = 5;
+    }
+    if (current < 6) {
+      applyV6(db);
+      current = 6;
+    }
   });
   return current;
 }
@@ -102,7 +110,7 @@ const SEED_SERVERS = [
     id: '__official__',
     label: 'Claude Code 官方工具',
     summary: 'Claude Code 自带的官方工具集（Read、Write、Bash 等）。',
-    category: 'official',
+    category: 'devtools',
     tagsJson: '["official"]',
     previousLabel: 'Official Claude Code tools',
   },
@@ -110,7 +118,7 @@ const SEED_SERVERS = [
     id: '__builtin__',
     label: '内置聚合工具',
     summary: 'repl-server 自带的聚合工具（run_script、search_tools、describe_tools 等）。',
-    category: 'builtin',
+    category: 'other',
     tagsJson: '["builtin"]',
     previousLabel: 'Built-in composite tools',
   },
@@ -124,7 +132,7 @@ function applyV1(db: DatabaseSync): void {
       id, label, transport, args_json, env_json, enabled, connect_mode,
       tags_json, summary, category, timeout_ms, max_concurrency,
       created_at, updated_at, revision
-    ) VALUES (?, ?, 'builtin', '[]', '{}', 1, 'lazy', ?, ?, ?, 60000, 8, ?, ?, 0)
+    ) VALUES (?, ?, 'builtin', '[]', '{}', 1, 'eager', ?, ?, ?, 60000, 8, ?, ?, 0)
   `);
   for (const seed of SEED_SERVERS) {
     insertSeed.run(seed.id, seed.label, seed.tagsJson, seed.summary, seed.category, now, now);
@@ -168,4 +176,25 @@ function applyV4(db: DatabaseSync): void {
   createSchemaV4(db);
   db.prepare("UPDATE meta SET value = '4' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 4');
+}
+
+/**
+ * Rewrites the two seed rows' category keys to the closed category set. Only the
+ * seed servers are migrated: a user-created server with `official`/`builtin` is
+ * an administrator's own category value and is left untouched.
+ */
+function applyV5(db: DatabaseSync): void {
+  db.prepare("UPDATE servers SET category = 'devtools' WHERE id = '__official__' AND category = 'official'").run();
+  db.prepare("UPDATE servers SET category = 'other' WHERE id = '__builtin__' AND category = 'builtin'").run();
+  db.prepare("UPDATE tools SET category = 'devtools' WHERE server_id = '__official__' AND category = 'official'").run();
+  db.prepare("UPDATE tools SET category = 'other' WHERE server_id = '__builtin__' AND category = 'builtin'").run();
+  db.prepare("UPDATE meta SET value = '5' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 5');
+}
+
+/** Keeps plaintext tokens locally; existing rows keep NULL until rotated. */
+function applyV6(db: DatabaseSync): void {
+  createSchemaV6(db);
+  db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 6');
 }

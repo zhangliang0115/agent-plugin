@@ -1,5 +1,5 @@
 /** Tag dictionary hook plus the multi-select used by server/tool/client forms. */
-import { Select, Tag } from 'antd';
+import { Select, Tag, type SelectProps } from 'antd';
 
 import { useDictionaryResource } from './dictionary-resource.ts';
 
@@ -32,11 +32,15 @@ export function TagPicker({
   onChange,
   dictionary,
   placeholder = '从标签字典多选',
+  size,
+  style,
 }: {
   value: string[];
   onChange: (value: string[]) => void;
   dictionary: readonly TagDefinition[];
   placeholder?: string;
+  size?: SelectProps['size'];
+  style?: SelectProps['style'];
 }): React.ReactElement {
   const known = new Set(dictionary.map((tag) => tag.key));
   const options = dictionary.map((tag) => ({
@@ -47,12 +51,19 @@ export function TagPicker({
   return (
     <Select
       mode="multiple"
+      size={size}
+      style={style}
       allowClear
       value={value}
       onChange={(next: string[]) => onChange(next)}
       options={options}
       placeholder={placeholder}
-      optionFilterProp="label"
+      filterOption={(input, option) => {
+        const key = String(option?.value ?? '');
+        const definition = dictionary.find((tag) => tag.key === key);
+        const haystack = `${key} ${definition?.zh ?? ''} ${definition?.en ?? ''}`.toLowerCase();
+        return haystack.includes(input.trim().toLowerCase());
+      }}
       tagRender={({ value: key, closable, onClose }) => {
         const definition = dictionary.find((tag) => tag.key === key);
         return (

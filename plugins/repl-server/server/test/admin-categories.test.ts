@@ -4,10 +4,12 @@ import test from 'node:test';
 
 import { AdminApiError } from '../src/admin/servers.ts';
 import {
+  appendCategoryDictionary,
   createAdminCategoriesHandler,
   parseCategoryDictionary,
   readCategoryDictionary,
 } from '../src/admin/categories.ts';
+import { DEFAULT_TAG_DICTIONARY } from '../src/admin/tags.ts';
 import type { SettingsStore, StoredSettings } from '../src/admin/settings.ts';
 
 function memoryStore(initial: StoredSettings = {}, revision = 1): SettingsStore {
@@ -38,18 +40,144 @@ test('GET /categories returns the built-in dictionary until it is replaced', asy
     revision: number;
   };
   assert.equal(body.revision, 3);
-  assert.ok(body.categories.length >= 15);
   assert.deepEqual(
-    body.categories.find((category) => category.key === 'official'),
-    { key: 'official', zh: '官方', en: 'Official' },
+    body.categories.map((category) => category.key),
+    [
+      'database',
+      'observability',
+      'devtools',
+      'ui-automation',
+      'filesystem',
+      'search',
+      'messaging',
+      'cloud',
+      'ai',
+      'other',
+    ],
   );
   assert.deepEqual(
     body.categories.find((category) => category.key === 'database'),
     { key: 'database', zh: '数据库', en: 'Database' },
   );
-  for (const key of ['builtin', 'filesystem', 'search', 'web', 'browser', 'ai', 'dev', 'ops', 'docs', 'messaging', 'memory', 'security', 'testing']) {
-    assert.ok(body.categories.some((category) => category.key === key), key);
+});
+
+test('default category keys never overlap tag keys', () => {
+  const tagKeys = new Set(DEFAULT_TAG_DICTIONARY.map((tag) => tag.key));
+  for (const category of readCategoryDictionary({})) {
+    assert.equal(tagKeys.has(category.key), false, category.key);
   }
+});
+
+const LEGACY_CATEGORY_DEFAULT = [
+  { key: 'official', zh: '官方', en: 'Official' },
+  { key: 'builtin', zh: '内置', en: 'Built-in' },
+  { key: 'database', zh: '数据库', en: 'Database' },
+  { key: 'filesystem', zh: '文件系统', en: 'Filesystem' },
+  { key: 'search', zh: '搜索', en: 'Search' },
+  { key: 'web', zh: '网页', en: 'Web' },
+  { key: 'browser', zh: '浏览器', en: 'Browser' },
+  { key: 'ai', zh: '人工智能', en: 'AI' },
+  { key: 'dev', zh: '开发', en: 'Development' },
+  { key: 'ops', zh: '运维', en: 'Operations' },
+  { key: 'docs', zh: '文档', en: 'Docs' },
+  { key: 'messaging', zh: '消息', en: 'Messaging' },
+  { key: 'memory', zh: '记忆', en: 'Memory' },
+  { key: 'security', zh: '安全', en: 'Security' },
+  { key: 'testing', zh: '测试', en: 'Testing' },
+];
+
+test('the old 15-entry default is upgraded on read', () => {
+  const upgraded = readCategoryDictionary({ categoryDictionary: LEGACY_CATEGORY_DEFAULT });
+  assert.equal(upgraded.length, 10);
+  assert.ok(upgraded.some((category) => category.key === 'observability'));
+  assert.ok(!upgraded.some((category) => category.key === 'official'));
+});
+
+test('a reordered old default is kept as-is', () => {
+  const reordered = [...LEGACY_CATEGORY_DEFAULT].reverse();
+  assert.deepEqual(readCategoryDictionary({ categoryDictionary: reordered }), reordered);
+});
+
+test('the old 15 keys with a changed label are kept as-is', () => {
+  for (const changed of ['zh', 'en'] as const) {
+    const relabelled = LEGACY_CATEGORY_DEFAULT.map((entry, index) =>
+      index === 2 ? { ...entry, [changed]: `${entry[changed]} 自定义` } : entry,
+    );
+    assert.deepEqual(
+      readCategoryDictionary({ categoryDictionary: relabelled }),
+      relabelled,
+      changed,
+    );
+  }
+});
+
+test('a custom subset of the old keys is kept as-is', () => {
+  const subset = LEGACY_CATEGORY_DEFAULT.slice(0, 5);
+  assert.deepEqual(readCategoryDictionary({ categoryDictionary: subset }), subset);
+});
+
+test('a customised dictionary is kept as-is', () => {
+  const custom = [
+    { key: 'db', zh: '数据库', en: 'Database' },
+    { key: 'custom', zh: '自定义', en: 'Custom' },
+  ];
+  assert.deepEqual(readCategoryDictionary({ categoryDictionary: custom }), custom);
+});
+
+test('appendCategoryDictionary adds only unknown keys and keeps existing labels', () => {
+  const settings: StoredSettings = {
+    categoryDictionary: [{ key: 'database', zh: '数据库', en: 'Database' }],
+  };
+  const result = appendCategoryDictionary(settings, [
+    { key: 'database', zh: '重复', en: 'Duplicate' },
+    { key: 'observability', zh: '可观测性', en: 'Observability' },
+  ]);
+  assert.deepEqual(result.added, [
+    { key: 'observability', zh: '可观测性', en: 'Observability' },
+  ]);
+  assert.deepEqual(result.categories, [
+    { key: 'database', zh: '数据库', en: 'Database' },
+    { key: 'observability', zh: '可观测性', en: 'Observability' },
+  ]);
+});
+
+test('PUT /categories and GET agree when the submitted dictionary is the old default', async () => {
+  const store = memoryStore({}, 1);
+  const handler = createAdminCategoriesHandler({ settings: store });
+  const put = await handler({
+    method: 'PUT',
+    path: '/categories',
+    headers: { 'if-match': '"1"' },
+    body: { categories: LEGACY_CATEGORY_DEFAULT },
+  });
+  assert.equal(put?.status, 200);
+  assert.equal((put?.body as { categories: unknown[] }).categories.length, 10);
+
+  const get = await handler({ method: 'GET', path: '/categories' });
+  assert.deepEqual(get?.body, put?.body);
+  assert.deepEqual(
+    (await store.read()).settings['categoryDictionary'],
+    LEGACY_CATEGORY_DEFAULT,
+    'the submission is stored verbatim and upgraded on read',
+  );
+});
+
+test('appendCategoryDictionary refuses to exceed the 100-entry limit', () => {
+  const full = Array.from({ length: 100 }, (_entry, index) => ({
+    key: `cat${index}`,
+    zh: `分类${index}`,
+    en: `Category ${index}`,
+  }));
+  assert.throws(
+    () => appendCategoryDictionary({ categoryDictionary: full }, [{ key: 'extra', zh: '额外', en: 'Extra' }]),
+    (error: unknown) => error instanceof AdminApiError && error.code === 'INVALID_CATEGORIES',
+  );
+
+  const lastSlot = appendCategoryDictionary({ categoryDictionary: full.slice(0, 99) }, [
+    { key: 'extra', zh: '额外', en: 'Extra' },
+  ]);
+  assert.equal(lastSlot.categories.length, 100);
+  assert.deepEqual(lastSlot.added, [{ key: 'extra', zh: '额外', en: 'Extra' }]);
 });
 
 test('an explicitly saved empty dictionary stays empty', async () => {
