@@ -54,7 +54,9 @@ test('destroyOwner only removes the matching owner', async (t) => {
     identity: { ...identity, binding: 'b_other' },
   });
 
-  assert.equal(exec.stats().sessions, 1); // same workspace → one exec session, owner stays first
+  // The exec-session key includes the binding, so one MCP session using two
+  // identities owns two isolated JS contexts.
+  assert.equal(exec.stats().sessions, 2);
   await exec.destroyOwner('b_other');
   assert.equal(exec.stats().sessions, 1);
 

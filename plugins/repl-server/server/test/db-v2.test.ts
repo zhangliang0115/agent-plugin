@@ -7,10 +7,10 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 
 import { migrate, openStateDb } from '../src/db/migrate.ts';
-import { getMeta } from '../src/db/meta.ts';
+import { getMeta, getRevision } from '../src/db/meta.ts';
 import { createSchemaV1, DbValidationError, SCHEMA_VERSION } from '../src/db/schema.ts';
 import { createServer, getServer, updateServer } from '../src/db/servers.ts';
-import { applyToolPatch, getTool, upsertTool, writeToolRow } from '../src/db/tools.ts';
+import { applyToolPatch, getTool, patchTool, upsertTool, writeToolRow } from '../src/db/tools.ts';
 
 const LEGACY_TIME = '2026-01-01T00:00:00.000Z';
 
@@ -270,4 +270,90 @@ test('upsertTool records and preserves the discovery source', (t) => {
     () => writeToolRow(db, { ...current, name: 'missing' }),
     /does not exist/,
   );
+});
+
+test('updateServer demotes search rows only when discovery leaves search mode', (t) => {
+  const { db } = openFixture(t);
+  const searchJson = JSON.stringify({ mode: 'search', searchTool: 'search_tools' });
+  createServer(db, {
+    id: 'hexhub',
+    label: 'Hexhub',
+    transport: 'stdio',
+    command: 'node',
+    discoveryJson: searchJson,
+  });
+  upsertTool(db, 'hexhub', { name: 'search_tools', inputSchema: { type: 'object' } });
+  upsertTool(db, 'hexhub', {
+    name: 'lazy_tool',
+    inputSchema: { type: 'object' },
+    discoveredVia: 'search',
+  });
+  upsertTool(db, 'hexhub', {
+    name: 'kept_tool',
+    inputSchema: { type: 'object' },
+    discoveredVia: 'search',
+  });
+  patchTool(db, 'hexhub', 'kept_tool', { staleOverride: true });
+  upsertTool(db, 'hexhub', { name: 'static_tool', inputSchema: { type: 'object' } });
+
+  // Remaining in search mode (or editing unrelated fields) never demotes.
+  updateServer(db, 'hexhub', {
+    discoveryJson: JSON.stringify({ mode: 'search', searchTool: 'search_tools', query: 'x' }),
+  });
+  updateServer(db, 'hexhub', { label: 'Hexhub 2' });
+  assert.equal(getTool(db, 'hexhub', 'lazy_tool')?.stale, false);
+  assert.equal(getTool(db, 'hexhub', 'kept_tool')?.stale, false);
+
+  const revisionBefore = getRevision(db);
+  const updated = updateServer(db, 'hexhub', { discoveryJson: JSON.stringify({ mode: 'static' }) });
+  assert.equal(updated?.revision, revisionBefore + 1, 'one revision for the config write');
+
+  assert.equal(getTool(db, 'hexhub', 'lazy_tool')?.stale, true);
+  assert.equal(getTool(db, 'hexhub', 'kept_tool')?.stale, true, 'staleOverride does not exempt demotion');
+  assert.equal(getTool(db, 'hexhub', 'static_tool')?.stale, false);
+  assert.equal(getTool(db, 'hexhub', 'search_tools')?.stale, false);
+  assert.equal(updated?.server.discoveryJson, JSON.stringify({ mode: 'static' }));
+
+  // Repeating the write is idempotent and leaves the rows stale.
+  const again = updateServer(db, 'hexhub', { discoveryJson: null });
+  assert.equal(again?.server.discoveryJson, null);
+  assert.equal(getTool(db, 'hexhub', 'lazy_tool')?.stale, true);
+  assert.equal(getTool(db, 'hexhub', 'kept_tool')?.stale, true);
+});
+
+test('a failing demotion rolls the discovery switch back (one transaction)', (t) => {
+  const { db } = openFixture(t);
+  const searchJson = JSON.stringify({ mode: 'search', searchTool: 'search_tools' });
+  createServer(db, {
+    id: 'hexhub',
+    label: 'Hexhub',
+    transport: 'stdio',
+    command: 'node',
+    discoveryJson: searchJson,
+  });
+  upsertTool(db, 'hexhub', { name: 'search_tools', inputSchema: { type: 'object' } });
+  upsertTool(db, 'hexhub', {
+    name: 'lazy_tool',
+    inputSchema: { type: 'object' },
+    discoveredVia: 'search',
+  });
+
+  db.exec(`
+    CREATE TRIGGER block_demotion BEFORE UPDATE OF stale ON tools
+    WHEN new.stale = 1 BEGIN SELECT RAISE(ABORT, 'demotion blocked'); END
+  `);
+  try {
+    assert.throws(
+      () => updateServer(db, 'hexhub', { discoveryJson: null }),
+      /demotion blocked/,
+    );
+    assert.equal(
+      getServer(db, 'hexhub')?.discoveryJson,
+      searchJson,
+      'the server row was rolled back with the failed demotion',
+    );
+    assert.equal(getTool(db, 'hexhub', 'lazy_tool')?.stale, false);
+  } finally {
+    db.exec('DROP TRIGGER block_demotion');
+  }
 });

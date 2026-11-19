@@ -88,6 +88,33 @@ export interface PoolFile {
   entries: PoolEntry[];
 }
 
+export type AiRunState = 'spawning' | 'running';
+
+/**
+ * One `claude -p` child in `ai-runs.json`. Written as `spawning` (pid/pgid/lstart
+ * null) before the spawn, filled in right after it, and removed when the run
+ * settles. `lstart` is an empty string when `ps` failed; the sweep then treats
+ * the record as unconfirmed and never signals it.
+ */
+export interface AiRunEntry {
+  runId: string;
+  pid: number | null;
+  pgid: number | null;
+  lstart: string | null;
+  state: AiRunState;
+  /** Boot that spawned the run; startup recovery compares it with the current boot. */
+  bootId: string;
+  /** Dedicated `ai-run-*` working directory, removed when the run settles. */
+  runDir: string;
+  startedAt?: string;
+}
+
+/** `ai-runs.json`: AI CLI children of the current boot. */
+export interface AiRunsFile {
+  bootId: string;
+  entries: AiRunEntry[];
+}
+
 export type SurvivorState = 'running' | 'exited' | 'killed' | 'gone';
 
 /**
@@ -130,11 +157,13 @@ type ReadResult =
 
 const STATE_FILE = 'state.json';
 const POOL_FILE = 'pool.json';
+const AI_RUNS_FILE = 'ai-runs.json';
 const SURVIVORS_FILE = join('ledger', 'survivors.json');
 const SESSIONS_DIR = 'sessions';
 const SERVE_FILE = 'serve.json';
 
 const POOL_STATES: readonly PoolEntryState[] = ['spawning', 'running', 'stopped', 'crashed'];
+const AI_RUN_STATES: readonly AiRunState[] = ['spawning', 'running'];
 const SURVIVOR_STATES: readonly SurvivorState[] = ['running', 'exited', 'killed', 'gone'];
 
 /**
@@ -214,6 +243,10 @@ export class ProcessLedger {
 
   get poolPath(): string {
     return join(this.root, POOL_FILE);
+  }
+
+  get aiRunsPath(): string {
+    return join(this.root, AI_RUNS_FILE);
   }
 
   get survivorsPath(): string {
@@ -312,6 +345,54 @@ export class ProcessLedger {
     writeJsonAtomic(this.poolPath, normalized);
   }
 
+  readAiRuns(): AiRunsFile {
+    const result = this.readJson(this.aiRunsPath);
+    if (result.status !== 'ok') return emptyAiRuns();
+
+    const file = parseAiRuns(result.value);
+    if (file === null) {
+      this.record(this.aiRunsPath, 'invalid ai-runs.json shape');
+      return emptyAiRuns();
+    }
+    return file;
+  }
+
+  writeAiRuns(file: AiRunsFile): void {
+    const normalized = parseAiRuns(file);
+    if (normalized === null) throw new TypeError('invalid ai-runs ledger record');
+    writeJsonAtomic(this.aiRunsPath, normalized);
+  }
+
+  /** Adds or replaces one run record in a single read-modify-write. */
+  upsertAiRun(entry: AiRunEntry): void {
+    const file = this.readAiRuns();
+    const entries = file.entries.filter((item) => item.runId !== entry.runId);
+    entries.push(entry);
+    this.writeAiRuns({ bootId: entry.bootId, entries });
+  }
+
+  /** Fills in pid/pgid/lstart after the spawn; a missing run is a no-op. */
+  patchAiRun(
+    runId: string,
+    patch: Partial<Pick<AiRunEntry, 'pid' | 'pgid' | 'lstart' | 'state'>>,
+  ): void {
+    const file = this.readAiRuns();
+    const index = file.entries.findIndex((item) => item.runId === runId);
+    if (index === -1) return;
+    const current = file.entries[index];
+    if (current === undefined) return;
+    file.entries[index] = { ...current, ...patch };
+    this.writeAiRuns(file);
+  }
+
+  /** Removes one run record; a missing file or run is a no-op. */
+  removeAiRun(runId: string): void {
+    const file = this.readAiRuns();
+    const entries = file.entries.filter((item) => item.runId !== runId);
+    if (entries.length === file.entries.length) return;
+    this.writeAiRuns({ bootId: file.bootId, entries });
+  }
+
   readSurvivors(): SurvivorsFile {
     const result = this.readJson(this.survivorsPath);
     if (result.status !== 'ok') return emptySurvivors();
@@ -360,6 +441,10 @@ function emptyState(): StateFile {
 }
 
 function emptyPool(): PoolFile {
+  return { bootId: '', entries: [] };
+}
+
+function emptyAiRuns(): AiRunsFile {
   return { bootId: '', entries: [] };
 }
 
@@ -445,6 +530,47 @@ function parsePoolEntry(value: unknown): PoolEntry | null {
     state: value.state as PoolEntryState,
   };
   if (isNonEmptyString(value.bootId)) entry.bootId = value.bootId;
+  if (isNonEmptyString(value.startedAt)) entry.startedAt = value.startedAt;
+  return entry;
+}
+
+function parseAiRuns(value: unknown): AiRunsFile | null {
+  if (!isRecord(value)) return null;
+  if (!isNonEmptyString(value.bootId) || !Array.isArray(value.entries)) return null;
+
+  const entries: AiRunEntry[] = [];
+  for (const raw of value.entries) {
+    const entry = parseAiRunEntry(raw);
+    if (entry === null) return null;
+    entries.push(entry);
+  }
+  return { bootId: value.bootId, entries };
+}
+
+function parseAiRunEntry(value: unknown): AiRunEntry | null {
+  if (!isRecord(value)) return null;
+  if (!isNonEmptyString(value.runId) || !isNonEmptyString(value.bootId)) return null;
+  if (!isNonEmptyString(value.runDir)) return null;
+  if (!AI_RUN_STATES.includes(value.state as AiRunState)) return null;
+
+  const pid = value.pid ?? null;
+  const pgid = value.pgid ?? null;
+  const lstart = value.lstart ?? null;
+  if (pid === null) {
+    if (pgid !== null || lstart !== null) return null;
+  } else if (!isPositiveInteger(pid) || !isPositiveInteger(pgid) || typeof lstart !== 'string') {
+    return null;
+  }
+
+  const entry: AiRunEntry = {
+    runId: value.runId,
+    pid,
+    pgid,
+    lstart,
+    state: value.state as AiRunState,
+    bootId: value.bootId,
+    runDir: value.runDir,
+  };
   if (isNonEmptyString(value.startedAt)) entry.startedAt = value.startedAt;
   return entry;
 }

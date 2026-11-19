@@ -105,23 +105,70 @@ export class ServeClient {
     return result.tools ?? [];
   }
 
-  async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-    if (signal?.aborted === true) throw new Error('call cancelled');
-    return await this.request('tools/call', { name, arguments: args });
+  async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    if (signal?.aborted === true) throw abortReason(signal);
+    return await this.request('tools/call', { name, arguments: args }, signal, timeoutMs);
   }
 
-  async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Sends one JSON-RPC request. `signal` aborts the pending call, drops its
+   * timer and tells the server with `notifications/cancelled`; `timeoutMs`
+   * narrows the client-wide budget for this request only.
+   */
+  async request(
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<unknown> {
     if (this.closed) throw new Error('serve client is closed');
     if (this.exited) throw new Error('serve process exited');
+    if (signal?.aborted === true) throw abortReason(signal);
     const id = ++this.seq;
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    const budget = timeoutMs ?? this.timeoutMs;
     return await new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      const cleanup = (): void => {
+        if (settled) return;
+        settled = true;
         this.pending.delete(id);
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        cleanup();
+        this.notifyCancelled(id, signal?.reason);
+        reject(abortReason(signal));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        cleanup();
         reject(new Error(`serve request timed out: ${method}`));
-      }, this.timeoutMs);
+      }, budget);
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, {
+        resolve: (value) => {
+          cleanup();
+          resolve(value);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+        timer,
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted === true) {
+        onAbort();
+        return;
+      }
       this.child.stdin.write(`${payload}\n`);
     });
   }
@@ -129,6 +176,13 @@ export class ServeClient {
   notify(method: string, params: Record<string, unknown>): void {
     if (this.closed || this.exited) return;
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
+  }
+
+  /** Best-effort `notifications/cancelled` for a request the caller aborted. */
+  private notifyCancelled(requestId: number, reason: unknown): void {
+    const params: Record<string, unknown> = { requestId };
+    if (reason !== undefined) params['reason'] = describeReason(reason);
+    this.notify('notifications/cancelled', params);
   }
 
   async close(): Promise<void> {
@@ -177,4 +231,19 @@ export class ServeClient {
       this.pending.delete(id);
     }
   }
+}
+
+/** Rejection value for one aborted request: the signal's reason when it has one. */
+function abortReason(signal: AbortSignal | undefined): unknown {
+  if (signal?.reason !== undefined) return signal.reason;
+  const error = new Error('request cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function describeReason(reason: unknown): unknown {
+  if (reason instanceof Error) {
+    return { name: reason.name, message: reason.message };
+  }
+  return reason;
 }

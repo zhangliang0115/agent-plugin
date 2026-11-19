@@ -36,6 +36,9 @@ function fakeClock(start = START): Clock & { advance(ms: number): void } {
 
 class FakeGateway implements ExecutionGateway {
   task: TaskSnapshot | null = null;
+  /** When non-empty, `getTask` shifts one response per call before falling back to `task`. */
+  readonly taskQueue: Array<TaskSnapshot | null> = [];
+  cancelResult = true;
   readonly getTaskCalls: Array<{ owner: string; taskId: string }> = [];
   readonly cancelCalls: Array<{ owner: string; taskId: string }> = [];
 
@@ -53,12 +56,13 @@ class FakeGateway implements ExecutionGateway {
 
   async getTask(owner: string, taskId: string): Promise<TaskSnapshot | null> {
     this.getTaskCalls.push({ owner, taskId });
+    if (this.taskQueue.length > 0) return this.taskQueue.shift() ?? null;
     return this.task;
   }
 
   async cancelTask(owner: string, taskId: string): Promise<boolean> {
     this.cancelCalls.push({ owner, taskId });
-    return true;
+    return this.cancelResult;
   }
 
   async destroyOwner(): Promise<void> {}
@@ -298,14 +302,67 @@ test('getMcpTask drops the mapping when the core table no longer has the task', 
   assert.equal(store.size, 0);
 });
 
-test('tasks/cancel and tasks/update acknowledge with resultType complete', async () => {
+test('tasks/cancel acknowledges a working task and leaves a foreign or missing one alone', async () => {
   const store = new McpTaskStore({ clock: fakeClock(), idFactory: () => 't_1' });
   const gateway = new FakeGateway();
   store.create('owner-a', 'ev_1');
+  gateway.task = snapshot({ status: 'working', result: undefined });
 
+  assert.deepEqual(updateMcpTask(store, 'owner-a', 't_1'), { resultType: 'complete' });
   assert.deepEqual(await cancelMcpTask(store, gateway, 'owner-a', 't_1'), { resultType: 'complete' });
   assert.deepEqual(gateway.cancelCalls, [{ owner: 'owner-a', taskId: 'ev_1' }]);
-  assert.deepEqual(updateMcpTask(store, 'owner-a', 't_1'), { resultType: 'complete' });
+
+  const foreign = await taskErrorAsync(() => cancelMcpTask(store, gateway, 'owner-b', 't_1'));
+  assert.equal(foreign.taskCode, 'TASK_NOT_FOUND');
+  assert.equal(gateway.cancelCalls.length, 1);
+
+  gateway.task = null;
+  const gone = await taskErrorAsync(() => cancelMcpTask(store, gateway, 'owner-a', 't_1'));
+  assert.equal(gone.taskCode, 'TASK_NOT_FOUND');
+  assert.equal(store.size, 0, 'a mapping whose eval task vanished is dropped');
+});
+
+test('tasks/cancel on an already-finished task returns its current terminal state', async () => {
+  const store = new McpTaskStore({ clock: fakeClock(), idFactory: () => 't_1' });
+  const gateway = new FakeGateway();
+  store.create('owner-a', 'ev_1');
+  gateway.task = snapshot();
+
+  const view = await cancelMcpTask(store, gateway, 'owner-a', 't_1');
+  assert.equal((view as { status?: string }).status, 'completed');
+  assert.equal((view as { resultType?: string }).resultType, 'complete');
+  assert.equal((view as { taskId?: string }).taskId, 't_1');
+  assert.equal(gateway.cancelCalls.length, 0, 'a terminal task is not cancelled again');
+});
+
+test('tasks/cancel reports the terminal state when the eval finishes during the cancel', async () => {
+  const store = new McpTaskStore({ clock: fakeClock(), idFactory: () => 't_1' });
+  const gateway = new FakeGateway();
+  store.create('owner-a', 'ev_1');
+  gateway.cancelResult = false;
+  gateway.taskQueue.push(snapshot({ status: 'working', result: undefined }), snapshot());
+
+  const view = await cancelMcpTask(store, gateway, 'owner-a', 't_1');
+  assert.equal((view as { status?: string }).status, 'completed');
+  assert.deepEqual(gateway.cancelCalls, [{ owner: 'owner-a', taskId: 'ev_1' }]);
+});
+
+test('McpTaskStore records the creating transport session and clears only that session', () => {
+  const clock = fakeClock();
+  let next = 0;
+  const store = new McpTaskStore({ clock, idFactory: () => `t_${(next += 1)}` });
+  const first = store.create('cb_bound', 'ev_1', 'mcp_a');
+  const second = store.create('cb_bound', 'ev_2', 'mcp_b');
+  const legacy = store.create('owner-c', 'ev_3');
+
+  assert.equal(store.resolve('cb_bound', first.taskId).transportSessionId, 'mcp_a');
+  assert.equal(store.resolve('owner-c', legacy.taskId).transportSessionId, 'owner-c');
+
+  assert.equal(store.clearSession('mcp_a'), 1);
+  assert.equal(store.size, 2);
+  assert.throws(() => store.resolve('cb_bound', first.taskId), TaskMethodError);
+  assert.equal(store.resolve('cb_bound', second.taskId).evalTaskId, 'ev_2');
+  assert.equal(store.clearSession('owner-c'), 1);
 });
 
 test('tasks/cancel and tasks/update use the task error codes', async () => {

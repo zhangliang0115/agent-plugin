@@ -285,6 +285,20 @@ test('propose is disabled without touching config reads', async (t) => {
   assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
 });
 
+test('a CLI missing required flags surfaces as 503 AI_RUNNER_UNAVAILABLE', async (t) => {
+  const fixture = await makeFixture(t, {
+    extraEnv: { FAKE_CLAUDE_HELP_MISSING: '--safe-mode' },
+  });
+  const error = await expectApiError(
+    fixture.service.propose({ input: 'x' }),
+    'AI_RUNNER_UNAVAILABLE',
+    503,
+  );
+  const details = error.details as { reason?: string; missing?: string[] };
+  assert.equal(details.reason, 'missing_flags');
+  assert.deepEqual(details.missing, ['--safe-mode']);
+});
+
 test('propose input byte and empty checks', async (t) => {
   const fixture = await makeFixture(t);
   await expectApiError(fixture.service.propose({ input: '   ' }), 'AI_INPUT_EMPTY', 422);

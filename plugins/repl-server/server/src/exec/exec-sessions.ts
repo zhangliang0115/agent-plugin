@@ -1,10 +1,10 @@
 /** Execution-session registry: lazy creation, quotas and handle lifecycle.
  *
- * One execution session is keyed by `(Mcp-Session-Id, workspace realpath)` and
- * owns exactly one worker and one serve handle. The registry never spawns or
- * terminates anything itself: the executor installs the handles and receives an
- * `onRemove` callback when a record leaves the registry, so worker/serve
- * teardown stays in the executor.
+ * One execution session is keyed by `(Mcp-Session-Id, binding, workspace
+ * realpath)` and owns exactly one worker and one serve handle. The registry
+ * never spawns or terminates anything itself: the executor installs the handles
+ * and receives an `onRemove` callback when a record leaves the registry, so
+ * worker/serve teardown stays in the executor.
  * @module
  */
 
@@ -81,8 +81,13 @@ function describeOwner(binding: string | null, mcpSessionId: string): string {
   return binding === null ? `mcp:${mcpSessionId}` : `binding:${binding}`;
 }
 
-function sessionKey(mcpSessionId: string, workspace: string): string {
-  return `${mcpSessionId}\u0000${workspace}`;
+/**
+ * Execution-session key. `binding` participates so two identities that happen
+ * to share one `Mcp-Session-Id` (for example a bound and an unbound request on
+ * the same transport) never share a JS context (design 03 §2.1–2.2).
+ */
+function sessionKey(mcpSessionId: string, binding: string | null, workspace: string): string {
+  return `${mcpSessionId}\u0000${binding ?? ''}\u0000${workspace}`;
 }
 
 function assertRequest(request: SessionRequest): void {
@@ -110,6 +115,10 @@ function deleteFrom(index: Map<string, Set<string>>, key: string, sessionId: str
 /**
  * Registry for execution sessions.
  *
+ * Identity (design 03 §2.1): the key is `(Mcp-Session-Id, binding, workspace
+ * realpath)`, so an unbound and a bound request on the same transport never
+ * share a JS context.
+ *
  * Quotas (design 03 §2.6):
  * - 8 sessions per process, 4 per binding (unbound clients are bucketed per
  *   MCP session), 4 workspaces per MCP session;
@@ -121,7 +130,7 @@ function deleteFrom(index: Map<string, Set<string>>, key: string, sessionId: str
  * workspace quota never evicts, it throws `WS_LIMIT` (protocol §8).
  */
 export class ExecSessionRegistry<W = unknown, S = unknown> {
-  readonly limits: CapacityLimits;
+  private limitsValue: CapacityLimits;
 
   private readonly clock: Clock;
   private readonly idFactory: (request: SessionRequest) => string;
@@ -135,9 +144,23 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
 
   constructor(options: ExecSessionRegistryOptions<W, S> = {}) {
     this.clock = options.clock ?? systemClock;
-    this.limits = resolveCapacityLimits(options.limits);
+    this.limitsValue = resolveCapacityLimits(options.limits);
     this.idFactory = options.idFactory ?? (() => newId('execSession'));
     this.onRemove = options.onRemove;
+  }
+
+  /** Current quotas; replaced wholesale by {@link updateLimits}. */
+  get limits(): CapacityLimits {
+    return this.limitsValue;
+  }
+
+  /**
+   * Hot-applies `PATCH /settings` capacity changes. Existing sessions are not
+   * evicted eagerly; the next `acquire`/`beginEval` enforces the new values.
+   */
+  updateLimits(overrides: Partial<CapacityLimits>): CapacityLimits {
+    this.limitsValue = resolveCapacityLimits({ ...this.limitsValue, ...overrides });
+    return this.limitsValue;
   }
 
   /** Number of live execution sessions. */
@@ -149,8 +172,12 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     return this.sessions.get(sessionId);
   }
 
-  find(mcpSessionId: string, workspace: string): ExecSession<W, S> | undefined {
-    const id = this.byKey.get(sessionKey(mcpSessionId, workspace));
+  find(
+    mcpSessionId: string,
+    workspace: string,
+    binding: string | null = null,
+  ): ExecSession<W, S> | undefined {
+    const id = this.byKey.get(sessionKey(mcpSessionId, binding, workspace));
     return id === undefined ? undefined : this.sessions.get(id);
   }
 
@@ -179,12 +206,11 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
    */
   acquire(request: SessionRequest): ExecSession<W, S> {
     assertRequest(request);
-    const existing = this.find(request.mcpSessionId, request.workspace);
+    const binding = request.binding ?? null;
+    const existing = this.find(request.mcpSessionId, request.workspace, binding);
     if (existing !== undefined) return existing;
 
-    const binding = request.binding ?? null;
-
-    const workspaceCount = this.countForMcpSession(request.mcpSessionId);
+    const workspaceCount = this.workspaceCountForMcpSession(request.mcpSessionId);
     if (workspaceCount >= this.limits.maxWorkspacesPerMcpSession) {
       throw new CapacityExceededError({
         code: 'WS_LIMIT',
@@ -237,7 +263,7 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     };
 
     this.sessions.set(id, session);
-    this.byKey.set(sessionKey(session.mcpSessionId, session.workspace), id);
+    this.byKey.set(sessionKey(session.mcpSessionId, session.binding, session.workspace), id);
     addTo(this.byMcpSession, session.mcpSessionId, id);
     addTo(this.byOwner, ownerKey, id);
     return session;
@@ -299,7 +325,7 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     if (session === undefined) return undefined;
 
     this.sessions.delete(sessionId);
-    this.byKey.delete(sessionKey(session.mcpSessionId, session.workspace));
+    this.byKey.delete(sessionKey(session.mcpSessionId, session.binding, session.workspace));
     deleteFrom(this.byMcpSession, session.mcpSessionId, sessionId);
     deleteFrom(this.byOwner, ownerKeyFor(session.binding, session.mcpSessionId), sessionId);
     this.onRemove?.(session, reason);
@@ -364,6 +390,18 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
       if (session !== undefined) result.push(session);
     }
     return result;
+  }
+
+  /** Distinct workspaces bound to one MCP session; the quota counts directories, not identities. */
+  private workspaceCountForMcpSession(mcpSessionId: string): number {
+    const ids = this.byMcpSession.get(mcpSessionId);
+    if (ids === undefined) return 0;
+    const workspaces = new Set<string>();
+    for (const id of ids) {
+      const session = this.sessions.get(id);
+      if (session !== undefined) workspaces.add(session.workspace);
+    }
+    return workspaces.size;
   }
 
   private inFlightForOwner(ownerKey: string): number {

@@ -1,12 +1,14 @@
 // hook-allow: localhost-only test fetch, no external egress
 import assert from 'node:assert/strict';
+import { request as httpRequest } from 'node:http';
 import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 
-import { createApp, type McpContext } from '../src/app.ts';
+import { createApp, type AppOptions, type McpContext } from '../src/app.ts';
 import { JsonRpcDispatcher } from '../src/mcp/jsonrpc.ts';
+import { createMethodTable } from '../src/mcp/methods.ts';
 import { TransportSessionRegistry } from '../src/sessions/transport.ts';
-import { McpTaskStore } from '../src/tasks/mcp-tasks.ts';
+import { McpTaskStore, ownerOf, TaskMethodError } from '../src/tasks/mcp-tasks.ts';
 import type { Catalog, ExecutionGateway } from '../src/ports.ts';
 
 const gateway: ExecutionGateway = {
@@ -33,14 +35,20 @@ function dispatcher(): JsonRpcDispatcher<McpContext> {
   return d;
 }
 
-async function listen(): Promise<{ server: ReturnType<typeof createApp>; base: string }> {
+async function listen(options: {
+  gateway?: ExecutionGateway;
+  tasks?: McpTaskStore;
+  sessions?: TransportSessionRegistry;
+  dispatcher?: JsonRpcDispatcher<McpContext>;
+  identity?: AppOptions['identity'];
+} = {}): Promise<{ server: ReturnType<typeof createApp>; base: string }> {
   const server = createApp({
-    identity: { mode: 'loose', bindings: { findByTokenHash: async () => null } },
-    sessions: new TransportSessionRegistry(),
-    gateway,
+    identity: options.identity ?? { mode: 'loose', bindings: { findByTokenHash: async () => null } },
+    sessions: options.sessions ?? new TransportSessionRegistry(),
+    gateway: options.gateway ?? gateway,
     catalog,
-    tasks: new McpTaskStore(),
-    dispatcher: dispatcher(),
+    tasks: options.tasks ?? new McpTaskStore(),
+    dispatcher: options.dispatcher ?? dispatcher(),
     log: () => undefined,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -49,11 +57,42 @@ async function listen(): Promise<{ server: ReturnType<typeof createApp>; base: s
   return { server, base: `http://127.0.0.1:${(address as AddressInfo).port}` };
 }
 
-async function rpc(base: string, body: unknown, session?: string) {
+/** Raw `node:http` request so a non-local `Host` header can be sent. */
+function rawRequest(
+  base: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; text: string }> {
+  const url = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path,
+        method: options.method ?? 'GET',
+        headers: options.headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(Buffer.from(chunk as Buffer)));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }),
+        );
+      },
+    );
+    req.on('error', reject);
+    if (options.body !== undefined) req.write(options.body);
+    req.end();
+  });
+}
+
+async function rpc(base: string, body: unknown, session?: string, headers: Record<string, string> = {}) {
   return fetch(`${base}/mcp`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      ...headers,
       ...(session === undefined ? {} : { 'mcp-session-id': session }),
     },
     body: JSON.stringify(body),
@@ -124,4 +163,170 @@ test('GET /mcp is 405', async (t) => {
   t.after(() => server.close());
   const response = await fetch(`${base}/mcp`);
   assert.equal(response.status, 405);
+});
+
+test('/health and /mcp reject a non-local Host header with 403', async (t) => {
+  const { server, base } = await listen();
+  t.after(() => server.close());
+
+  const port = new URL(base).port;
+  const health = await rawRequest(base, '/health', { headers: { host: `evil.example:${port}` } });
+  assert.equal(health.status, 403);
+  assert.equal((JSON.parse(health.text) as { error: { code: string } }).error.code, 'FORBIDDEN_HOST');
+
+  const mcp = await rawRequest(base, '/mcp', {
+    method: 'POST',
+    headers: { host: `evil.example:${port}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  assert.equal(mcp.status, 403);
+
+  // A local host with a port is still accepted (the port is stripped).
+  const local = await rawRequest(base, '/health', { headers: { host: `localhost:${port}` } });
+  assert.equal(local.status, 200);
+});
+
+test('DELETE /mcp cascades execution sessions and task cleanup', async (t) => {
+  const destroyed: string[] = [];
+  const cleared: string[] = [];
+  const tasks = new McpTaskStore();
+  const clearSession = tasks.clearSession.bind(tasks);
+  tasks.clearSession = (sessionId: string): number => {
+    cleared.push(sessionId);
+    return clearSession(sessionId);
+  };
+  const scopedGateway: ExecutionGateway = {
+    ...gateway,
+    destroyOwner: async (owner: string) => {
+      destroyed.push(owner);
+    },
+  };
+
+  const { server, base } = await listen({ gateway: scopedGateway, tasks });
+  t.after(() => server.close());
+
+  const discover = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  const deleted = await fetch(`${base}/mcp`, {
+    method: 'DELETE',
+    headers: { 'mcp-session-id': session },
+  });
+  assert.equal(deleted.status, 204);
+  assert.deepEqual(destroyed, [session]);
+  assert.deepEqual(cleared, [session]);
+
+  const afterDelete = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
+  assert.equal(afterDelete.status, 404);
+});
+
+test('idle transport expiry runs the same cascade', async (t) => {
+  const destroyed: string[] = [];
+  const cleared: string[] = [];
+  const tasks = new McpTaskStore();
+  const clearSession = tasks.clearSession.bind(tasks);
+  tasks.clearSession = (sessionId: string): number => {
+    cleared.push(sessionId);
+    return clearSession(sessionId);
+  };
+  const scopedGateway: ExecutionGateway = {
+    ...gateway,
+    destroyOwner: async (owner: string) => {
+      destroyed.push(owner);
+    },
+  };
+
+  const { server, base } = await listen({
+    gateway: scopedGateway,
+    tasks,
+    sessions: new TransportSessionRegistry({ idleMs: 10 }),
+  });
+  t.after(() => server.close());
+
+  const discover = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const expired = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
+  assert.equal(expired.status, 404);
+  assert.deepEqual(destroyed, [session]);
+  assert.deepEqual(cleared, [session]);
+});
+
+test('DELETE /mcp clears only the bound tasks created through that transport session', async (t) => {
+  let next = 0;
+  const tasks = new McpTaskStore({ idFactory: () => `t_${(next += 1)}` });
+  const boundDispatcher = new JsonRpcDispatcher<McpContext>();
+  boundDispatcher.register('server/discover', () => ({ resultType: 'complete', supportedVersions: ['2026-07-28'] }));
+  boundDispatcher.register('tools/call', (_params, context) =>
+    context.tasks.create(ownerOf(context.identity), `ev_${context.identity.mcp}`),
+  );
+
+  const { server, base } = await listen({
+    tasks,
+    dispatcher: boundDispatcher,
+    identity: { mode: 'loose', bindings: { findByTokenHash: async () => ({ id: 'cb_bound' }) } },
+  });
+  t.after(() => server.close());
+
+  const auth = { authorization: 'Bearer client-token' };
+  const createTask = async (id: number): Promise<{ session: string; taskId: string }> => {
+    const response = await rpc(
+      base,
+      { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'run_script', arguments: {} } },
+      undefined,
+      auth,
+    );
+    const session = response.headers.get('mcp-session-id') ?? '';
+    const body = (await response.json()) as { result: { taskId: string } };
+    return { session, taskId: body.result.taskId };
+  };
+
+  const first = await createTask(1);
+  const second = await createTask(2);
+  assert.equal(tasks.resolve('cb_bound', first.taskId).owner, 'cb_bound');
+
+  const deleted = await fetch(`${base}/mcp`, {
+    method: 'DELETE',
+    headers: { 'mcp-session-id': first.session, ...auth },
+  });
+  assert.equal(deleted.status, 204);
+
+  assert.throws(() => tasks.resolve('cb_bound', first.taskId), TaskMethodError);
+  assert.equal(tasks.resolve('cb_bound', second.taskId).evalTaskId, `ev_${second.session}`);
+});
+
+test('server/discover rejects an unsupported pinned protocol version over HTTP', async (t) => {
+  const realDispatcher = createMethodTable<McpContext>({ toolsList: () => ({ tools: [] }) });
+  const { server, base } = await listen({ dispatcher: realDispatcher });
+  t.after(() => server.close());
+
+  const unsupported = await rpc(base, {
+    jsonrpc: '2.0',
+    id: 7,
+    method: 'server/discover',
+    params: {
+      _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-11-25' },
+    },
+  });
+  assert.equal(unsupported.status, 200);
+  const body = (await unsupported.json()) as {
+    error?: { code: number; data?: unknown };
+  };
+  assert.equal(body.error?.code, -32600);
+  assert.deepEqual(body.error?.data, { supportedVersions: ['2026-07-28'] });
+
+  const accepted = await rpc(base, {
+    jsonrpc: '2.0',
+    id: 8,
+    method: 'server/discover',
+    params: {
+      _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+    },
+  });
+  const acceptedBody = (await accepted.json()) as { result?: { supportedVersions: string[] } };
+  assert.deepEqual(acceptedBody.result?.supportedVersions, ['2026-07-28']);
+
+  const missing = await rpc(base, { jsonrpc: '2.0', id: 9, method: 'server/discover', params: {} });
+  const missingBody = (await missing.json()) as { result?: { supportedVersions: string[] } };
+  assert.deepEqual(missingBody.result?.supportedVersions, ['2026-07-28']);
 });

@@ -105,9 +105,10 @@ async function startServer(t: TestContext, hub: EventHub): Promise<string> {
 async function connect(
   base: string,
   headers: Record<string, string> = {},
+  path = '/events',
 ): Promise<{ controller: AbortController; reader: SseReader }> {
   const controller = new AbortController();
-  const response = await fetch(`${base}/events`, { headers, signal: controller.signal });
+  const response = await fetch(`${base}${path}`, { headers, signal: controller.signal });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type') ?? '', /^text\/event-stream/);
   assert.equal(response.headers.get('cache-control'), 'no-cache, no-transform');
@@ -195,6 +196,47 @@ test('a Last-Event-ID outside the window emits gap before the replay', async (t)
   assert.equal(second.id, 4);
   assert.deepEqual(second.data, { index: 4 });
 
+  await client.reader.cancel();
+  client.controller.abort();
+});
+
+test('?lastEventId= replays like the header, and the header wins when both exist', async (t) => {
+  const hub = createEventHub({ bufferSize: 10, heartbeatMs: 60_000 });
+  const base = await startServer(t, hub);
+
+  assert.equal(hub.publish('eval', { phase: 'start' }), 1);
+  assert.equal(hub.publish('eval', { phase: 'end' }), 2);
+  assert.equal(hub.publish('operation', { id: 'op_1', state: 'ok' }), 3);
+
+  const byQuery = await connect(base, {}, '/events?lastEventId=1');
+  const replay2 = await byQuery.reader.next();
+  assert.equal(replay2.id, 2);
+  assert.deepEqual(replay2.data, { phase: 'end' });
+  const replay3 = await byQuery.reader.next();
+  assert.equal(replay3.id, 3);
+  await byQuery.reader.cancel();
+  byQuery.controller.abort();
+
+  const both = await connect(base, { 'last-event-id': '2' }, '/events?lastEventId=1');
+  const only3 = await both.reader.next();
+  assert.equal(only3.id, 3, 'the header takes precedence over the query parameter');
+  await both.reader.cancel();
+  both.controller.abort();
+});
+
+test('?lastEventId= outside the window still emits the gap frame', async (t) => {
+  const hub = createEventHub({ bufferSize: 1, heartbeatMs: 60_000 });
+  const base = await startServer(t, hub);
+
+  assert.equal(hub.publish('eval', { index: 1 }), 1);
+  assert.equal(hub.publish('eval', { index: 2 }), 2);
+
+  const client = await connect(base, {}, '/events?lastEventId=0');
+  const gap = await client.reader.next();
+  assert.equal(gap.event, 'gap');
+  assert.deepEqual(gap.data, { oldestEventId: 2 });
+  const next = await client.reader.next();
+  assert.equal(next.id, 2);
   await client.reader.cancel();
   client.controller.abort();
 });

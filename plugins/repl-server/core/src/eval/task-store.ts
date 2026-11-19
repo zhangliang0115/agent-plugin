@@ -17,6 +17,17 @@ import { ReplError } from '../errors.ts';
 import { newId } from '../ids.ts';
 import type { EvalTaskEvent, FinishedTaskStatus, StructuredToolError, TaskStatus } from '../types.ts';
 
+/**
+ * Process-wide retention for the task table. It is deliberately larger than a
+ * single execution session's in-flight quota: the table is shared by every
+ * owner, and a finished task stays here for `ttlMs`. The default equals
+ * `maxExecSessions * maxInFlightEvalsPerExecSession` (8 × 8).
+ */
+export const DEFAULT_TASK_CAPACITY = 64;
+
+/** Per-owner retention: `maxExecSessionsPerBinding * maxInFlightEvalsPerExecSession` (4 × 8). */
+export const DEFAULT_TASK_OWNER_CAPACITY = 32;
+
 /** Time source. Tests inject a manual clock and advance it past the TTL. */
 export interface TaskClock {
   now(): number;
@@ -27,8 +38,16 @@ export interface TaskStoreOptions {
   clock: TaskClock;
   /** How long a task stays addressable after creation. Defaults to `LIMITS.taskTtlMs`. */
   ttlMs?: number;
-  /** Maximum retained tasks. Defaults to `LIMITS.inFlightPerExecSession`. */
+  /** Maximum retained tasks across every owner. Defaults to {@link DEFAULT_TASK_CAPACITY}. */
   capacity?: number;
+  /** Maximum retained tasks for one owner. Defaults to {@link DEFAULT_TASK_OWNER_CAPACITY}. */
+  ownerCapacity?: number;
+}
+
+/** Hot-updatable retention limits (`PATCH /settings` capacity changes). */
+export interface TaskStoreLimits {
+  capacity?: number;
+  ownerCapacity?: number;
 }
 
 /** Result of `wait`: terminal tasks in the set plus how many are still `working`. */
@@ -126,6 +145,12 @@ function assertOwner(owner: string): void {
   }
 }
 
+function assertCapacity(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive integer`);
+  }
+}
+
 function isFinishedStatus(status: TaskStatus): status is FinishedTaskStatus {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
@@ -133,7 +158,8 @@ function isFinishedStatus(status: TaskStatus): status is FinishedTaskStatus {
 export class TaskStore {
   private readonly clock: TaskClock;
   private readonly ttlMs: number;
-  private readonly capacity: number;
+  private capacity: number;
+  private ownerCapacity: number;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly listeners = new Set<() => void>();
 
@@ -142,12 +168,15 @@ export class TaskStore {
       throw new TypeError('TaskStore requires a clock');
     }
     const ttlMs = options.ttlMs ?? LIMITS.taskTtlMs;
-    const capacity = options.capacity ?? LIMITS.inFlightPerExecSession;
+    const capacity = options.capacity ?? DEFAULT_TASK_CAPACITY;
+    const ownerCapacity = options.ownerCapacity ?? DEFAULT_TASK_OWNER_CAPACITY;
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError('ttlMs must be a positive number');
-    if (!Number.isInteger(capacity) || capacity < 1) throw new RangeError('capacity must be a positive integer');
+    assertCapacity('capacity', capacity);
+    assertCapacity('ownerCapacity', ownerCapacity);
     this.clock = options.clock;
     this.ttlMs = ttlMs;
     this.capacity = capacity;
+    this.ownerCapacity = ownerCapacity;
   }
 
   /** Number of retained records, including terminal and expired ones awaiting eviction. */
@@ -155,17 +184,44 @@ export class TaskStore {
     return this.tasks.size;
   }
 
+  /** Retained records belonging to one owner (any status). */
+  countForOwner(owner: string): number {
+    assertOwner(owner);
+    let count = 0;
+    for (const record of this.tasks.values()) {
+      if (record.owner === owner) count += 1;
+    }
+    return count;
+  }
+
+  /** Current retention limits. */
+  get limits(): { capacity: number; ownerCapacity: number } {
+    return { capacity: this.capacity, ownerCapacity: this.ownerCapacity };
+  }
+
+  /** Applies hot-updated retention limits; existing records are not evicted eagerly. */
+  updateLimits(limits: TaskStoreLimits): void {
+    if (limits.capacity !== undefined) {
+      assertCapacity('capacity', limits.capacity);
+      this.capacity = limits.capacity;
+    }
+    if (limits.ownerCapacity !== undefined) {
+      assertCapacity('ownerCapacity', limits.ownerCapacity);
+      this.ownerCapacity = limits.ownerCapacity;
+    }
+  }
+
   /**
    * Allocate an `evalTaskId` for an async eval. Reaches `CAPACITY_EXCEEDED` when
-   * the table is full of working or unconsumed tasks and no expired/consumed
-   * record can be evicted.
+   * the owner's slice or the whole table is full of live records and no
+   * expired/consumed record can be evicted.
    */
   create(evalId: number, owner: string): string {
     assertOwner(owner);
     if (!Number.isInteger(evalId) || evalId < 0) {
       throw new TypeError('evalId must be a non-negative integer');
     }
-    this.makeRoom();
+    this.makeRoom(owner);
 
     const now = this.clock.now();
     const taskId = newId('task');
@@ -197,6 +253,60 @@ export class TaskStore {
   /** Mark the eval `cancelled` (user or client cancel). Returns false when not applicable. */
   cancel(taskId: string, outcome: TaskOutcome = {}): boolean {
     return this.settle(taskId, 'cancelled', outcome);
+  }
+
+  /**
+   * Patches the eval id of a task that was allocated before its eval registered.
+   * `create` accepts `0` as the placeholder; the caller sets the real id once the
+   * executor reports it. A no-op for unknown or already-patched records.
+   */
+  setEvalId(taskId: string, evalId: number): boolean {
+    if (!Number.isInteger(evalId) || evalId < 0) return false;
+    const record = this.tasks.get(taskId);
+    if (record === undefined) return false;
+    record.evalId = evalId;
+    return true;
+  }
+
+  /** True while the record is retained (any status, including expired-but-unswept). */
+  has(taskId: string): boolean {
+    return this.tasks.has(taskId);
+  }
+
+  /** Ids of the owner's unconsumed, unexpired tasks at call time, in creation order. */
+  unconsumedIds(owner: string): string[] {
+    assertOwner(owner);
+    const now = this.clock.now();
+    return [...this.tasks.values()]
+      .filter((record) => record.owner === owner && !record.consumed && now < record.expiresAt)
+      .map((record) => record.taskId);
+  }
+
+  /** Drops one record regardless of status. Returns false for an unknown id. */
+  remove(taskId: string): boolean {
+    const removed = this.tasks.delete(taskId);
+    if (removed) this.changed();
+    return removed;
+  }
+
+  /** Drops every record of one owner; used by the `DELETE /mcp` cascade. */
+  removeOwner(owner: string): number {
+    assertOwner(owner);
+    let removed = 0;
+    for (const [taskId, record] of this.tasks) {
+      if (record.owner !== owner) continue;
+      this.tasks.delete(taskId);
+      removed += 1;
+    }
+    if (removed > 0) this.changed();
+    return removed;
+  }
+
+  /** Drops every record; used on process shutdown. */
+  clear(): void {
+    if (this.tasks.size === 0) return;
+    this.tasks.clear();
+    this.changed();
   }
 
   /**
@@ -406,11 +516,26 @@ export class TaskStore {
     return this.clock.now() >= record.expiresAt;
   }
 
-  /** Drop expired records first, then consumed ones, so `create` stays bounded. */
-  private makeRoom(): void {
-    if (this.tasks.size < this.capacity) return;
+  /** Live (unexpired) records of one owner at `now`. */
+  private liveCountForOwner(owner: string, now: number): number {
+    let count = 0;
+    for (const record of this.tasks.values()) {
+      if (record.owner === owner && now < record.expiresAt) count += 1;
+    }
+    return count;
+  }
 
+  /**
+   * Drop expired records first, then consumed ones, so `create` stays bounded.
+   * The owner's own slice is checked separately: another owner's tasks can
+   * never block it before the process-wide capacity is reached.
+   */
+  private makeRoom(owner: string): void {
     const now = this.clock.now();
+    if (this.tasks.size < this.capacity && this.liveCountForOwner(owner, now) < this.ownerCapacity) {
+      return;
+    }
+
     for (const [taskId, record] of this.tasks) {
       if (now >= record.expiresAt) this.tasks.delete(taskId);
     }
@@ -427,8 +552,26 @@ export class TaskStore {
       this.tasks.delete(victim);
     }
 
+    while (this.liveCountForOwner(owner, now) >= this.ownerCapacity) {
+      let victim: string | undefined;
+      for (const [taskId, record] of this.tasks) {
+        if (record.owner === owner && record.consumed) {
+          victim = taskId;
+          break;
+        }
+      }
+      if (victim === undefined) break;
+      this.tasks.delete(victim);
+    }
+
     if (this.tasks.size >= this.capacity) {
       throw new ReplError('CAPACITY_EXCEEDED', `task store capacity ${this.capacity} reached`);
+    }
+    if (this.liveCountForOwner(owner, now) >= this.ownerCapacity) {
+      throw new ReplError(
+        'CAPACITY_EXCEEDED',
+        `task store owner capacity ${this.ownerCapacity} reached for ${owner}`,
+      );
     }
   }
 

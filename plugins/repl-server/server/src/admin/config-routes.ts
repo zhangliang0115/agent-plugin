@@ -30,10 +30,12 @@ import {
   adminHandler,
   adminJson,
   invalidField,
+  nullIfBlank,
   queryValue,
   rejectUnknownFields,
   requestSegments,
   requireObjectBody,
+  requiredSecretNames,
   type AdminHandler,
   type AdminRequest,
   type AdminResponse,
@@ -128,9 +130,18 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
     const segments = requestSegments({ ...request, path });
 
     if (request.method === 'GET' && path === '/secrets') {
-      const names = await deps.secrets.listNames();
+      const stored = new Set(await deps.secrets.listNames());
+      const declared = new Set<string>();
+      for (const server of await deps.servers.list()) {
+        // Every env/header key is a declaration, whether it holds a literal or
+        // a $secret reference; an arg declares a key only through a reference.
+        for (const key of Object.keys(server.env)) declared.add(key);
+        for (const key of Object.keys(server.headers)) declared.add(key);
+        for (const name of requiredSecretNames(server)) declared.add(name);
+      }
+      const names = [...new Set([...stored, ...declared])].sort();
       return adminJson(200, {
-        secrets: names.map((name) => ({ name, configured: true })),
+        secrets: names.map((name) => ({ name, configured: stored.has(name) })),
       });
     }
 
@@ -288,6 +299,19 @@ function configFromRecord(
   };
 }
 
+/**
+ * Source recorded for an imported summary: an unchanged summary keeps its
+ * provenance, a changed one is a manual edit and an absent one has no source.
+ */
+function summarySourceForImport(
+  desired: ServerConfigRecord,
+  current: ServerRecord | null,
+): string | null {
+  const summary = desired.summary ?? null;
+  if (current !== null && (current.summary ?? null) === summary) return current.summarySource;
+  return summary === null ? null : 'manual';
+}
+
 function patchFromRecord(record: ServerConfigRecord): ServerConfigPatch {
   return {
     label: record.label,
@@ -334,7 +358,13 @@ function createServerStoreImportTarget(servers: ServerStore): ConfigImportTarget
       };
 
       try {
-        for (const desired of input.upserts) {
+        for (const entry of input.upserts) {
+          // A blank summary is "no summary" on every write path, so every
+          // downstream create/patch and source comparison sees null.
+          const desired: ServerConfigRecord = {
+            ...entry,
+            summary: nullIfBlank(entry.summary),
+          };
           const current = await servers.get(desired.id);
           if (current === null) {
             await servers.create(configFromRecord(desired));
@@ -346,7 +376,9 @@ function createServerStoreImportTarget(servers: ServerStore): ConfigImportTarget
           if (current.transport !== desired.transport) {
             // `ServerStore.update` cannot change transport, so the row is replaced.
             await servers.remove(desired.id, await servers.revision());
-            await servers.create(configFromRecord(desired));
+            await servers.create(
+              configFromRecord(desired, summarySourceForImport(desired, current)),
+            );
             state.replaced.push(previous);
             continue;
           }
@@ -358,12 +390,20 @@ function createServerStoreImportTarget(servers: ServerStore): ConfigImportTarget
           const currentDiscovery = current.toolDiscovery ?? null;
           if (desiredDiscovery === null && currentDiscovery !== null) {
             await servers.remove(desired.id, await servers.revision());
-            await servers.create(configFromRecord(desired));
+            await servers.create(
+              configFromRecord(desired, summarySourceForImport(desired, current)),
+            );
             state.replaced.push(previous);
             continue;
           }
 
-          await servers.update(desired.id, patchFromRecord(desired), await servers.revision());
+          const patch = patchFromRecord(desired);
+          // A changed summary is a manual edit; an unchanged one keeps its
+          // provenance (for example an AI-authored summary).
+          if ((desired.summary ?? null) !== (current.summary ?? null)) {
+            patch.summarySource = summarySourceForImport(desired, current);
+          }
+          await servers.update(desired.id, patch, await servers.revision());
           state.updated.push(previous);
         }
 
@@ -425,7 +465,9 @@ async function rollbackImport(
         await servers.create(configFromRecord(previous, previous.summarySource));
         return;
       }
-      await servers.update(previous.id, patchFromRecord(previous), await servers.revision());
+      const patch = patchFromRecord(previous);
+      patch.summarySource = previous.summarySource;
+      await servers.update(previous.id, patch, await servers.revision());
     });
   }
 

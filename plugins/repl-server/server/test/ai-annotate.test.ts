@@ -9,6 +9,7 @@ import type { TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { AdminApiError } from '../src/admin/servers.ts';
+import { applyAnnotation } from '../src/ai/apply.ts';
 import type { AiRunAuditEvent, AiService } from '../src/ai/service.ts';
 import { createAiService } from '../src/ai/service.ts';
 import { DEFAULT_AI_SETTINGS, putAiSettings } from '../src/ai/settings.ts';
@@ -366,6 +367,33 @@ test('summary_source follows only real summary changes', async (t) => {
 
   // Clearing the summary clears the source.
   await fixture.service.annotateApply('pg', { summary: null }, getRevision(fixture.db));
+  assert.equal(getServer(fixture.db, 'pg')?.summary, null);
+  assert.equal(getServer(fixture.db, 'pg')?.summarySource, null);
+});
+
+test('blank summaries are stored as null with no source', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db, { summary: '人工摘要', summarySource: 'manual' });
+  seedTool(fixture.db);
+
+  // A client may resubmit an edited draft straight to applyAnnotation.
+  applyAnnotation(
+    fixture.db,
+    { serverId: 'pg', patch: { summary: '   ' } },
+    getRevision(fixture.db),
+  );
+  assert.equal(getServer(fixture.db, 'pg')?.summary, null);
+  assert.equal(getServer(fixture.db, 'pg')?.summarySource, null);
+
+  // The validate + apply route normalizes the empty string too.
+  await fixture.service.annotateApply(
+    'pg',
+    { summary: '恢复的摘要' },
+    getRevision(fixture.db),
+  );
+  assert.equal(getServer(fixture.db, 'pg')?.summarySource, 'ai');
+
+  await fixture.service.annotateApply('pg', { summary: '' }, getRevision(fixture.db));
   assert.equal(getServer(fixture.db, 'pg')?.summary, null);
   assert.equal(getServer(fixture.db, 'pg')?.summarySource, null);
 });

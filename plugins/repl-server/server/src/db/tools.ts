@@ -229,6 +229,23 @@ export function refreshServerIndex(db: DatabaseSync, serverId: string, onlyName?
   }
 }
 
+/**
+ * Marks every `discovered_via = 'search'` row of one server stale (design 07
+ * §3.8, mode switch back to static). Runs in the caller's transaction and is
+ * idempotent: already-stale rows are left untouched. `stale_override` does
+ * **not** exempt a row — it keeps search visibility, not callability.
+ */
+export function demoteDiscoveredTools(db: DatabaseSync, serverId: string): number {
+  const result = db
+    .prepare(`
+      UPDATE tools
+      SET stale = 1
+      WHERE server_id = ? AND discovered_via = 'search' AND stale = 0
+    `)
+    .run(serverId);
+  return Number(result.changes);
+}
+
 /** Applies admin-editable fields to an in-memory row; pure, no database access. */
 export function applyToolPatch(current: ToolRecord, patch: ToolPatch): ToolRecord {
   const next: ToolRecord = { ...current };

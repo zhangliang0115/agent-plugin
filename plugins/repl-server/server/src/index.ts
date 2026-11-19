@@ -50,7 +50,7 @@ if (options.stdio) {
   const bootId = newId('boot');
   const sweep = startupSweep({ root: dataRoot, bootId });
   console.error(
-    `repl-server: startup sweep ${sweep.status} boot=${bootId} killed=${sweep.killed.length} orphans=${sweep.reportPath ?? 'none'}`,
+    `repl-server: startup sweep ${sweep.status} boot=${bootId} killed=${sweep.killed.length} ai-runs-cleaned=${sweep.cleanedAiRuns.length} orphans=${sweep.reportPath ?? 'none'}`,
   );
   if (sweep.status === 'locked') {
     console.error('repl-server: another instance holds the instance lock');

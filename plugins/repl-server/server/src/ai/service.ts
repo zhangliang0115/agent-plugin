@@ -185,6 +185,12 @@ export interface AiService {
   onToolsIndexed(serverId: string, options?: { explicit?: boolean }): Promise<void>;
   /** PATCH/refresh/delete: a pending preview built from older metadata is stale. */
   onServerMutated(serverId: string): void;
+  /**
+   * Shuts the AI subsystem down: queued runs are rejected, in-flight
+   * `claude -p` process groups are terminated and their run directories are
+   * removed. Idempotent; callers may await it more than once.
+   */
+  close(): Promise<void>;
 }
 
 export interface AiServiceDeps {
@@ -204,6 +210,11 @@ export interface AiServiceDeps {
   runner?: AiRunner;
   /** Production wiring: the exported `parseCreateServer` from `admin/servers.ts`. */
   parseCreateServer?: AiParseCreateServer;
+  /**
+   * Boot id recorded in the AI run ledger. Assembly should pass the same id as
+   * the startup sweep; when absent the runner uses one id per server process.
+   */
+  bootId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +346,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
       ...(deps.dataDir === undefined ? {} : { dataDir: deps.dataDir }),
       ...(deps.spawn === undefined ? {} : { spawn: deps.spawn }),
       ...(deps.extraEnv === undefined ? {} : { extraEnv: deps.extraEnv }),
+      ...(deps.bootId === undefined ? {} : { bootId: deps.bootId }),
       clock,
       log,
     });
@@ -343,6 +355,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
   const annotations = createAnnotationStore({ clock });
   const createdThisProcess = new Set<string>();
   const lastAutoAt = new Map<string, number>();
+  let closePromise: Promise<void> | null = null;
 
   function ensureEnabled(): AiSettings {
     const ai = getAiSettings(deps.db);
@@ -853,6 +866,19 @@ export function createAiService(deps: AiServiceDeps): AiService {
     }
   }
 
+  function close(): Promise<void> {
+    if (closePromise !== null) return closePromise;
+    // Reject queued runs first so no new `claude -p` spawns while the runner
+    // terminates the ones already in flight.
+    limiter.close();
+    closePromise = Promise.resolve()
+      .then(() => runner.close())
+      .catch((error: unknown) => {
+        log(`ai close failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return closePromise;
+  }
+
   return {
     getConfig,
     putConfig,
@@ -864,5 +890,6 @@ export function createAiService(deps: AiServiceDeps): AiService {
     onServerCreated,
     onToolsIndexed,
     onServerMutated,
+    close,
   };
 }

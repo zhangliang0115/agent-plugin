@@ -10,6 +10,7 @@ import test from 'node:test';
 import { createAdminDiscoverHandler, sameCommandLine } from '../src/admin/discover.ts';
 import {
   createAdminServersHandler,
+  createOperationLauncher,
   AdminApiError,
   type AdminHandler,
   type AdminRequest,
@@ -27,6 +28,7 @@ import {
 import {
   createAdminSettingsHandler,
   DEFAULT_CAPACITY,
+  type CapacitySettings,
   type RuntimeSettings,
   type SettingsStore,
   type StoredSettings,
@@ -794,6 +796,175 @@ test('PATCH /servers/:id requires If-Match and a non-empty, coherent patch', asy
   assert.equal(errorCode(missing), 'SERVER_NOT_FOUND');
 });
 
+test('PATCH summary moves summary_source and clearing it removes the source', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, { id: 'pg', summary: 'ai draft', summarySource: 'ai' });
+
+  const revision = await env.serverStore.revision();
+  const edited = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', {
+      body: { summary: '人工摘要' },
+      ifMatch: revision,
+    }),
+  );
+  assert.equal(edited.status, 200);
+  const editedServer = bodyOf(edited)['server'] as Record<string, unknown>;
+  assert.equal(editedServer['summary'], '人工摘要');
+  assert.equal(editedServer['summarySource'], 'manual');
+  assert.equal((await env.serverStore.get('pg'))?.summarySource, 'manual');
+
+  const cleared = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', {
+      body: { summary: null },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(cleared.status, 200);
+  const clearedServer = bodyOf(cleared)['server'] as Record<string, unknown>;
+  assert.equal(clearedServer['summary'], null);
+  assert.equal(clearedServer['summarySource'], null);
+});
+
+test('PATCH with an unchanged summary keeps its source', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, { id: 'pg', summary: 'ai draft', summarySource: 'ai' });
+
+  const revision = await env.serverStore.revision();
+  const edited = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', {
+      // The manage UI sends every field on save; the summary is unchanged here.
+      body: { label: 'PostgreSQL', summary: 'ai draft' },
+      ifMatch: revision,
+    }),
+  );
+  assert.equal(edited.status, 200);
+  const editedServer = bodyOf(edited)['server'] as Record<string, unknown>;
+  assert.equal(editedServer['summary'], 'ai draft');
+  assert.equal(editedServer['summarySource'], 'ai');
+  assert.equal((await env.serverStore.get('pg'))?.summarySource, 'ai');
+
+  const changed = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', {
+      body: { summary: 'ai draft v2' },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(changed.status, 200);
+  assert.equal((await env.serverStore.get('pg'))?.summarySource, 'manual');
+});
+
+test('POST /servers stores blank summaries as null without a source', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+
+  const blank = await call(
+    handler,
+    makeRequest('POST', '/servers', {
+      body: { id: 'blank', command: 'npx', summary: '   ' },
+    }),
+  );
+  assert.equal(blank.status, 201);
+  const blankServer = bodyOf(blank)['server'] as Record<string, unknown>;
+  assert.equal(blankServer['summary'], null);
+  assert.equal(blankServer['summarySource'], null);
+
+  const empty = await call(
+    handler,
+    makeRequest('POST', '/servers', {
+      body: { id: 'empty', command: 'npx', summary: '' },
+    }),
+  );
+  assert.equal(empty.status, 201);
+  assert.equal((bodyOf(empty)['server'] as Record<string, unknown>)['summary'], null);
+
+  const nonBlank = await call(
+    handler,
+    makeRequest('POST', '/servers', {
+      body: { id: 'real', command: 'npx', summary: '真实摘要' },
+    }),
+  );
+  assert.equal(nonBlank.status, 201);
+  const realServer = bodyOf(nonBlank)['server'] as Record<string, unknown>;
+  assert.equal(realServer['summary'], '真实摘要');
+  assert.equal(realServer['summarySource'], 'manual');
+});
+
+test('PATCH normalizes blank summaries to null and clears the source', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, { id: 'pg', summary: 'ai draft', summarySource: 'ai' });
+
+  const blank = await call(
+    handler,
+    makeRequest('PATCH', '/servers/pg', {
+      body: { summary: '   ' },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(blank.status, 200);
+  const blankServer = bodyOf(blank)['server'] as Record<string, unknown>;
+  assert.equal(blankServer['summary'], null);
+  assert.equal(blankServer['summarySource'], null);
+  assert.equal((await env.serverStore.get('pg'))?.summary, null);
+  assert.equal((await env.serverStore.get('pg'))?.summarySource, null);
+
+  await addServer(env.serverStore, { id: 'plain', summary: 'human', summarySource: 'manual' });
+  const empty = await call(
+    handler,
+    makeRequest('PATCH', '/servers/plain', {
+      body: { summary: '' },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(empty.status, 200);
+  assert.equal((await env.serverStore.get('plain'))?.summary, null);
+  assert.equal((await env.serverStore.get('plain'))?.summarySource, null);
+});
+
+test('refresh and restart notify onToolsRefreshed after the pool settles', async () => {
+  const env = testEnv();
+  await addServer(env.serverStore, { id: 'pg' });
+  const operations = createOperationLauncher();
+  const refreshed: string[] = [];
+  const handler = createAdminServersHandler({
+    servers: env.serverStore,
+    pool: env.pool,
+    operations,
+    onToolsRefreshed: (id) => {
+      refreshed.push(id);
+    },
+  });
+
+  async function waitForOperation(operationId: string): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const operation = operations.get?.(operationId);
+      if (operation?.state !== 'running') return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.fail(`operation ${operationId} never settled`);
+  }
+
+  const refresh = await call(handler, makeRequest('POST', '/servers/pg/tools/refresh'));
+  assert.equal(refresh.status, 202);
+  await waitForOperation(String(bodyOf(refresh)['operationId']));
+  assert.deepEqual(refreshed, ['pg']);
+
+  const restart = await call(handler, makeRequest('POST', '/servers/pg/restart'));
+  assert.equal(restart.status, 202);
+  await waitForOperation(String(bodyOf(restart)['operationId']));
+  assert.deepEqual(refreshed, ['pg', 'pg']);
+
+  const connect = await call(handler, makeRequest('POST', '/servers/pg/connect'));
+  await waitForOperation(String(bodyOf(connect)['operationId']));
+  assert.deepEqual(refreshed, ['pg', 'pg'], 'plain connect must not re-trigger AI');
+});
+
 test('seeded builtin servers can only change display metadata', async () => {
   const env = testEnv();
   const handler = createServerHandler(env);
@@ -1281,6 +1452,41 @@ test('GET/PATCH /settings validates capacity and bumps the revision', async () =
   );
   assert.equal(wrongType.status, 400);
   assert.equal(errorCode(wrongType), 'INVALID_FIELD');
+});
+
+test('PATCH /settings applies committed capacity through onSettingsChanged', async () => {
+  const env = testEnv();
+  const applied: CapacitySettings[] = [];
+  const handler = createAdminSettingsHandler({
+    settings: env.settingsStore,
+    onSettingsChanged: (capacity) => {
+      applied.push(capacity);
+    },
+  });
+
+  const updated = await call(
+    handler,
+    makeRequest('PATCH', '/settings', {
+      body: { capacity: { maxExecSessions: 4, maxServeProcesses: 4 } },
+      ifMatch: 1,
+    }),
+  );
+  assert.equal(updated.status, 200);
+  assert.deepEqual(applied, [
+    { ...DEFAULT_CAPACITY, maxExecSessions: 4, maxServeProcesses: 4 },
+  ]);
+
+  // The relation check still rejects before anything is persisted or applied.
+  const relation = await call(
+    handler,
+    makeRequest('PATCH', '/settings', {
+      body: { capacity: { maxServeProcesses: 2 } },
+      ifMatch: 2,
+    }),
+  );
+  assert.equal(relation.status, 422);
+  assert.equal(errorCode(relation), 'INVALID_CAPACITY');
+  assert.equal(applied.length, 1);
 });
 
 // ---------------------------------------------------------------------------

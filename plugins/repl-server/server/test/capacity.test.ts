@@ -6,6 +6,7 @@ import {
   CapacityExceededError,
   capacityLimitsFromEnv,
   resolveCapacityLimits,
+  resolveCapacityLimitsFromSettings,
 } from '../src/exec/capacity.ts';
 
 test('frozen defaults match design 03 §2.6 and protocol §8', () => {
@@ -13,8 +14,12 @@ test('frozen defaults match design 03 §2.6 and protocol §8', () => {
     maxExecSessions: 8,
     maxExecSessionsPerBinding: 4,
     maxWorkspacesPerMcpSession: 4,
+    maxServeProcesses: 8,
+    maxWorkers: 8,
     maxInFlightEvalsPerExecSession: 8,
     maxInFlightEvalsPerBinding: 16,
+    maxInFlightCallsPerBindingPerServer: 4,
+    maxQueuedCallsPerBindingPerServer: 32,
     evictIdleMs: 300_000,
   });
   assert.ok(Object.isFrozen(CAPACITY_DEFAULTS));
@@ -50,6 +55,7 @@ test('capacityLimitsFromEnv applies REPL_CAPACITY_* outside production', () => {
     REPL_CAPACITY_EVICT_IDLE_MS: '0',
   });
   assert.deepEqual(overridden, {
+    ...CAPACITY_DEFAULTS,
     maxExecSessions: 2,
     maxExecSessionsPerBinding: 1,
     maxWorkspacesPerMcpSession: 1,
@@ -63,6 +69,90 @@ test('capacityLimitsFromEnv applies REPL_CAPACITY_* outside production', () => {
     capacityLimitsFromEnv({ REPL_CAPACITY_MAX_EXEC_SESSIONS: '2', REPL_CAPACITY_EVICT_IDLE_MS: ' ' }),
     { ...CAPACITY_DEFAULTS, maxExecSessions: 2 },
   );
+});
+
+test('capacityLimitsFromEnv covers the pool and serve keys', () => {
+  const limits = capacityLimitsFromEnv({
+    REPL_CAPACITY_MAX_SERVE_PROCESSES: '3',
+    REPL_CAPACITY_MAX_WORKERS: '5',
+    REPL_CAPACITY_MAX_IN_FLIGHT_CALLS_PER_BINDING_PER_SERVER: '1',
+    REPL_CAPACITY_MAX_QUEUED_CALLS_PER_BINDING_PER_SERVER: '2',
+  });
+  assert.equal(limits.maxServeProcesses, 3);
+  assert.equal(limits.maxWorkers, 5);
+  assert.equal(limits.maxInFlightCallsPerBindingPerServer, 1);
+  assert.equal(limits.maxQueuedCallsPerBindingPerServer, 2);
+});
+
+test('resolveCapacityLimitsFromSettings merges defaults ← stored ← env', () => {
+  const stored = {
+    capacity: {
+      maxExecSessions: 6,
+      maxServeProcesses: 6,
+      maxInFlightCallsPerBindingPerServer: 2,
+      maxQueuedCallsPerBindingPerServer: 7,
+    },
+  };
+
+  const onlyStored = resolveCapacityLimitsFromSettings(stored, {});
+  assert.equal(onlyStored.maxExecSessions, 6);
+  assert.equal(onlyStored.maxServeProcesses, 6);
+  assert.equal(onlyStored.maxInFlightCallsPerBindingPerServer, 2);
+  assert.equal(onlyStored.maxQueuedCallsPerBindingPerServer, 7);
+  // Untouched keys keep their defaults.
+  assert.equal(onlyStored.maxWorkspacesPerMcpSession, CAPACITY_DEFAULTS.maxWorkspacesPerMcpSession);
+
+  const envWins = resolveCapacityLimitsFromSettings(stored, {
+    REPL_CAPACITY_MAX_EXEC_SESSIONS: '3',
+    REPL_CAPACITY_MAX_SERVE_PROCESSES: '4',
+    REPL_CAPACITY_MAX_QUEUED_CALLS_PER_BINDING_PER_SERVER: '1',
+  });
+  assert.equal(envWins.maxExecSessions, 3, 'env must override stored settings');
+  assert.equal(envWins.maxServeProcesses, 4);
+  assert.equal(envWins.maxQueuedCallsPerBindingPerServer, 1);
+  assert.equal(
+    envWins.maxInFlightCallsPerBindingPerServer,
+    2,
+    'keys without an env override keep the stored value',
+  );
+
+  // A bare capacity object (no `capacity` wrapper) is accepted too.
+  assert.equal(resolveCapacityLimitsFromSettings({ maxWorkers: 2 }, {}).maxWorkers, 2);
+});
+
+test('resolveCapacityLimitsFromSettings caps execution sessions by maxWorkers', () => {
+  const stored = { capacity: { maxExecSessions: 8, maxWorkers: 3 } };
+  const limits = resolveCapacityLimitsFromSettings(stored, {});
+  assert.equal(limits.maxExecSessions, 3, 'one worker per exec session caps the effective limit');
+  assert.equal(limits.maxWorkers, 3);
+
+  const envRaisesWorkers = resolveCapacityLimitsFromSettings(stored, {
+    REPL_CAPACITY_MAX_WORKERS: '12',
+  });
+  assert.equal(envRaisesWorkers.maxExecSessions, 8);
+  assert.equal(envRaisesWorkers.maxWorkers, 12);
+});
+
+test('resolveCapacityLimitsFromSettings ignores invalid stored values and production env', () => {
+  const stored = {
+    capacity: {
+      maxExecSessions: 0,
+      maxServeProcesses: 2.5,
+      maxWorkers: 'many',
+      maxInFlightCallsPerBindingPerServer: 3,
+    },
+  };
+  const limits = resolveCapacityLimitsFromSettings(stored, {});
+  assert.equal(limits.maxExecSessions, CAPACITY_DEFAULTS.maxExecSessions);
+  assert.equal(limits.maxServeProcesses, CAPACITY_DEFAULTS.maxServeProcesses);
+  assert.equal(limits.maxWorkers, CAPACITY_DEFAULTS.maxWorkers);
+  assert.equal(limits.maxInFlightCallsPerBindingPerServer, 3);
+
+  const production = resolveCapacityLimitsFromSettings(stored, {
+    NODE_ENV: 'production',
+    REPL_CAPACITY_MAX_IN_FLIGHT_CALLS_PER_BINDING_PER_SERVER: '1',
+  });
+  assert.equal(production.maxInFlightCallsPerBindingPerServer, 3, 'stored settings still apply');
 });
 
 test('capacityLimitsFromEnv ignores overrides in production', () => {

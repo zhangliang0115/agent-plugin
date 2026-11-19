@@ -1,6 +1,7 @@
 /** Server configuration repository. Every write commits one catalog revision. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
+import { decodeStoredDiscovery } from '../discovery/config.ts';
 import { withTransaction } from './migrate.ts';
 import { bumpRevision, getRevision } from './meta.ts';
 import {
@@ -16,7 +17,7 @@ import {
   requireText,
 } from './schema.ts';
 import type { DbRow } from './schema.ts';
-import { refreshServerIndex } from './tools.ts';
+import { demoteDiscoveredTools, refreshServerIndex } from './tools.ts';
 
 export const SEED_SERVER_IDS = ['__official__', '__builtin__'] as const;
 
@@ -189,6 +190,13 @@ export function updateServer(
       id,
     );
     if (indexInputsChanged(current, next)) refreshServerIndex(db, id);
+    if (isSearchDiscovery(current.discoveryJson) && !isSearchDiscovery(next.discoveryJson)) {
+      // The switch back to static and the demotion are one write: a failure in
+      // either rolls both back (design 07 §3.8). demoteDiscoveredTools is
+      // idempotent, so the admin layer's extra call stays harmless until the
+      // assembly removes it.
+      demoteDiscoveredTools(db, id);
+    }
     const revision = bumpRevision(db);
     return { server: mustGetServer(db, id), revision };
   });
@@ -240,6 +248,11 @@ function applyServerPatch(current: ServerRecord, patch: ServerPatch): ServerReco
 
 function indexInputsChanged(before: ServerRecord, after: ServerRecord): boolean {
   return before.summary !== after.summary || before.tags.join('\u0000') !== after.tags.join('\u0000');
+}
+
+/** Stored configs are decoded with the shared validator; malformed text reads as static. */
+function isSearchDiscovery(discoveryJson: string | null): boolean {
+  return decodeStoredDiscovery(discoveryJson)?.mode === 'search';
 }
 
 function toServer(row: DbRow): ServerRecord {

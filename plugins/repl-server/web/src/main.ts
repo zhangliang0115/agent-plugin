@@ -45,7 +45,7 @@ const PAGES: Readonly<Record<string, PageMeta>> = {
   },
   '/manage': {
     title: '管理',
-    summary: 'servers、tools、clients、密钥与导入导出。',
+    summary: '服务端、工具、客户端、密钥、告警、AI 配置、导入导出与发现；八个分区按连接 / 配置 / 迁移分组。',
   },
 };
 
@@ -80,7 +80,12 @@ if (root === null) {
 }
 const appRoot: HTMLElement = root;
 
-let activePage: PageHandle | null = null;
+/** Pages may expose a leave guard; the manage editor uses it for unsaved drafts. */
+interface ShellPageHandle extends PageHandle {
+  canLeave?: () => boolean;
+}
+
+let activePage: ShellPageHandle | null = null;
 let unauthorizedShown = false;
 let healthTimer: number | null = null;
 let healthInFlight = false;
@@ -203,9 +208,22 @@ function showShell(): void {
   appRoot.innerHTML = shellMarkup();
   bindShellActions();
   applyTheme(currentTheme(), false);
+  // Registered before `router.start()` so a cancelled browser back/forward can restore
+  // the previous hash before the router sees the change.
+  window.addEventListener('hashchange', guardHashNavigation);
   router.start();
   startHealthChecks();
   void hydrateCsrfToken();
+}
+
+/** Browser back/forward has no click to cancel; restore the old hash when the page objects. */
+function guardHashNavigation(): void {
+  if (canLeavePage()) return;
+  try {
+    window.history.replaceState(null, '', `#${router.current().hash}`);
+  } catch {
+    // A blocked history API leaves the address bar changed; the page stays mounted.
+  }
 }
 
 function bindShellActions(): void {
@@ -225,6 +243,25 @@ function bindShellActions(): void {
       }
       refreshCurrentPage();
     });
+
+  appRoot
+    .querySelector<HTMLElement>('.sidebar-nav')
+    ?.addEventListener('click', (event) => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const link = target.closest<HTMLAnchorElement>('a[data-route]');
+      if (link === null) return;
+      if (link.dataset['route'] === router.current().route) return;
+      if (!canLeavePage()) event.preventDefault();
+    });
+}
+
+/** Asks the mounted page before a shell action replaces it; pages without a guard leave. */
+function canLeavePage(): boolean {
+  return activePage?.canLeave === undefined ? true : activePage.canLeave();
 }
 
 function applyTheme(theme: Theme, persist: boolean): void {
@@ -247,6 +284,7 @@ function applyTheme(theme: Theme, persist: boolean): void {
 }
 
 function refreshCurrentPage(): void {
+  if (!canLeavePage()) return;
   renderRoute(router.current());
 }
 

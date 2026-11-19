@@ -438,6 +438,7 @@ export function normalizeProposalServer(value: unknown): ProposalServer {
   let summary: string | null = null;
   if (value['summary'] !== undefined && value['summary'] !== null) {
     summary = readText(value['summary'], 'server.summary', 160);
+    if (summary === '') summary = null;
   }
 
   if (transport === 'stdio') {
@@ -567,9 +568,10 @@ export function toServerConfig(server: ProposalServer): ServerConfig {
     enabled: server.enabled,
     connectMode: server.connectMode,
     summary: server.summary,
-    // Creating through AI apply marks the origin even when the draft has no
-    // summary yet (08 §3.5).
-    summarySource: 'ai',
+    // Creating through AI apply marks the origin of a real summary (08 §3.5).
+    // Without a summary there is no provenance to record, matching
+    // `parseCreateServer` so both apply paths store the same value.
+    summarySource: server.summary === null ? null : 'ai',
     category: server.category,
     tags: server.tags,
     timeoutMs: 60_000,
@@ -719,7 +721,7 @@ export function normalizeAnnotation(
       if (text.length > 160) {
         throw annotationInvalid(['summary must be at most 160 characters'], ['summary']);
       }
-      result.summary = text;
+      result.summary = text === '' ? null : text;
     } else {
       result.summary = null;
     }

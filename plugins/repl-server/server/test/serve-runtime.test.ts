@@ -151,6 +151,7 @@ interface HarnessOptions {
   readonly readyTimeoutMs?: number;
   readonly bin?: string;
   readonly stateBootId?: string;
+  readonly maxProcesses?: number;
 }
 
 interface Harness {
@@ -176,6 +177,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const runtime = createServeRuntime({
     dataDir,
     ...(options.bin === undefined ? {} : { bin: options.bin }),
+    ...(options.maxProcesses === undefined ? {} : { maxProcesses: options.maxProcesses }),
     log: (line) => logs.push(line),
     spawn: spawner.spawn,
     pingIntervalMs: 0,
@@ -245,6 +247,29 @@ test('the same workspace reuses one serve and one client', async (t) => {
   assert.equal(first, second);
   assert.equal(harness.spawner.spawns.length, 1);
   assert.equal(harness.ledger.listServeRecords().length, 1);
+});
+
+test('execution sessions in one workspace get separate serves and release independently', async (t) => {
+  const harness = await createHarness();
+  t.after(async () => await harness.cleanup());
+
+  const first = await harness.runtime.acquire('/ws/shared', { execSessionId: 'es_a' });
+  const second = await harness.runtime.acquire('/ws/shared', { execSessionId: 'es_b' });
+  assert.notEqual(first, second);
+  assert.equal(harness.spawner.spawns.length, 2);
+
+  // The same execution session keeps reusing its own handle.
+  const again = await harness.runtime.acquire('/ws/shared', { execSessionId: 'es_a' });
+  assert.equal(again, first);
+  assert.equal(harness.spawner.spawns.length, 2);
+
+  await harness.runtime.release('/ws/shared', { execSessionId: 'es_a' });
+  assert.equal(first.isClosed, true);
+  assert.equal(second.isClosed, false);
+  assert.equal(harness.ledger.listServeRecords().length, 1);
+
+  // The surviving session still answers.
+  assert.deepEqual(await second.listTools(), [{ name: 'Bash' }]);
 });
 
 test('concurrent acquire calls share one startup', async (t) => {
@@ -402,4 +427,66 @@ test('REPL_CLAUDE_BIN overrides the serve command, and bin wins over it', async 
   const optionSeparator = optionSpawn.args.indexOf('--');
   assert.ok(optionSeparator > 0);
   assert.deepEqual(optionSpawn.args.slice(optionSeparator + 1), ['/opt/option-claude', 'mcp', 'serve']);
+});
+
+test('maxProcesses defaults to the capacity default and rejects the extra entry', async (t) => {
+  const harness = await createHarness({ maxProcesses: 1 });
+  t.after(async () => await harness.cleanup());
+
+  assert.equal(harness.runtime.maxProcesses, 1);
+  const alpha = await harness.runtime.acquire('/ws/alpha');
+
+  await assert.rejects(
+    harness.runtime.acquire('/ws/beta'),
+    (error: unknown) => {
+      assert.ok(error instanceof McpToolError, `expected McpToolError, got ${String(error)}`);
+      assert.equal(error.code, 'CAPACITY_EXCEEDED');
+      assert.equal(error.retryable, true);
+      assert.doesNotMatch(error.message, /cannot start claude mcp serve/, 'must fail before spawning');
+      return true;
+    },
+  );
+  assert.equal(harness.spawner.spawns.length, 1, 'the rejected acquisition must not spawn');
+
+  // An existing entry is handed back even while the cap is reached.
+  assert.equal(await harness.runtime.acquire('/ws/alpha'), alpha);
+
+  // Releasing the entry frees its slot for a new workspace.
+  await harness.runtime.release('/ws/alpha');
+  const beta = await harness.runtime.acquire('/ws/beta');
+  assert.notEqual(beta, alpha);
+  assert.equal(harness.spawner.spawns.length, 2);
+});
+
+test('updateLimits hot-applies maxProcesses without stopping existing entries', async (t) => {
+  const harness = await createHarness({ maxProcesses: 2 });
+  t.after(async () => await harness.cleanup());
+
+  const alpha = await harness.runtime.acquire('/ws/alpha');
+  const beta = await harness.runtime.acquire('/ws/beta');
+  assert.equal(harness.spawner.spawns.length, 2);
+
+  harness.runtime.updateLimits({ maxProcesses: 1 });
+  assert.equal(harness.runtime.maxProcesses, 1);
+  await assert.rejects(
+    harness.runtime.acquire('/ws/gamma'),
+    (error: unknown) => (error as { code?: string }).code === 'CAPACITY_EXCEEDED',
+  );
+
+  // The two running entries keep working; only new entries are blocked.
+  assert.deepEqual(await alpha.listTools(), [{ name: 'Bash' }]);
+  assert.deepEqual(await beta.listTools(), [{ name: 'Bash' }]);
+
+  harness.runtime.updateLimits({ maxProcesses: 3 });
+  const gamma = await harness.runtime.acquire('/ws/gamma');
+  assert.deepEqual(await gamma.listTools(), [{ name: 'Bash' }]);
+
+  assert.throws(() => harness.runtime.updateLimits({ maxProcesses: 0 }), RangeError);
+  assert.equal(harness.runtime.maxProcesses, 3, 'a rejected update must not change the limit');
+});
+
+test('the default serve process cap is eight', async (t) => {
+  const harness = await createHarness();
+  t.after(async () => await harness.cleanup());
+  assert.equal(harness.runtime.maxProcesses, 8);
 });

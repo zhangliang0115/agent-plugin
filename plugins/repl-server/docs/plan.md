@@ -2,7 +2,7 @@
 
 由四位专家拆解（2026-11-18），按模块分组。任务编号与依赖是跨 workflow 的协调依据。
 
-**状态（2026-11-18）**：全部任务已实现并验证，证据见 learn-ai `claude-code/自建设计/05-交接与待办.md` §十（含 headless 与 interactive TUI、第三方 MCP、管理端 SSE）。
+**状态（2026-11-19）**：2026-11-18 的 67 个基线任务已实现并验证，证据见 learn-ai `claude-code/自建设计/05-交接与待办.md` §十（含 headless 与 interactive TUI、第三方 MCP、管理端 SSE）。06–08 的 report/alerts/discovery/AI 是随后追加的增量，已落地并有自动化测试，任务行见「06–08 增量」；外部联调范围仍以 05 §十为准（企业微信真实接口、AI 标注质量仍是开放问题）。
 
 ## core 执行体
 
@@ -71,10 +71,48 @@
 | `RS-14-audit-frames-export` | 协议帧配对端点与审计导出：request/response 配对、summary/full、截断元数据与 10 万行上限 | RS-13-audit-query | 2d |
 | `RS-15-audit-stats` | 审计聚合 worker：调用量/错误率/p50/p95/排队均值、groupBy 与 10s 缓存、200k 行/10s 饱和返回 503 | RS-13-audit-query | 2d |
 | `RS-16-sse` | SSE 中枢：/admin/api/events 与 /admin/api/audit/stream、Last-Event-ID 回放、心跳与缺口事件 | RS-07-admin-base, RS-13-audit-query | 2d |
-| `RS-17-web-shell` | React + esbuild 管理端骨架：依赖与构建、SPA 路由、类型化 API client、主题 token 与 CSRF/鉴权 | RS-07-admin-base | 2d |
+| `RS-17-web-shell` | 原生 TypeScript + DOM + esbuild 管理端骨架：无框架依赖与构建、SPA 路由、类型化 API client、主题 token 与 CSRF/鉴权 | RS-07-admin-base | 2d |
 | `RS-18-web-audit` | 审计页：过滤条、概览卡片、趋势图、虚拟列表、调用抽屉、eval 甘特与协议帧并排 | RS-17-web-shell, RS-19-web-resource, RS-13-audit-query, RS-14-audit-frames-export, RS-15-audit-stats, RS-16-sse | 2d |
 | `RS-19-web-resource` | 实时与资源约束模块：5000 条环形缓冲、200ms 批处理、页面可见性暂停、30fps 限制、降采样与 3D 默认关闭 | RS-17-web-shell | 1d |
 | `RS-20-web-manage` | 配置管理页：概览、servers/tools 编辑、clients 与一次性 token、密钥状态、导入导出与 discover | RS-17-web-shell, RS-19-web-resource, RS-08-admin-servers, RS-09-admin-tools, RS-10-admin-clients, RS-11-admin-config, RS-12-admin-discover, RS-16-sse | 2d |
+
+## 06–08 增量
+
+以下任务不在 2026-11-18 的 67 个基线任务内，是 06–08 设计落地时追加的。状态按当前源码与测试记录，不再使用「全部任务已实现并验证」的原始表述。
+
+### 报告与告警（06）
+
+| id | 任务 | 依赖 | 状态 |
+|---|---|---|---|
+| `RPT-01-schema-v2` | schema v2：`reports` 表、索引与 v1→v2 迁移（与 07 共用） | RS-01-statedb | 已实现 |
+| `RPT-02-store-service` | `reports/store.ts` 仓储 + `reports/service.ts` 落库、去重、限流 | RPT-01-schema-v2 | 已实现 |
+| `RPT-03-report-tool` | `report_problem` 工具、5 工具注册与 MCP instructions | srv-13-tool-registry, RPT-02-store-service | 已实现 |
+| `RPT-04-alerts` | `alerts/config-store.ts`、企业微信消息与 `alerts/dispatcher.ts` outbox | RPT-02-store-service | 已实现 |
+| `RPT-05-admin-ui` | `/reports`、`/alerts/*` 管理端点与 Web 告警 tab | RPT-04-alerts, RS-07-admin-base | 已实现 |
+| `RPT-06-tests` | `report-*.test.ts`、`alerts-*.test.ts`、`reports-e2e.test.ts`（假 webhook 完整链路） | RPT-05-admin-ui | 已实现 |
+
+### 懒加载发现（07）
+
+| id | 任务 | 依赖 | 状态 |
+|---|---|---|---|
+| `DSC-01-config` | `toolDiscovery` 配置类型、CRUD、导入导出与校验 | RPT-01-schema-v2 | 已实现 |
+| `DSC-02-parse` | `discovery/parse.ts` 解析器（P-* 用例） | DSC-01-config | 已实现 |
+| `DSC-03-preview` | 预览服务、preview store 与 tombstone | DSC-02-parse | 已实现 |
+| `DSC-04-apply` | `discovery/store.ts` 的 apply/demote 事务与 stale 标记 | DSC-03-preview | 已实现 |
+| `DSC-05-prepare` | `prepareOnCall`、serial 提升与 stale 路由 | DSC-04-apply, srv-11-pool-lifecycle | 已实现 |
+| `DSC-06-admin-ui` | `discovery/handler.ts` 端点与 Web 扫描/预览 | DSC-04-apply, RS-07-admin-base | 已实现 |
+| `DSC-07-tests` | `discovery-*.test.ts` 与 `discovery-mcp` fixture（P/D/A/R/E 矩阵） | DSC-06-admin-ui | 已实现 |
+
+### AI 配置与标注（08）
+
+| id | 任务 | 依赖 | 状态 |
+|---|---|---|---|
+| `AI-01-settings` | `ai/settings.ts` 与 `GET/PUT /ai/config` | RPT-01-schema-v2 | 已实现 |
+| `AI-02-runner` | `ai/runner.ts`、limiter、errors 与 fake-claude fixture | AI-01-settings | 已实现 |
+| `AI-03-prompts` | `ai/prompts.ts`、`ai/validate.ts`、proposal store 与 propose/apply | AI-02-runner | 已实现 |
+| `AI-04-annotate` | `ai/apply.ts`、annotation-store 与 annotate preview/apply | AI-03-prompts | 已实现 |
+| `AI-05-admin-ui` | `/ai/*` 路由、Web AI tab 与审计 `ai_run` | AI-04-annotate, RS-07-admin-base | 已实现 |
+| `AI-06-tests` | `ai-*.test.ts`（runner、校验、路由、limiter、apply） | AI-05-admin-ui | 已实现 |
 
 ## 测试与端到端
 

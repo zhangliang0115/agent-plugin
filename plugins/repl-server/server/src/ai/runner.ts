@@ -8,12 +8,24 @@
  * @module
  */
 
-import { type ChildProcess, type SpawnOptions, spawn as nodeSpawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import {
+  type ChildProcess,
+  type SpawnOptions,
+  spawn as nodeSpawn,
+  spawnSync,
+} from 'node:child_process';
+import { constants as fsConstants, accessSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 
-import { killTree } from '@zhangliang0115/repl-server-core';
+import {
+  newId,
+  normalizeLstart,
+  ProcessLedger,
+  killTree,
+} from '@zhangliang0115/repl-server-core';
 
 import { systemClock, type Clock } from '../ports.ts';
 import { redactAiText } from './redact.ts';
@@ -23,11 +35,25 @@ import {
   AI_FIXED_ARGS,
   AI_MCP_CONFIG_JSON,
   AI_OUTPUT_MAX_BYTES,
+  AI_PROBE_TIMEOUT_MS,
+  AI_REQUIRED_FLAGS,
   AI_STDERR_MAX_BYTES,
+  AI_TERMINATE_GRACE_MS,
 } from './constants.ts';
 import { AiRunnerError } from './errors.ts';
 
 export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+
+/** Outcome of probing the resolved CLI before the first spawn. */
+export type AiCliProbeResult =
+  | { ok: true }
+  | { ok: false; reason: string; missing?: string[] };
+
+/** Test seam for the CLI gate; production uses {@link probeClaudeCli}. */
+export type AiCliProbe = (
+  bin: string,
+  context: { env: NodeJS.ProcessEnv; timeoutMs: number },
+) => AiCliProbeResult | Promise<AiCliProbeResult>;
 
 /** Per-run settings resolved from `ai` right before the spawn. */
 export interface AiRunnerConfig {
@@ -56,10 +82,19 @@ export interface AiRunnerDeps {
   log?: (line: string) => void;
   maxOutputBytes?: number;
   stderrLimitBytes?: number;
+  /** Test seam; production uses the real `--version`/`--help` probe. */
+  probe?: AiCliProbe;
+  /** Boot id recorded in `ai-runs.json`; defaults to one id per server process. */
+  bootId?: string;
 }
 
 export interface AiRunner {
   run(prompt: string, config: AiRunnerConfig): Promise<AiRunResult>;
+  /**
+   * Terminates every in-flight `claude -p` process group, removes its run
+   * directory and rejects later runs. Idempotent.
+   */
+  close(): Promise<void>;
 }
 
 /** Default data directory, matching `local-tokens.ts`. */
@@ -188,6 +223,97 @@ async function createRunDir(base: string): Promise<string> {
   return dir;
 }
 
+/** One boot id per server process; every runner instance records the same value. */
+const PROCESS_BOOT_ID = newId('boot');
+
+/** Resolves a bare command through `PATH`; falls back to the configured text. */
+function resolveCliPath(bin: string): string {
+  const candidates: string[] = [];
+  if (bin.includes('/') || bin.includes('\\')) {
+    candidates.push(resolve(bin));
+  } else {
+    const searchPath = process.env['PATH'] ?? '';
+    for (const dir of searchPath.split(delimiter)) {
+      if (dir !== '') candidates.push(join(dir, bin));
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      return realpathSync(candidate);
+    } catch {
+      // Try the next PATH entry; a missing file is reported by the probe.
+    }
+  }
+  return candidates[0] ?? bin;
+}
+
+function probeFailure(error: unknown): string {
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : error instanceof Error ? error.message : String(error);
+}
+
+/** Runs `--version` then `--help` and verifies the flags the runner depends on. */
+export function probeClaudeCli(
+  bin: string,
+  context: { env: NodeJS.ProcessEnv; timeoutMs: number },
+): AiCliProbeResult {
+  const version = spawnSync(bin, ['--version'], {
+    encoding: 'utf8',
+    env: context.env,
+    timeout: context.timeoutMs,
+    maxBuffer: 1024 * 1024,
+  });
+  if (version.error !== undefined) return { ok: false, reason: probeFailure(version.error) };
+  if (version.status !== 0) {
+    return { ok: false, reason: `version_exit_${version.status ?? 'signal'}` };
+  }
+
+  const help = spawnSync(bin, ['--help'], {
+    encoding: 'utf8',
+    env: context.env,
+    timeout: context.timeoutMs,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  if (help.error !== undefined) return { ok: false, reason: probeFailure(help.error) };
+  if (help.status !== 0) {
+    return { ok: false, reason: `help_exit_${help.status ?? 'signal'}` };
+  }
+
+  const text = `${help.stdout ?? ''}\n${help.stderr ?? ''}`;
+  const missing = AI_REQUIRED_FLAGS.filter((flag) => !text.includes(flag));
+  if (missing.length > 0) return { ok: false, reason: 'missing_flags', missing };
+  return { ok: true };
+}
+
+function cliUnavailable(bin: string, probe: AiCliProbeResult): AiRunnerError {
+  if (probe.ok) throw new TypeError('cliUnavailable called with a successful probe');
+  const details: Record<string, unknown> = { command: bin, reason: probe.reason };
+  if (probe.missing !== undefined) details['missing'] = [...probe.missing];
+  const suffix =
+    probe.missing !== undefined && probe.missing.length > 0
+      ? `; missing ${probe.missing.join(', ')}`
+      : '';
+  return new AiRunnerError(
+    'AI_RUNNER_UNAVAILABLE',
+    503,
+    `claude CLI ${bin} cannot serve AI runs (${probe.reason}${suffix})`,
+    details,
+  );
+}
+
+/** `ps -o lstart=` for one PID; empty when `ps` cannot answer. */
+function readLstart(pid: number): string {
+  const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+    timeout: 2_000,
+  });
+  if (result.error !== undefined || result.status !== 0) return '';
+  return normalizeLstart(result.stdout ?? '');
+}
+
 /** Immediate SIGKILL for the group; used after a hard failure, not for the timeout path. */
 function killGroupNow(child: ChildProcess): void {
   const pid = child.pid;
@@ -209,7 +335,7 @@ async function terminate(child: ChildProcess): Promise<void> {
   const pid = child.pid;
   if (pid === undefined) return;
   try {
-    await killTree(pid, { graceMs: 1000, reason: 'ai_timeout' });
+    await killTree(pid, { graceMs: AI_TERMINATE_GRACE_MS, reason: 'ai_timeout' });
   } catch {
     // ps unavailable; the group kill below is the fallback.
   }
@@ -218,6 +344,16 @@ async function terminate(child: ChildProcess): Promise<void> {
 
 function toBuffer(chunk: Buffer | string): Buffer {
   return typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+}
+
+/** One spawned run, tracked so `close` can terminate it and remove its directory. */
+interface ActiveRun {
+  child: ChildProcess | null;
+  runDir: string;
+}
+
+function runnerClosed(): AiRunnerError {
+  return new AiRunnerError('AI_RUNNER_UNAVAILABLE', 503, 'AI runner is shutting down');
 }
 
 /**
@@ -230,17 +366,76 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
   const dataDir = deps.dataDir ?? defaultDataDir();
   const maxOutputBytes = deps.maxOutputBytes ?? AI_OUTPUT_MAX_BYTES;
   const stderrLimitBytes = deps.stderrLimitBytes ?? AI_STDERR_MAX_BYTES;
+  const bootId = deps.bootId ?? PROCESS_BOOT_ID;
+  const probeEnv = buildEnv(deps.extraEnv);
+  const ledger = new ProcessLedger({ root: dataDir });
+  const probeCache = new Map<string, Promise<AiCliProbeResult>>();
+  const activeRuns = new Map<string, ActiveRun>();
+  let closed = false;
+  let closePromise: Promise<void> | null = null;
+
+  function ledgerWrite(label: string, run: () => void): void {
+    try {
+      run();
+    } catch (error) {
+      // The run itself can still succeed; a broken ledger only affects recovery.
+      deps.log?.(
+        `ai ledger ${label} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** Cached per resolved path, so a healthy CLI costs two probes per process. */
+  async function ensureCli(bin: string): Promise<void> {
+    let result: AiCliProbeResult;
+    if (deps.probe !== undefined) {
+      result = await deps.probe(bin, { env: probeEnv, timeoutMs: AI_PROBE_TIMEOUT_MS });
+    } else {
+      const resolved = resolveCliPath(bin);
+      let cached = probeCache.get(resolved);
+      if (cached === undefined) {
+        cached = Promise.resolve().then(() =>
+          probeClaudeCli(resolved, { env: probeEnv, timeoutMs: AI_PROBE_TIMEOUT_MS }),
+        );
+        probeCache.set(resolved, cached);
+      }
+      result = await cached;
+    }
+    if (!result.ok) throw cliUnavailable(bin, result);
+  }
 
   return {
     async run(prompt: string, config: AiRunnerConfig): Promise<AiRunResult> {
+      if (closed) throw runnerClosed();
+      await ensureCli(config.claudeBin);
+      if (closed) throw runnerClosed();
+
+      const runId = `air_${randomUUID().replaceAll('-', '')}`;
       const runDir = await createRunDir(dataDir);
+      const active: ActiveRun = { child: null, runDir };
+      activeRuns.set(runId, active);
       const mcpConfigPath = join(runDir, 'mcp.json');
       const timeoutMs =
         Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
           ? Math.trunc(config.timeoutMs)
           : AI_DEFAULT_TIMEOUT_MS;
+      const terminationRef: { current: Promise<void> | null } = { current: null };
+
+      ledgerWrite('spawning', () =>
+        ledger.upsertAiRun({
+          runId,
+          pid: null,
+          pgid: null,
+          lstart: null,
+          state: 'spawning',
+          bootId,
+          runDir: resolve(runDir),
+          startedAt: new Date(clock.now()).toISOString(),
+        }),
+      );
 
       try {
+        if (closed) throw runnerClosed();
         await writeFile(mcpConfigPath, AI_MCP_CONFIG_JSON, { mode: 0o600 });
 
         const model = config.model !== null && config.model !== '' ? config.model : null;
@@ -249,6 +444,7 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
 
         const started = clock.now();
         let child: ChildProcess;
+        if (closed) throw runnerClosed();
         try {
           child = spawnFn(config.claudeBin, args, {
             cwd: runDir,
@@ -259,6 +455,15 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
           });
         } catch (error) {
           throw unavailable(config.claudeBin, error);
+        }
+        active.child = child;
+
+        if (child.pid !== undefined) {
+          const pid = child.pid;
+          const lstart = readLstart(pid);
+          ledgerWrite('running', () =>
+            ledger.patchAiRun(runId, { pid, pgid: pid, lstart, state: 'running' }),
+          );
         }
 
         return await new Promise<AiRunResult>((resolve, reject) => {
@@ -347,7 +552,9 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
                 }),
               ),
             );
-            void terminate(child);
+            // The ledger entry stays until the group is actually gone; a crash
+            // mid-termination is then still recoverable by the startup sweep.
+            terminationRef.current = terminate(child);
           }, timeoutMs);
           timer.unref?.();
 
@@ -357,10 +564,34 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
           child.stdin?.end(prompt);
         });
       } finally {
+        activeRuns.delete(runId);
+        const pendingTermination = terminationRef.current;
+        if (pendingTermination !== null) await pendingTermination.catch(() => undefined);
+        ledgerWrite('remove', () => ledger.removeAiRun(runId));
         await rm(runDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 20 }).catch(
           () => undefined,
         );
       }
+    },
+    close(): Promise<void> {
+      if (closePromise !== null) return closePromise;
+      closed = true;
+      // Snapshot synchronously so every run that already registered is covered;
+      // a run that starts later sees `closed` and never spawns.
+      const runs = [...activeRuns.values()];
+      closePromise = (async () => {
+        await Promise.allSettled(
+          runs.map(async (run) => {
+            if (run.child !== null) await terminate(run.child);
+          }),
+        );
+        await Promise.allSettled(
+          runs.map((run) =>
+            rm(run.runDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 20 }),
+          ),
+        );
+      })();
+      return closePromise;
     },
   };
 }

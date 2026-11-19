@@ -100,9 +100,13 @@ function canonical(call: RecordedCall): string {
 /** White-box view of the per-eval filter registry, for the cleanup assertion. */
 function filterCount(gateway: ExecGateway, workspace: string): number {
   const internals = gateway as unknown as {
-    sessions: Map<string, { filters: Map<number, unknown> }>;
+    runtimes: Map<string, { record: { workspace: string }; filters: Map<number, unknown> }>;
   };
-  return internals.sessions.get(workspace)?.filters.size ?? 0;
+  let total = 0;
+  for (const runtime of internals.runtimes.values()) {
+    if (runtime.record.workspace === workspace) total += runtime.filters.size;
+  }
+  return total;
 }
 
 function delay(ms: number): Promise<void> {

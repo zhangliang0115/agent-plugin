@@ -21,8 +21,19 @@
  * @module
  */
 import { spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  type Dirent,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import { LIMITS } from '../constants.ts';
 import type { KillRecord, UnattributedProcess } from '../types.ts';
@@ -239,6 +250,8 @@ export interface SweepReport {
   remaining: UnattributedProcess[];
   /** Ledger PIDs that no longer existed at sweep time (PID reuse or clean exit). */
   alreadyGone: number[];
+  /** AI run directories removed by this sweep (ledger records and 24h-old orphans). */
+  cleanedAiRuns: string[];
   warnings: string[];
   reportPath: string | null;
 }
@@ -303,6 +316,60 @@ export function orphansReportPath(root: string, bootId: string): string {
   return join(root, 'ledger', `orphans-${fileSafe(bootId)}.json`);
 }
 
+/** AI run directories older than this are removed even without a ledger record. */
+export const AI_RUN_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Removes one `ai-run-*` directory below the data root. Anything outside the
+ * root or not named like a run directory is refused, so a corrupt ledger can
+ * never delete an unrelated path.
+ */
+function cleanAiRunDir(
+  root: string,
+  runDir: string,
+  report: SweepReport,
+  cleaned: Set<string>,
+): void {
+  const base = resolve(root);
+  const target = resolve(runDir);
+  if (target === base || !target.startsWith(`${base}/`)) return;
+  if (!basename(target).startsWith('ai-run-')) return;
+  if (cleaned.has(target)) return;
+  try {
+    rmSync(target, { recursive: true, force: true });
+    cleaned.add(target);
+    report.cleanedAiRuns.push(target);
+  } catch (error) {
+    report.warnings.push(`remove AI run dir ${target}: ${errorMessage(error)}`);
+  }
+}
+
+/** Sweeps `ai-run-*` directories whose mtime is older than {@link AI_RUN_DIR_MAX_AGE_MS}. */
+function cleanOldAiRunDirs(root: string, now: number, report: SweepReport, cleaned: Set<string>): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (error) {
+    if (errorCode(error) !== 'ENOENT') {
+      report.warnings.push(`readdir ${root}: ${errorMessage(error)}`);
+    }
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('ai-run-')) continue;
+    const target = join(root, entry.name);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(target).mtimeMs;
+    } catch (error) {
+      report.warnings.push(`stat AI run dir ${target}: ${errorMessage(error)}`);
+      continue;
+    }
+    if (now - mtimeMs < AI_RUN_DIR_MAX_AGE_MS) continue;
+    cleanAiRunDir(root, target, report, cleaned);
+  }
+}
+
 /** Writes `ledger/orphans-<bootId>.json` and returns its absolute path. */
 export function writeOrphansReport(root: string, bootId: string, report: SweepReport): string {
   const path = orphansReportPath(root, bootId);
@@ -314,6 +381,7 @@ export function writeOrphansReport(root: string, bootId: string, report: SweepRe
     skipped: report.skipped,
     remaining: report.remaining,
     alreadyGone: report.alreadyGone,
+    cleanedAiRuns: report.cleanedAiRuns,
     warnings: report.warnings,
   });
   return path;
@@ -339,6 +407,7 @@ export function startupSweep(options: StartupSweepOptions): SweepReport {
     skipped: [],
     remaining: [],
     alreadyGone: [],
+    cleanedAiRuns: [],
     warnings: [],
     reportPath: null,
   };
@@ -413,6 +482,26 @@ export function startupSweep(options: StartupSweepOptions): SweepReport {
         makeTarget(entry.pid, entry.pgid ?? entry.pid, entry.lstart ?? '', '', 'pool'),
       );
     }
+  }
+
+  // 1d. AI CLI runs: `claude -p` children are detached and write their own ledger.
+  // A record from an older boot is killed only when its `lstart` still matches the
+  // live process; its private work directory is removed either way.
+  const aiRuns = ledger.readAiRuns();
+  const aiRunDirs: string[] = [];
+  if (aiRuns.bootId !== '' && aiRuns.bootId !== options.bootId) staleBoots.add(aiRuns.bootId);
+  for (const entry of aiRuns.entries) {
+    if (entry.bootId === options.bootId) continue;
+    staleBoots.add(entry.bootId);
+    aiRunDirs.push(entry.runDir);
+    if (entry.pid === null) {
+      report.warnings.push(`ai-runs.json ${entry.runId}: spawning entry without pid`);
+      continue;
+    }
+    addTarget(
+      targets,
+      makeTarget(entry.pid, entry.pgid ?? entry.pid, entry.lstart ?? '', '', 'ai-run'),
+    );
   }
 
   // 2. survivors ledger: script processes left running by earlier evals.
@@ -518,6 +607,11 @@ export function startupSweep(options: StartupSweepOptions): SweepReport {
       report.remaining.push({ pid: target.pid, cmd: row.command, reason: 'survived_sigkill' });
     }
   }
+
+  // AI run directories: records from previous boots plus any 24h-old leftovers.
+  const cleanedAiRuns = new Set<string>();
+  for (const runDir of aiRunDirs) cleanAiRunDir(options.root, runDir, report, cleanedAiRuns);
+  cleanOldAiRunDirs(options.root, now().getTime(), report, cleanedAiRuns);
 
   report.reportPath = writeOrphansReport(options.root, options.bootId, report);
   if (options.resetState ?? true) {

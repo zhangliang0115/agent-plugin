@@ -4,6 +4,11 @@ import test from 'node:test';
 import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
 import { AdminApiError } from '../src/admin/servers.ts';
+import {
+  buildCatalogSnapshot,
+  refreshFts,
+  searchTools as catalogSearch,
+} from '../src/catalog/index.ts';
 import { openStateDb } from '../src/db/migrate.ts';
 import { getRevision } from '../src/db/meta.ts';
 import { createServer, getServer, updateServer } from '../src/db/servers.ts';
@@ -17,6 +22,10 @@ import {
   type DiscoveryServerSource,
   type DiscoveryService,
 } from '../src/discovery/service.ts';
+import { DISCOVERY_SEARCH_LIMIT } from '../src/discovery/store.ts';
+import type { AuditSink } from '../src/ports.ts';
+import { describeTools } from '../src/tools/describe.ts';
+import { searchTools as snapshotSearch } from '../src/tools/search.ts';
 
 interface Harness {
   db: ReturnType<typeof openStateDb>;
@@ -73,7 +82,7 @@ function serverSource(db: ReturnType<typeof openStateDb>): DiscoveryServerSource
   };
 }
 
-function harness(): Harness {
+function harness(options: { audit?: AuditSink } = {}): Harness {
   const db = openStateDb(':memory:');
   const pool = new FakePool();
   const catalog = {
@@ -89,6 +98,7 @@ function harness(): Harness {
     catalog,
     pool,
     clock: { now: () => current },
+    ...(options.audit === undefined ? {} : { audit: options.audit }),
   });
   return {
     db,
@@ -696,4 +706,309 @@ test('prepareFor only warms search rows of a search-mode server', async () => {
   patchTool(env.db, 'lazy', 'lazy_tool', { staleOverride: true });
   env.db.prepare("UPDATE tools SET stale = 1 WHERE server_id = 'lazy' AND name = 'lazy_tool'").run();
   assert.equal(await env.service.prepareFor('lazy', 'lazy_tool'), null);
+});
+
+test('discovery_preview/apply audits carry counts only, never raw output or args', async () => {
+  const records: Array<Record<string, unknown>> = [];
+  const env = harness({
+    audit: {
+      write: (event) => {
+        records.push({ ...event });
+      },
+    },
+  });
+  addServer(env.db);
+  addStaticTools(env.db);
+  addTool(env.db, 'old_tool', { via: 'search' });
+  env.pool.result = searchResult([
+    {
+      name: 'leaky_tool',
+      description: 'audit-description-leak',
+      inputSchema: {
+        type: 'object',
+        properties: { secret: { const: 'audit-schema-leak' } },
+      },
+    },
+    discoveredTool('plain_tool'),
+  ]);
+
+  const preview = await env.service.preview('lazy', {
+    searchTool: 'search_tools',
+    query: 'audit-query-needle',
+  });
+  const result = await env.service.apply('lazy', {
+    discoveryId: preview.discoveryId,
+    expectedRevision: getRevision(env.db),
+  });
+
+  assert.equal(records.length, 2);
+  const previewEvent = records[0];
+  const applyEvent = records[1];
+  assert.ok(previewEvent !== undefined && applyEvent !== undefined);
+
+  assert.equal(previewEvent['event'], 'discovery_preview');
+  assert.equal(previewEvent['server'], 'lazy');
+  assert.equal(previewEvent['searchTool'], 'search_tools');
+  assert.equal(previewEvent['queryLength'], 'audit-query-needle'.length);
+  assert.equal(previewEvent['shape'], 'call_result_tools');
+  assert.equal(previewEvent['count'], 2);
+  assert.equal(typeof previewEvent['elapsedMs'], 'number');
+  assert.equal(typeof previewEvent['ts'], 'string');
+  assert.equal(Object.hasOwn(previewEvent, 'raw'), false);
+  assert.equal(Object.hasOwn(previewEvent, 'args'), false);
+
+  assert.equal(applyEvent['event'], 'discovery_apply');
+  assert.equal(applyEvent['server'], 'lazy');
+  assert.equal(applyEvent['created'], 2);
+  assert.equal(applyEvent['updated'], 0);
+  assert.equal(applyEvent['skippedStatic'], 0);
+  assert.equal(applyEvent['stale'], 1);
+  assert.equal(applyEvent['revision'], result.revision);
+  assert.equal(typeof applyEvent['ts'], 'string');
+  assert.equal(Object.hasOwn(applyEvent, 'raw'), false);
+  assert.equal(Object.hasOwn(applyEvent, 'args'), false);
+
+  const serialized = JSON.stringify(records);
+  assert.equal(serialized.includes('audit-query-needle'), false);
+  assert.equal(serialized.includes('audit-schema-leak'), false);
+  assert.equal(serialized.includes('audit-description-leak'), false);
+});
+
+test('tombstones remember the owning server for applied and expired previews', async () => {
+  const env = harness();
+  addServer(env.db, 'lazy');
+  addStaticTools(env.db, 'lazy');
+  addServer(env.db, 'other');
+  addStaticTools(env.db, 'other');
+  env.pool.result = searchResult([discoveredTool('t1')]);
+
+  const applied = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  await env.service.apply('lazy', {
+    discoveryId: applied.discoveryId,
+    expectedRevision: getRevision(env.db),
+  });
+
+  await expectRejection(
+    env.service.apply('lazy', {
+      discoveryId: applied.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 410);
+      assert.equal((error.details as { reason: string }).reason, 'applied');
+    },
+  );
+  await expectRejection(
+    env.service.apply('other', {
+      discoveryId: applied.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.code, 'DISCOVERY_PREVIEW_NOT_FOUND');
+    },
+  );
+
+  // Expired preview still in the map: the server check wins over the 410.
+  const liveExpired = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  env.advance(DISCOVERY_PREVIEW_TTL_MS + 1);
+  await expectRejection(
+    env.service.apply('other', {
+      discoveryId: liveExpired.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.code, 'DISCOVERY_PREVIEW_NOT_FOUND');
+    },
+  );
+
+  // Eviction moves the preview into a tombstone; same server gets 410, other 404.
+  const evicted = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  env.advance(DISCOVERY_PREVIEW_TTL_MS + 1);
+  await env.service.preview('other', { searchTool: 'search_tools' });
+  await expectRejection(
+    env.service.apply('lazy', {
+      discoveryId: evicted.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 410);
+      assert.equal(error.code, 'DISCOVERY_PREVIEW_EXPIRED');
+      assert.equal((error.details as { reason: string }).reason, 'expired');
+    },
+  );
+  await expectRejection(
+    env.service.apply('other', {
+      discoveryId: evicted.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.code, 'DISCOVERY_PREVIEW_NOT_FOUND');
+    },
+  );
+});
+
+test('E-02: a fresh service instance returns 404 for a discoveryId from before the restart', async () => {
+  const env = harness();
+  addServer(env.db);
+  addStaticTools(env.db);
+  env.pool.result = searchResult([discoveredTool('t1')]);
+
+  const preview = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  const restarted = createDiscoveryService({
+    db: env.db,
+    servers: serverSource(env.db),
+    catalog: env.catalog,
+    pool: env.pool,
+    clock: { now: env.now },
+  });
+
+  await expectRejection(
+    restarted.apply('lazy', {
+      discoveryId: preview.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 404);
+      assert.equal(error.code, 'DISCOVERY_PREVIEW_NOT_FOUND');
+    },
+  );
+
+  const result = await env.service.apply('lazy', {
+    discoveryId: preview.discoveryId,
+    expectedRevision: getRevision(env.db),
+  });
+  assert.equal(result.created, 1, 'the original instance still owns the preview');
+});
+
+test('DISCOVERY_LIMIT rejects the would-be 501st search row with limit/current', async () => {
+  const env = harness();
+  addServer(env.db);
+  addStaticTools(env.db);
+  for (let index = 0; index < DISCOVERY_SEARCH_LIMIT; index += 1) {
+    addTool(env.db, `row_${String(index).padStart(3, '0')}`, { via: 'search' });
+  }
+  env.pool.result = searchResult([discoveredTool('row_500')]);
+
+  const preview = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  assert.deepEqual(preview.tools.map((tool) => tool.name), ['row_500']);
+
+  await expectRejection(
+    env.service.apply('lazy', {
+      discoveryId: preview.discoveryId,
+      expectedRevision: getRevision(env.db),
+    }),
+    (error) => {
+      assert.equal(error.status, 422);
+      assert.equal(error.code, 'DISCOVERY_LIMIT');
+      assert.deepEqual(error.details, {
+        limit: DISCOVERY_SEARCH_LIMIT,
+        current: DISCOVERY_SEARCH_LIMIT,
+      });
+    },
+  );
+  assert.equal(getTool(env.db, 'lazy', 'row_500'), null, 'the rejected apply wrote nothing');
+});
+
+test('C-01..C-05: applied rows reach search_tools/describe_tools and honour stale visibility', async () => {
+  const env = harness();
+  addServer(env.db);
+  addStaticTools(env.db);
+  env.pool.result = searchResult([
+    discoveredTool('list_tables', {
+      type: 'object',
+      properties: { schema: { type: 'string' } },
+    }),
+    { name: 'no_schema', description: 'no_schema discovered without a schema' },
+  ]);
+
+  const preview = await env.service.preview('lazy', { searchTool: 'search_tools' });
+  await env.service.apply('lazy', {
+    discoveryId: preview.discoveryId,
+    expectedRevision: getRevision(env.db),
+  });
+  refreshFts(env.db, 'lazy');
+  const snapshot = buildCatalogSnapshot(env.db);
+
+  // C-01: discovered rows are searchable by name and description under <server>.<tool>.
+  const byName = snapshotSearch(snapshot, { query: 'list_tables' });
+  assert.deepEqual(byName.map((item) => item.name), ['lazy.list_tables']);
+  assert.equal(byName[0]?.kind, 'mcp');
+  assert.equal(byName[0]?.server, 'lazy');
+  assert.deepEqual(
+    snapshotSearch(snapshot, { query: 'discovered' }).map((item) => item.name).sort(),
+    ['lazy.list_tables', 'lazy.no_schema'],
+  );
+
+  // C-02: describe_tools returns the full schema, and the normalized permissive
+  // empty-object schema when the upstream had none.
+  const described = describeTools(snapshot, ['lazy.list_tables', 'lazy.no_schema']);
+  assert.deepEqual(described.tools, [
+    {
+      name: 'lazy.list_tables',
+      inputSchema: { type: 'object', properties: { schema: { type: 'string' } } },
+    },
+    {
+      name: 'lazy.no_schema',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: true },
+    },
+  ]);
+
+  // C-03: the empty-query overview counts search rows too (search_tools + 2 discovered).
+  assert.deepEqual(snapshotSearch(snapshot, { query: '' }), [
+    {
+      name: 'lazy',
+      kind: 'mcp',
+      server: 'lazy',
+      description: '3 tools; call tools.mcp.lazy.<tool>(args)',
+    },
+  ]);
+  const catalogOverview = catalogSearch(env.db, { query: '' });
+  assert.deepEqual(
+    catalogOverview.overview?.servers.map((server) => [server.server, server.toolCount]),
+    [['lazy', 3]],
+  );
+
+  // C-05: the search tool itself stays visible and describable.
+  assert.ok(snapshot.tools.some((tool) => tool.name === 'lazy.search_tools'));
+  assert.ok(catalogOverview.overview?.servers.some((server) => server.server === 'lazy'));
+  assert.deepEqual(
+    describeTools(snapshot, ['lazy.search_tools']).tools.map((tool) => tool.name),
+    ['lazy.search_tools'],
+  );
+
+  // C-04: demotion hides stale rows from search_tools and the catalog retrieval;
+  // the direct-call error MCP_DISCOVERY_TOOL_STALE is covered in discovery-pool.
+  await env.service.demote('lazy');
+  refreshFts(env.db, 'lazy');
+  const staleSnapshot = buildCatalogSnapshot(env.db);
+  assert.deepEqual(
+    staleSnapshot.tools.map((tool) => tool.name),
+    ['lazy.search_tools'],
+    'stale rows without staleOverride leave the snapshot',
+  );
+  const hidden = catalogSearch(env.db, { query: 'list_tables' });
+  assert.deepEqual(hidden.results, []);
+  assert.equal(hidden.hiddenStale, 1);
+  assert.deepEqual(snapshotSearch(staleSnapshot, { query: 'list_tables' }), []);
+
+  // C-04b: staleOverride keeps the row searchable/describable, not callable.
+  patchTool(env.db, 'lazy', 'list_tables', { staleOverride: true });
+  refreshFts(env.db, 'lazy');
+  const keptSnapshot = buildCatalogSnapshot(env.db);
+  assert.deepEqual(
+    snapshotSearch(keptSnapshot, { query: 'list_tables' }).map((item) => item.name),
+    ['lazy.list_tables'],
+  );
+  assert.deepEqual(
+    catalogSearch(env.db, { query: 'list_tables' }).results.map((hit) => hit.name),
+    ['lazy.list_tables'],
+  );
+  assert.deepEqual(
+    describeTools(keptSnapshot, ['lazy.list_tables']).tools.map((tool) => tool.name),
+    ['lazy.list_tables'],
+  );
+  assert.equal(getTool(env.db, 'lazy', 'list_tables')?.stale, true);
 });

@@ -12,7 +12,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-import { AdminApiError, assertRevision } from '../admin/servers.ts';
+import { AdminApiError, assertRevision, nullIfBlank } from '../admin/servers.ts';
 import { withTransaction } from '../db/migrate.ts';
 import { bumpRevision, getRevision } from '../db/meta.ts';
 import { getServer, type ServerRecord } from '../db/servers.ts';
@@ -82,11 +82,12 @@ function planAnnotationChanges(
 ): AnnotationPlan {
   const plan: AnnotationPlan = { changed: [], toolUpdates: [] };
 
-  if (patch.summary !== undefined && patch.summary !== current.summary) {
+  const summary = nullIfBlank(patch.summary);
+  if (patch.summary !== undefined && summary !== current.summary) {
     plan.changed.push('server.summary');
-    plan.summary = patch.summary;
+    plan.summary = summary;
     // Only a real summary change may move its provenance.
-    plan.summarySource = patch.summary === null ? null : 'ai';
+    plan.summarySource = summary === null ? null : 'ai';
   }
   if (patch.category !== undefined && patch.category !== current.category) {
     plan.changed.push('server.category');

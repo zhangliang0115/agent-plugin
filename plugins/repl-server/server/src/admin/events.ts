@@ -104,6 +104,21 @@ function parseLastEventId(raw: string | string[] | undefined): number | null {
   return Number.isSafeInteger(id) ? id : null;
 }
 
+/**
+ * Reconnect position. `Last-Event-ID` wins; browsers that cannot set headers
+ * (manual `EventSource` reconnects through a proxy) may pass `?lastEventId=`.
+ */
+function lastEventIdOf(req: IncomingMessage): number | null {
+  const headerId = parseLastEventId(req.headers['last-event-id']);
+  if (headerId !== null) return headerId;
+  try {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    return parseLastEventId(url.searchParams.get('lastEventId') ?? undefined);
+  } catch {
+    return null;
+  }
+}
+
 function safeWrite(res: ServerResponse, text: string): boolean {
   if (res.writableEnded || res.destroyed) return false;
   try {
@@ -176,7 +191,7 @@ class SseHub implements EventHub {
     res.flushHeaders();
 
     this.prune(this.clock.now());
-    const lastId = parseLastEventId(req.headers['last-event-id']);
+    const lastId = lastEventIdOf(req);
     if (!this.replay(lastId, res)) {
       try {
         res.end();

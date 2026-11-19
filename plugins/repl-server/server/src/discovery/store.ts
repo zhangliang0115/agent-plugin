@@ -17,6 +17,7 @@ import { bumpRevision, getRevision } from '../db/meta.ts';
 import { getServer } from '../db/servers.ts';
 import { isoNow, jsonText } from '../db/schema.ts';
 import {
+  demoteDiscoveredTools as demoteToolRows,
   hashToolSchema,
   listTools,
   refreshServerIndex,
@@ -301,19 +302,11 @@ export function applyDiscoveredTools(
 }
 
 /**
- * Marks every `discovered_via = 'search'` row stale (design 07 §3.8, mode
- * switch back to static). `stale_override` does **not** exempt a row: it keeps
- * search visibility, not callability.
+ * Standalone demotion entry point for callers that do not go through
+ * `updateServer` (service/admin). The SQL lives in `db/tools.ts` so the
+ * server-config write path can run it inside its own transaction; this wrapper
+ * only adds the savepoint and stays idempotent.
  */
 export function demoteDiscoveredTools(db: DatabaseSync, serverId: string): number {
-  return withTransaction(db, () => {
-    const result = db
-      .prepare(`
-        UPDATE tools
-        SET stale = 1
-        WHERE server_id = ? AND discovered_via = 'search' AND stale = 0
-      `)
-      .run(serverId);
-    return Number(result.changes);
-  });
+  return withTransaction(db, () => demoteToolRows(db, serverId));
 }

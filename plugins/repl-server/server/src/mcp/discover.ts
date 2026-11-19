@@ -171,7 +171,24 @@ export function initializeResult(
 export function createDiscoverHandler<Context = undefined>(
   options: DiscoverOptions = {},
 ): JsonRpcHandler<Context> {
-  return () => discoverResult(options);
+  return (params) => {
+    // A client may pin the version in `_meta`; an unsupported pin is refused
+    // before any result is built (same -32600 shape as legacy initialize).
+    const meta = params['_meta'];
+    if (typeof meta === 'object' && meta !== null) {
+      const requested = (meta as Record<string, unknown>)['io.modelcontextprotocol/protocolVersion'];
+      if (requested !== undefined) {
+        if (typeof requested !== 'string' || !SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) {
+          throw new JsonRpcError(
+            JSON_RPC_INVALID_REQUEST,
+            `Unsupported protocol version: ${String(requested)}`,
+            { supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS] },
+          );
+        }
+      }
+    }
+    return discoverResult(options);
+  };
 }
 
 export function createInitializeHandler<Context = undefined>(

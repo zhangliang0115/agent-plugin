@@ -235,3 +235,89 @@ test('EXCLUSIVE_TIMEOUT bounds the wait and reopens admission', async () => {
   hold.resolve();
   await running;
 });
+
+test('updateLimits hot-applies the in-flight limit to new admissions', async () => {
+  const gates = new PoolGates();
+  const events: string[] = [];
+  const hold = deferred();
+
+  const first = gates.run('pg', 'cb_a', 'parallel', async () => {
+    events.push('a:start');
+    await hold.promise;
+    events.push('a:end');
+  });
+  await tick();
+  gates.updateLimits({ callsPerBinding: 1 });
+  assert.equal(gates.callsPerBinding, 1);
+
+  let secondStarted = false;
+  const second = gates.run('pg', 'cb_a', 'parallel', () => {
+    secondStarted = true;
+    events.push('b:start');
+  });
+  await tick();
+  assert.equal(secondStarted, false, 'the lowered limit must queue the second call');
+
+  hold.resolve();
+  await Promise.all([first, second]);
+  assert.equal(secondStarted, true);
+  assert.deepEqual(events, ['a:start', 'a:end', 'b:start']);
+});
+
+test('raising the in-flight limit releases queued calls immediately', async () => {
+  const gates = new PoolGates({ callsPerBinding: 1, queuedPerBinding: 1 });
+  const events: string[] = [];
+  const hold = deferred();
+
+  const running = gates.run('pg', 'cb_a', 'parallel', async () => {
+    events.push('run');
+    await hold.promise;
+  });
+  await tick();
+
+  const queued = gates.run('pg', 'cb_a', 'parallel', () => {
+    events.push('queued');
+    return 'queued';
+  });
+  await tick();
+  assert.deepEqual(events, ['run']);
+
+  gates.updateLimits({ callsPerBinding: 2 });
+  await tick();
+  assert.deepEqual(events, ['run', 'queued'], 'a raised limit must admit waiters');
+
+  hold.resolve();
+  await running;
+  assert.equal(await queued, 'queued');
+});
+
+test('updateLimits hot-applies the queue limit and queue-full rejection', async () => {
+  const gates = new PoolGates({ callsPerBinding: 1, queuedPerBinding: 0 });
+  const hold = deferred();
+
+  const running = gates.run('pg', 'cb_a', 'parallel', () => hold.promise);
+  await tick();
+
+  await assert.rejects(
+    gates.run('pg', 'cb_a', 'parallel', () => 'blocked'),
+    isCode('MCP_QUEUE_FULL'),
+  );
+
+  gates.updateLimits({ queuedPerBinding: 1 });
+  assert.equal(gates.queuedPerBinding, 1);
+  const queued = gates.run('pg', 'cb_a', 'parallel', () => 'now queued');
+  await tick();
+
+  hold.resolve();
+  await running;
+  assert.equal(await queued, 'now queued');
+});
+
+test('updateLimits validates values and keeps the previous ones on rejection', () => {
+  const gates = new PoolGates({ callsPerBinding: 2, queuedPerBinding: 3 });
+  assert.throws(() => gates.updateLimits({ callsPerBinding: 0 }), RangeError);
+  assert.throws(() => gates.updateLimits({ callsPerBinding: 1.5 }), RangeError);
+  assert.throws(() => gates.updateLimits({ queuedPerBinding: -1 }), RangeError);
+  assert.equal(gates.callsPerBinding, 2);
+  assert.equal(gates.queuedPerBinding, 3);
+});

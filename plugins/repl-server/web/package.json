@@ -6,6 +6,7 @@
   "description": "Admin UI for repl-server; built assets are served by the server package.",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

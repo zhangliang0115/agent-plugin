@@ -314,6 +314,18 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 | `TASK_EXPIRED` | 任务超过 TTL |
 | `MCP_QUEUE_FULL` | 第三方池的 binding 队列已满 |
 | `MCP_CALL_TIMEOUT` | 单次 MCP 调用超时 |
+| `MCP_SERVER_NOT_FOUND` | 目标第三方 server 不存在 |
+| `MCP_SERVER_DISABLED` | 目标 server 已停用 |
+| `MCP_SERVER_UNAVAILABLE` | 连接失败、进程退出或正在退役 |
+| `MCP_TOOL_NOT_FOUND` | 目标工具不存在 |
+| `MCP_TOOL_DISABLED` | 工具已停用 |
+| `MCP_TOOL_ERROR` | 上游工具返回 `isError: true` |
+| `MCP_PROTOCOL_ERROR` | 上游 JSON-RPC / transport 协议错误 |
+| `MCP_SESSION_EXPIRED_RETRY` | 上游 HTTP 会话过期；可重连重试，不重放 |
+| `MCP_CALL_CANCELLED` | 调用被取消（含发现扫描取消） |
+| `MCP_CALL_FAILED` | core 工具桥的传输类调用失败 |
+| `MCP_DISCOVERY_PREPARE_FAILED` | 懒加载预热（`search`）失败，业务调用未发出；`retryable` 取决于失败原因 |
+| `MCP_DISCOVERY_TOOL_STALE` | 工具已不在最近一次扫描结果中；不可重试，需重新扫描 |
 | `EXCLUSIVE_TIMEOUT` | `exclusive` 等待超过 30s |
 | `REPORT_RATE_LIMITED` | `report_problem` 超过每 owner 的 1 小时 20 条上限；带 `retryAfterMs` |
 | `REPORT_FAILED` | `report_problem` 落库失败 |
@@ -327,7 +339,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 |---|---|
 | 路径不存在、Host 不允许、JSON 解析失败 | HTTP 400/403/404 |
 | 未知方法、参数不是对象、批量请求 | JSON-RPC `-32601` / `-32602` / `-32600` |
-| `WS_INVALID`、`WS_LIMIT`、`CAPACITY_EXCEEDED`、`MCP_QUEUE_FULL`、`MCP_QUEUE_TIMEOUT`、`MCP_CALL_TIMEOUT`、工具执行失败 | `CallToolResult` + `isError: true`，正文 `<repl-output><error>` |
+| `WS_INVALID`、`WS_LIMIT`、`CAPACITY_EXCEEDED`、`MCP_QUEUE_FULL`、`MCP_CALL_TIMEOUT`、`MCP_CALL_CANCELLED`、`MCP_DISCOVERY_PREPARE_FAILED`、`MCP_DISCOVERY_TOOL_STALE`、工具执行失败 | `CallToolResult` + `isError: true`，正文 `<repl-output><error>` |
 | `tasks/get` 未知/过期 | JSON-RPC `-32602`，`data: { code: "TASK_NOT_FOUND" \| "TASK_EXPIRED" }` |
 | 上游（第三方 MCP）返回 `CreateTaskResult` | 第一版不支持，工具层 `UPSTREAM_TASK_UNSUPPORTED` |
 

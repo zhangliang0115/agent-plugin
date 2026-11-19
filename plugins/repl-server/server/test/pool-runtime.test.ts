@@ -4,6 +4,7 @@ import test from 'node:test';
 import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 import type { ToolCallRequest } from '@zhangliang0115/repl-server-core/src/types.ts';
 
+import { ExecGateway } from '../src/exec/gateway.ts';
 import { PoolGates } from '../src/pool/gates.ts';
 import type {
   HttpTransportOptions,
@@ -23,7 +24,7 @@ import {
   type PoolRuntimeServerRecord,
   type PoolToolPolicySource,
 } from '../src/pool/runtime.ts';
-import type { ProcessLedger } from '../src/ports.ts';
+import type { ProcessLedger, RequestIdentity, ScriptRequest } from '../src/ports.ts';
 
 const tick = (ms = 5): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -147,7 +148,7 @@ class FakeClient implements PoolClient {
   ): Promise<unknown> {
     this.callCalls.push({ name, args });
     if (this.callImpl !== null) return await this.callImpl(name, args, options);
-    return { echo: args };
+    return { content: [{ type: 'text', text: JSON.stringify(args) }] };
   }
 
   async ping(): Promise<void> {
@@ -282,8 +283,8 @@ test('first calls connect lazily once and share the in-flight attempt', async (t
   const unqualified = harness.runtime.callTool(unqualifiedCall('pg.echo', { n: 2 }));
   const [first, second] = await Promise.all([qualified, unqualified]);
 
-  assert.deepEqual(first, { echo: { n: 1 } });
-  assert.deepEqual(second, { echo: { n: 2 } });
+  assert.deepEqual(first, { text: '{"n":1}', images: [], documents: [] });
+  assert.deepEqual(second, { text: '{"n":2}', images: [], documents: [] });
   assert.equal(harness.transports.stdioOptions.length, 1, 'one stdio child per server');
   assert.equal(harness.clients.clients.length, 1);
   assert.equal(harness.clients.clients[0]?.connectCalls, 1, 'initialize must run once');
@@ -322,6 +323,57 @@ test('serial calls hold the write lock and block later parallel calls', async (t
     events.lastIndexOf('write_row:end') < events.indexOf('echo:start'),
     `parallel reads must wait behind the serial writer: ${events.join(',')}`,
   );
+});
+
+test('a deadline aborts a call waiting on a gate and leaves no pending upstream work', async (t) => {
+  const hold = deferred();
+  const harness = makeHarness({ policies: policyFor({ write_row: 'serial' }) });
+  t.after(() => harness.runtime.dispose());
+  harness.clients.configure = (client) => {
+    client.callImpl = async (name) => {
+      if (name === 'write_row') await hold.promise;
+      return { name };
+    };
+  };
+
+  const first = harness.runtime.callTool(call('pg', 'write_row'));
+  await waitFor(() => (harness.clients.clients[0]?.callCalls.length ?? 0) === 1);
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    harness.runtime.callTool(call('pg', 'write_row'), { deadline: Date.now() + 30 }),
+    hasCode('MCP_CALL_TIMEOUT'),
+  );
+  assert.ok(Date.now() - startedAt < 500, 'the queued call rejects at its deadline');
+
+  hold.resolve();
+  await first;
+  await tick(20);
+  assert.equal(
+    harness.clients.clients[0]?.callCalls.filter((entry) => entry.name === 'write_row').length,
+    1,
+    'the aborted call never reaches the upstream server',
+  );
+
+  // The runtime is still usable once the gate drains.
+  assert.deepEqual(await harness.runtime.callTool(call('pg', 'echo')), {
+    text: '',
+    images: [],
+    documents: [],
+  });
+});
+
+test('an already-aborted caller signal rejects before any upstream call', async (t) => {
+  const harness = makeHarness();
+  t.after(() => harness.runtime.dispose());
+
+  const controller = new AbortController();
+  controller.abort(new McpToolError('cancelled by test', { code: 'MCP_CALL_CANCELLED' }));
+  await assert.rejects(
+    harness.runtime.callTool(call('pg', 'echo'), { signal: controller.signal }),
+    hasCode('MCP_CALL_CANCELLED'),
+  );
+  assert.equal(harness.transports.stdioOptions.length, 0, 'no transport is opened');
 });
 
 test('exclusive admission drains in-flight calls and times out with EXCLUSIVE_TIMEOUT', async (t) => {
@@ -502,4 +554,84 @@ test('retire reports in-flight work and force unregisters the server', async (t)
   assert.equal((await harness.runtime.control.retire('pg', { force: true })).drained, true);
   assert.equal(harness.runtime.snapshot().total, 0);
   await assert.rejects(running, hasCode('MCP_SERVER_UNAVAILABLE'));
+});
+
+test('third-party results are normalized to text plus media', async (t) => {
+  const harness = makeHarness();
+  t.after(() => harness.runtime.dispose());
+  const imageBase64 = 'aW1n';
+  const pdfBase64 = 'cGRm';
+  harness.clients.configure = (client) => {
+    client.callImpl = async () => ({
+      content: [
+        { type: 'text', text: 'saved' },
+        { type: 'image', data: imageBase64, mimeType: 'image/png' },
+        { type: 'resource', resource: { uri: 'file:///note.txt', text: 'resource text' } },
+        {
+          type: 'resource',
+          resource: { uri: 'file:///report.pdf', mimeType: 'application/pdf', blob: pdfBase64 },
+        },
+      ],
+    });
+  };
+
+  assert.deepEqual(await harness.runtime.callTool(call('pg', 'fetch')), {
+    text: 'saved\nresource text',
+    images: [{ base64: imageBase64, mediaType: 'image/png' }],
+    documents: [{ base64: pdfBase64 }],
+  });
+});
+
+test('normalized MCP media reaches the gateway media collector', async (t) => {
+  const harness = makeHarness();
+  t.after(() => harness.runtime.dispose());
+  const imageBase64 = 'aW1n';
+  const pdfBase64 = 'cGRm';
+  harness.clients.configure = (client) => {
+    client.callImpl = async () => ({
+      content: [
+        { type: 'text', text: 'saved' },
+        { type: 'image', data: imageBase64, mimeType: 'image/png' },
+        {
+          type: 'resource',
+          resource: { uri: 'file:///report.pdf', mimeType: 'application/pdf', blob: pdfBase64 },
+        },
+      ],
+    });
+  };
+
+  const gateway = new ExecGateway({
+    callTool: (chatCall, _workspace, binding, signal, deadline) =>
+      harness.runtime.callTool(chatCall, {
+        bindingId: binding ?? null,
+        ...(signal === undefined ? {} : { signal }),
+        ...(deadline === undefined ? {} : { deadline }),
+      }),
+  });
+  t.after(async () => {
+    await gateway.disposeAll();
+  });
+
+  const identity: RequestIdentity = {
+    identity: 'unbound',
+    binding: null,
+    client: 'test-client/1.0',
+    mcp: 'mcp_pool_media',
+  };
+  const request: ScriptRequest = {
+    code: `
+      const result = await tools.mcp.pg.fetch({ path: '/tmp/a' });
+      return result.text;
+    `,
+    timeoutMs: 10_000,
+    async: false,
+    identity,
+  };
+
+  const outcome = await gateway.runScript(request);
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.match(outcome.content, /<result>saved<\/result>/);
+  assert.doesNotMatch(outcome.content, /aW1n|cGRm/);
+  assert.deepEqual(outcome.images, [{ base64: imageBase64, mediaType: 'image/png' }]);
+  assert.deepEqual(outcome.documents, [{ base64: pdfBase64 }]);
 });

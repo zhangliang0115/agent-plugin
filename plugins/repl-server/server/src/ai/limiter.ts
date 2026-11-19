@@ -21,6 +21,11 @@ export interface AiLimiterOptions {
 export interface AiLimiter {
   run<T>(task: () => Promise<T>): Promise<T>;
   snapshot(): AiLimiterSnapshot;
+  /**
+   * Rejects every queued waiter (clearing its timeout) and rejects later runs.
+   * In-flight tasks are left to the runner, which terminates their processes.
+   */
+  close(): void;
 }
 
 interface Waiter {
@@ -41,6 +46,7 @@ export function createAiLimiter(options: AiLimiterOptions = {}): AiLimiter {
   const maxWaitMs = options.maxWaitMs ?? AI_LIMITER_WAIT_MS;
 
   let running = 0;
+  let closed = false;
   const queue: Waiter[] = [];
 
   function busy(waitedMs?: number): AiRunnerError {
@@ -52,6 +58,10 @@ export function createAiLimiter(options: AiLimiterOptions = {}): AiLimiter {
       'too many AI runs are in flight; retry shortly',
       details,
     );
+  }
+
+  function shuttingDown(): AiRunnerError {
+    return new AiRunnerError('AI_RUNNER_UNAVAILABLE', 503, 'AI service is shutting down');
   }
 
   function pump(): void {
@@ -66,6 +76,7 @@ export function createAiLimiter(options: AiLimiterOptions = {}): AiLimiter {
 
   return {
     run<T>(task: () => Promise<T>): Promise<T> {
+      if (closed) return Promise.reject(shuttingDown());
       return new Promise<T>((resolve, reject) => {
         if (running < maxRunning) {
           running += 1;
@@ -109,6 +120,14 @@ export function createAiLimiter(options: AiLimiterOptions = {}): AiLimiter {
     },
     snapshot(): AiLimiterSnapshot {
       return { running, queued: queue.length };
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      for (const waiter of queue.splice(0)) {
+        clearTimeout(waiter.timer);
+        waiter.reject(shuttingDown());
+      }
     },
   };
 }

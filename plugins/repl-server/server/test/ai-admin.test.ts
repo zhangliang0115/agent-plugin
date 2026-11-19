@@ -104,6 +104,7 @@ function makeHandler(
     onServerCreated: () => undefined,
     onToolsIndexed: async () => undefined,
     onServerMutated: () => undefined,
+    close: async () => undefined,
     ...overrides,
   };
   return { handler: createAdminAiHandler({ ai }), calls, audits };

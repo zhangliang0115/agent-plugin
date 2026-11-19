@@ -297,9 +297,13 @@ test('E-01: preview → apply → prepared run_script call over a real HTTP MCP 
   assert.deepEqual(env.refreshes, ['lazy']);
 
   const result = (await env.runtime.callTool(toolCall('list_tables'))) as {
-    content: Array<{ text: string }>;
+    text: string;
+    images: unknown[];
+    documents: unknown[];
   };
-  assert.equal(result.content[0]?.text, 'ok:list_tables');
+  assert.equal(result.text, 'ok:list_tables');
+  assert.deepEqual(result.images, []);
+  assert.deepEqual(result.documents, []);
 
   const afterFirst = (await requestLog(fixture)).map((entry) => entry.tool);
   assert.deepEqual(afterFirst.slice(-2), ['search_tools', 'list_tables']);

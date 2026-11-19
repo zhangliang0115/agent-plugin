@@ -1,38 +1,140 @@
 // hook-allow: localhost-only test fetch, no external egress
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 
-import { assemble } from '../src/assembly.ts';
+import { assemble, type AssemblyOptions } from '../src/assembly.ts';
+import { getRevision } from '../src/db/meta.ts';
+import { upsertTool } from '../src/db/tools.ts';
 
-async function start(): Promise<{ base: string; close: () => Promise<void>; root: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'repl-assembly-'));
-  const assembly = await assemble({ root, log: () => undefined });
+const ADMIN_TOKEN = 'test-admin-token';
+
+interface Started {
+  base: string;
+  close: () => Promise<void>;
+  root: string;
+  assembly: Awaited<ReturnType<typeof assemble>>;
+}
+
+async function startIn(root: string, options: AssemblyOptions = {}): Promise<Started> {
+  const assembly = await assemble({ root, log: () => undefined, ...options });
   await new Promise<void>((resolve) => assembly.server.listen(0, '127.0.0.1', resolve));
   const address = assembly.server.address();
   assert.ok(address !== null && typeof address === 'object');
   return {
     base: `http://127.0.0.1:${(address as AddressInfo).port}`,
     root,
+    assembly,
     close: async () => {
       await assembly.close();
+    },
+  };
+}
+
+async function start(options: AssemblyOptions = {}): Promise<Started> {
+  const root = await mkdtemp(join(tmpdir(), 'repl-assembly-'));
+  const started = await startIn(root, options);
+  return {
+    ...started,
+    close: async () => {
+      await started.close();
       await rm(root, { recursive: true, force: true });
     },
   };
 }
 
-async function rpc(base: string, body: unknown, session?: string) {
+/** Applies env overrides for one test body, restoring them afterwards. */
+async function withEnv<T>(values: Record<string, string>, run: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function rpc(
+  base: string,
+  body: unknown,
+  session?: string,
+  headers: Record<string, string> = {},
+) {
   return fetch(`${base}/mcp`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
+      ...headers,
       ...(session === undefined ? {} : { 'mcp-session-id': session }),
     },
     body: JSON.stringify(body),
   });
+}
+
+function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { authorization: `Bearer ${ADMIN_TOKEN}`, ...extra };
+}
+
+/** Races one promise against a timer, clearing the timer when it settles. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+interface SseFrame {
+  event: string;
+  data: Record<string, unknown>;
+}
+
+/** Reads SSE frames until `done(frames)` is true or the deadline passes. */
+async function readFrames(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  done: (frames: SseFrame[]) => boolean,
+  timeoutMs = 8_000,
+): Promise<SseFrame[]> {
+  const decoder = new TextDecoder();
+  const frames: SseFrame[] = [];
+  let buffer = '';
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const next = await withTimeout(reader.read(), Math.max(1, deadline - Date.now()));
+    if (next.done) break;
+    buffer += decoder.decode(next.value, { stream: true });
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const raw = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = /^event: (.+)$/m.exec(raw)?.[1];
+      const data = /^data: (.+)$/m.exec(raw)?.[1];
+      if (event !== undefined && data !== undefined) {
+        frames.push({ event, data: JSON.parse(data) as Record<string, unknown> });
+      }
+      boundary = buffer.indexOf('\n\n');
+    }
+    if (done(frames)) return frames;
+  }
+  return frames;
 }
 
 test('admin API accepts the admin token and creates a client binding', async (t) => {
@@ -156,4 +258,539 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
   const searched = (await search.json()) as { result: { isError: boolean; content: Array<{ text: string }> } };
   assert.equal(searched.result.isError, false);
   assert.ok(Array.isArray(JSON.parse(searched.result.content[0]?.text ?? 'null')));
+});
+
+test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {
+  await withEnv(
+    {
+      REPL_ADMIN_TOKEN: ADMIN_TOKEN,
+      REPL_CAPACITY_MAX_EXEC_SESSIONS: '3',
+      REPL_CAPACITY_MAX_WORKSPACES_PER_MCP_SESSION: '2',
+      REPL_CAPACITY_MAX_IN_FLIGHT_EVALS_PER_EXEC_SESSION: '5',
+    },
+    async () => {
+      const app = await start();
+      t.after(app.close);
+
+      // hook-allow: localhost-only test fetch, no external egress
+      const response = await fetch(`${app.base}/admin/api/overview`, {
+        headers: adminHeaders(),
+      });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { capacity: Record<string, number> };
+      assert.deepEqual(body.capacity, {
+        maxExecSessions: 3,
+        maxWorkspacesPerMcpSession: 2,
+        maxInFlightEvalsPerExecSession: 5,
+        maxServeProcesses: 8,
+        maxWorkers: 8,
+        maxInFlightCallsPerBindingPerServer: 4,
+        maxQueuedCallsPerBindingPerServer: 32,
+      });
+    },
+  );
+});
+
+test('switching discovery back to static refreshes the catalog', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    t.after(app.close);
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const created = await fetch(`${app.base}/admin/api/servers`, {
+      method: 'POST',
+      headers: adminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        id: 'scan',
+        label: 'Scan',
+        transport: 'http',
+        url: 'https://example.test/mcp',
+        toolDiscovery: { mode: 'search', searchTool: 'search_tools' },
+      }),
+    });
+    assert.equal(created.status, 201);
+
+    upsertTool(app.assembly.db, 'scan', {
+      name: 'scan_tool',
+      inputSchema: { type: 'object' },
+      discoveredVia: 'search',
+    });
+    app.assembly.catalog.refreshServer('scan');
+    assert.ok(
+      app.assembly.catalog.snapshot().tools.some((tool) => tool.name === 'scan.scan_tool'),
+      'the discovered row is visible before the switch',
+    );
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const patched = await fetch(`${app.base}/admin/api/servers/scan`, {
+      method: 'PATCH',
+      headers: adminHeaders({
+        'content-type': 'application/json',
+        'if-match': String(getRevision(app.assembly.db)),
+      }),
+      body: JSON.stringify({ toolDiscovery: { mode: 'static' } }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(
+      app.assembly.catalog.snapshot().tools.some((tool) => tool.name === 'scan.scan_tool'),
+      false,
+      'the static switch demotes discovered rows and rebuilds the snapshot',
+    );
+  });
+});
+
+test('GET /clients reports live sessions and PUT destroys the binding sessions', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    t.after(app.close);
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const created = await fetch(`${app.base}/admin/api/clients`, {
+      method: 'POST',
+      headers: adminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ label: 'bound' }),
+    });
+    assert.equal(created.status, 201);
+    const createdBody = (await created.json()) as { client: { id: string }; token: string };
+    const clientAuth = { authorization: `Bearer ${createdBody.token}` };
+
+    const discover = await rpc(
+      app.base,
+      { jsonrpc: '2.0', id: 1, method: 'server/discover' },
+      undefined,
+      clientAuth,
+    );
+    const session = discover.headers.get('mcp-session-id') ?? '';
+    const call = await rpc(
+      app.base,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'run_script', arguments: { code: 'return 1' } },
+      },
+      session,
+      clientAuth,
+    );
+    assert.equal(call.status, 200);
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const listed = await fetch(`${app.base}/admin/api/clients`, { headers: adminHeaders() });
+    const listedBody = (await listed.json()) as {
+      clients: Array<{ id: string; activeSessions: number }>;
+      sessions: Array<{
+        mcpSessionId: string;
+        bindingId: string | null;
+        execSessionIds?: string[];
+      }>;
+    };
+    assert.equal(listedBody.clients[0]?.activeSessions, 1, 'activeSessions is no longer always 0');
+    const listedSession = listedBody.sessions.find((entry) => entry.mcpSessionId === session);
+    assert.equal(listedSession?.bindingId, createdBody.client.id);
+    assert.equal(listedSession?.execSessionIds?.length, 1);
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const updated = await fetch(`${app.base}/admin/api/clients/${createdBody.client.id}`, {
+      method: 'PUT',
+      headers: adminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ label: 'renamed' }),
+    });
+    assert.equal(updated.status, 200);
+    assert.equal(
+      ((await updated.json()) as { affectedSessions: number }).affectedSessions,
+      1,
+      'the live execution session is counted and destroyed',
+    );
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const again = await fetch(`${app.base}/admin/api/clients/${createdBody.client.id}`, {
+      method: 'PUT',
+      headers: adminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ label: 'renamed-again' }),
+    });
+    assert.equal(((await again.json()) as { affectedSessions: number }).affectedSessions, 0);
+  });
+});
+
+test('admin event stream publishes eval frames and the server_state payload', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    t.after(app.close);
+
+    const controller = new AbortController();
+    t.after(() => controller.abort());
+    // hook-allow: localhost-only test fetch, no external egress
+    const stream = await fetch(`${app.base}/admin/api/events`, {
+      headers: {
+        ...adminHeaders(),
+        'last-event-id': '0',
+      },
+      signal: controller.signal,
+    });
+    assert.equal(stream.status, 200);
+    assert.ok(stream.body !== null);
+    const reader = stream.body.getReader();
+
+    const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+    const session = discover.headers.get('mcp-session-id') ?? '';
+    const call = await rpc(
+      app.base,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'run_script', arguments: { code: 'return 41 + 1' } },
+      },
+      session,
+    );
+    assert.equal(call.status, 200);
+
+    const frames = await readFrames(reader, (seen) =>
+      seen.some((frame) => frame.event === 'eval' && frame.data['phase'] === 'end'),
+    );
+    const evals = frames.filter((frame) => frame.event === 'eval').map((frame) => frame.data);
+    const startFrame = evals.find((frame) => frame['phase'] === 'start');
+    const endFrame = evals.find((frame) => frame['phase'] === 'end');
+    assert.ok(startFrame !== undefined, 'the stream carries the eval start frame');
+    assert.ok(endFrame !== undefined, 'the stream carries the eval end frame');
+    assert.match(String(startFrame['execSessionId']), /^es_/);
+    assert.equal(startFrame['binding'], null);
+    assert.equal(startFrame['phase'], 'start');
+    assert.equal(endFrame['ok'], true);
+    assert.equal(typeof endFrame['evalId'], 'number');
+
+    const serverState = frames.find((frame) => frame.event === 'server_state');
+    assert.ok(serverState !== undefined, 'the startup pool snapshot is replayed');
+    assert.ok(Array.isArray(serverState.data['entries']));
+    assert.equal(typeof (serverState.data['pool'] as Record<string, unknown>)['total'], 'number');
+  });
+});
+
+test('admin event stream publishes the operation payload', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    t.after(app.close);
+
+    const controller = new AbortController();
+    t.after(() => controller.abort());
+    // hook-allow: localhost-only test fetch, no external egress
+    const stream = await fetch(`${app.base}/admin/api/events`, {
+      headers: { ...adminHeaders(), 'last-event-id': '0' },
+      signal: controller.signal,
+    });
+    assert.equal(stream.status, 200);
+    assert.ok(stream.body !== null);
+    const reader = stream.body.getReader();
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const created = await fetch(`${app.base}/admin/api/servers`, {
+      method: 'POST',
+      headers: adminHeaders({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        id: 'dead',
+        label: 'Dead',
+        transport: 'http',
+        url: 'http://127.0.0.1:9/mcp',
+      }),
+    });
+    assert.equal(created.status, 201);
+
+    // hook-allow: localhost-only test fetch, no external egress
+    const connected = await fetch(`${app.base}/admin/api/servers/dead/connect`, {
+      method: 'POST',
+      headers: adminHeaders(),
+    });
+    assert.equal(connected.status, 202);
+
+    const frames = await readFrames(reader, (seen) =>
+      seen.some(
+        (frame) =>
+          frame.event === 'operation'
+          && frame.data['target'] === 'dead'
+          && (frame.data['state'] === 'error' || frame.data['state'] === 'ok'),
+      ),
+      10_000,
+    );
+    const operation = frames
+      .filter((frame) => frame.event === 'operation')
+      .map((frame) => frame.data)
+      .find(
+        (data) =>
+          data['target'] === 'dead' && (data['state'] === 'error' || data['state'] === 'ok'),
+      );
+    assert.ok(operation !== undefined, 'the connect operation is published');
+    assert.equal(typeof operation['operationId'], 'string');
+    assert.equal(operation['kind'], 'connect');
+    assert.equal(operation['state'], 'error');
+    assert.equal(typeof (operation['error'] as Record<string, unknown>)['message'], 'string');
+  });
+});
+
+test('the lifecycle sweep expires idle transport sessions and cascades', async (t) => {
+  const app = await start({ transportIdleMs: 10, sweepIntervalMs: 3_600_000 });
+  t.after(app.close);
+
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  assert.match(session, /^mcp_/);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const swept = await app.assembly.sweep();
+  assert.ok(swept !== null);
+  assert.equal(typeof swept?.recycled, 'number');
+
+  const after = await rpc(app.base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
+  assert.equal(after.status, 404);
+});
+
+test('close is idempotent and a disposed gateway rejects new evals', async (t) => {
+  const app = await start();
+  await app.assembly.close();
+  await app.assembly.close();
+
+  await assert.rejects(
+    app.assembly.gateway.runScript({
+      code: 'return 1;',
+      timeoutMs: 1_000,
+      async: false,
+      identity: { identity: 'unbound', binding: null, client: '', mcp: 'mcp_closed' },
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'MCP_SERVER_UNAVAILABLE',
+  );
+
+  await app.close();
+});
+
+test('PATCH /settings hot-applies capacity limits to every component', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    try {
+      const before = await fetch(`${app.base}/admin/api/settings`, { headers: adminHeaders() });
+      assert.equal(before.status, 200);
+      const { revision } = (await before.json()) as { revision: number };
+
+      const patched = await fetch(`${app.base}/admin/api/settings`, {
+        method: 'PATCH',
+        headers: adminHeaders({ 'content-type': 'application/json', 'if-match': String(revision) }),
+        body: JSON.stringify({
+          capacity: {
+            maxExecSessions: 30,
+            maxExecSessionsPerBinding: 10,
+            maxWorkers: 30,
+            maxServeProcesses: 30,
+            maxInFlightEvalsPerExecSession: 4,
+            maxInFlightCallsPerBindingPerServer: 2,
+            maxQueuedCallsPerBindingPerServer: 5,
+          },
+        }),
+      });
+      assert.equal(patched.status, 200);
+
+      const limits = app.assembly.gateway.sessions.limits;
+      assert.equal(limits.maxExecSessions, 30);
+      assert.equal(limits.maxExecSessionsPerBinding, 10);
+      assert.equal(limits.maxInFlightEvalsPerExecSession, 4);
+      assert.deepEqual(app.assembly.gateway.taskLimits, {
+        capacity: Math.max(64, 30 * 4),
+        ownerCapacity: Math.max(32, 10 * 4),
+      });
+
+      // The cold keys reach their live owners, not just the settings row.
+      const capacity = app.assembly.capacity();
+      assert.equal(capacity.maxServeProcesses, 30);
+      assert.equal(capacity.maxWorkers, 30);
+      assert.equal(capacity.maxInFlightCallsPerBindingPerServer, 2);
+      assert.equal(capacity.maxQueuedCallsPerBindingPerServer, 5);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('maxWorkers limits how many execution sessions can exist', async (t) => {
+  await withEnv(
+    { REPL_ADMIN_TOKEN: ADMIN_TOKEN, REPL_CAPACITY_MAX_WORKERS: '1' },
+    async () => {
+      const app = await start();
+      t.after(app.close);
+      const firstWorkspace = join(app.root, 'ws-one');
+      const secondWorkspace = join(app.root, 'ws-two');
+      await mkdir(firstWorkspace, { recursive: true });
+      await mkdir(secondWorkspace, { recursive: true });
+
+      const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+      const session = discover.headers.get('mcp-session-id') ?? '';
+      const run = async (id: number, workspace: string) =>
+        await rpc(
+          app.base,
+          {
+            jsonrpc: '2.0',
+            id,
+            method: 'tools/call',
+            params: { name: 'run_script', arguments: { code: 'return 1', workspace } },
+          },
+          session,
+        );
+
+      const first = (await (await run(2, firstWorkspace)).json()) as {
+        result: { isError: boolean; content: Array<{ text: string }> };
+      };
+      assert.equal(first.result.isError, false);
+
+      const second = (await (await run(3, secondWorkspace)).json()) as {
+        result: { isError: boolean; content: Array<{ text: string }> };
+      };
+      assert.equal(second.result.isError, true);
+      assert.match(
+        second.result.content[0]?.text ?? '',
+        /CAPACITY_EXCEEDED/,
+        'a second workspace needs a second worker, which maxWorkers forbids',
+      );
+    },
+  );
+});
+
+test('PATCH /settings caps the effective exec-session limit by maxWorkers', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    try {
+      const before = await fetch(`${app.base}/admin/api/settings`, { headers: adminHeaders() });
+      const { revision } = (await before.json()) as { revision: number };
+
+      const patched = await fetch(`${app.base}/admin/api/settings`, {
+        method: 'PATCH',
+        headers: adminHeaders({ 'content-type': 'application/json', 'if-match': String(revision) }),
+        body: JSON.stringify({
+          capacity: { maxExecSessions: 30, maxWorkers: 4, maxServeProcesses: 30 },
+        }),
+      });
+      assert.equal(patched.status, 200);
+
+      // One worker per exec session: four workers mean four usable sessions,
+      // while GET /settings keeps showing the raw values.
+      assert.equal(app.assembly.capacity().maxExecSessions, 4);
+      assert.equal(app.assembly.capacity().maxWorkers, 4);
+      assert.equal(app.assembly.gateway.sessions.limits.maxExecSessions, 4);
+
+      const view = await fetch(`${app.base}/admin/api/settings`, { headers: adminHeaders() });
+      const settings = ((await view.json()) as { settings: { capacity: Record<string, number> } })
+        .settings;
+      assert.equal(settings.capacity['maxExecSessions'], 30);
+      assert.equal(settings.capacity['maxWorkers'], 4);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+test('startup reads settings.capacity for every component', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'repl-assembly-'));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const first = await startIn(root);
+    try {
+      const before = await fetch(`${first.base}/admin/api/settings`, { headers: adminHeaders() });
+      const { revision } = (await before.json()) as { revision: number };
+
+      const patched = await fetch(`${first.base}/admin/api/settings`, {
+        method: 'PATCH',
+        headers: adminHeaders({ 'content-type': 'application/json', 'if-match': String(revision) }),
+        body: JSON.stringify({
+          capacity: {
+            maxExecSessions: 6,
+            maxWorkers: 3,
+            maxServeProcesses: 6,
+            maxInFlightCallsPerBindingPerServer: 1,
+            maxQueuedCallsPerBindingPerServer: 2,
+          },
+        }),
+      });
+      assert.equal(patched.status, 200);
+    } finally {
+      await first.close();
+    }
+
+    const second = await startIn(root);
+    try {
+      const capacity = second.assembly.capacity();
+      assert.equal(capacity.maxExecSessions, 3, 'min(maxExecSessions, maxWorkers) applies at boot');
+      assert.equal(capacity.maxWorkers, 3);
+      assert.equal(capacity.maxServeProcesses, 6);
+      assert.equal(capacity.maxInFlightCallsPerBindingPerServer, 1);
+      assert.equal(capacity.maxQueuedCallsPerBindingPerServer, 2);
+      assert.equal(second.assembly.gateway.sessions.limits.maxExecSessions, 3);
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+test('startup lets REPL_CAPACITY_* override stored settings', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'repl-assembly-'));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const first = await startIn(root);
+    try {
+      const before = await fetch(`${first.base}/admin/api/settings`, { headers: adminHeaders() });
+      const { revision } = (await before.json()) as { revision: number };
+      const patched = await fetch(`${first.base}/admin/api/settings`, {
+        method: 'PATCH',
+        headers: adminHeaders({ 'content-type': 'application/json', 'if-match': String(revision) }),
+        body: JSON.stringify({ capacity: { maxExecSessions: 4, maxServeProcesses: 6 } }),
+      });
+      assert.equal(patched.status, 200);
+    } finally {
+      await first.close();
+    }
+  });
+
+  await withEnv(
+    {
+      REPL_ADMIN_TOKEN: ADMIN_TOKEN,
+      REPL_CAPACITY_MAX_SERVE_PROCESSES: '2',
+      REPL_CAPACITY_MAX_QUEUED_CALLS_PER_BINDING_PER_SERVER: '3',
+    },
+    async () => {
+      const second = await startIn(root);
+      try {
+        const capacity = second.assembly.capacity();
+        assert.equal(capacity.maxServeProcesses, 2, 'env overrides the stored value at boot');
+        assert.equal(capacity.maxQueuedCallsPerBindingPerServer, 3);
+      } finally {
+        await second.close();
+      }
+    },
+  );
+});
+
+test('a rejected relation change is not written or applied', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const app = await start();
+    try {
+      const before = await fetch(`${app.base}/admin/api/settings`, { headers: adminHeaders() });
+      const { revision } = (await before.json()) as { revision: number };
+
+      const rejected = await fetch(`${app.base}/admin/api/settings`, {
+        method: 'PATCH',
+        headers: adminHeaders({ 'content-type': 'application/json', 'if-match': String(revision) }),
+        body: JSON.stringify({ capacity: { maxServeProcesses: 2 } }),
+      });
+      assert.equal(rejected.status, 422);
+      const error = (await rejected.json()) as { error: { code: string } };
+      assert.equal(error.error.code, 'INVALID_CAPACITY');
+
+      const after = await fetch(`${app.base}/admin/api/settings`, { headers: adminHeaders() });
+      const body = (await after.json()) as {
+        revision: number;
+        settings: { capacity: Record<string, number> };
+      };
+      assert.equal(body.revision, revision, 'a rejected PATCH must not bump the revision');
+      assert.equal(body.settings.capacity['maxServeProcesses'], 8);
+      assert.equal(app.assembly.capacity().maxServeProcesses, 8);
+    } finally {
+      await app.close();
+    }
+  });
 });

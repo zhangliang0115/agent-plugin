@@ -10,11 +10,11 @@
 - `packages/portable` 的公共契约
 - 开发规范本身（AGENTS.md 里的规则）
 
-只影响单个插件内部实现的选择，写在该插件的 README 里，不写 ADR。
+只影响单个插件内部实现的选择，写在该插件的 README 里，不写 ADR；例外是推翻已经定下并写进文档的既有技术决策（例如更换前端技术栈），这类 ADR 放在 `plugins/<id>/docs/decisions/`，编号接本目录序列，并在下方索引登记。
 
 ## 怎么写
 
-1. 文件名 `NNNN-短标题.md`，编号递增，不复用。
+1. 文件名 `NNNN-短标题.md`，编号递增，不复用；插件内 ADR 放在 `plugins/<id>/docs/decisions/`，编号仍按全仓序列递增。
 2. 已接受的 ADR 不改正文。要改变决策就写一份新的，在新文件里写 `取代：NNNN`，并把旧文件的状态改成 `已被 NNNN 取代`。
 3. 提议中的 ADR 状态写 `提议`，确认后改成 `已接受`。
 4. 写完更新下面的索引。
@@ -52,3 +52,4 @@
 | [0005](0005-npm-scope-and-package-names.md) | 对外发布的 npm scope 与包名 | 已接受（发布范围由 0007 修订） |
 | [0006](0006-dsh-mcp-ui.md) | DSH 的 MCP 管理界面：独立 UI 插件 + 逐工具并行勾选 | 已接受 |
 | [0007](0007-server-and-web-package-types.md) | 新增 server 与 web 包类型 | 已接受 |
+| [0008](../../plugins/repl-server/docs/decisions/0008-native-ts-dom-admin-ui.md) | 管理端采用原生 TypeScript + DOM + esbuild | 已接受 |

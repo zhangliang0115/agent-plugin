@@ -1,5 +1,6 @@
 /** Hand-written MCP tasks layer: dispatch decision, mcpTaskId mapping and get/cancel/update. @module */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -26,6 +27,18 @@ export type TaskStatus = TaskSnapshot['status'];
 /** Task ownership: a bound client's binding id, otherwise this transport session. */
 export function ownerOf(identity: RequestIdentity): string {
   return identity.binding ?? identity.mcp;
+}
+
+/**
+ * Transport session that created a task, for the `DELETE /mcp` cascade. The
+ * HTTP layer wraps each dispatched request so `create` records the session even
+ * for a bound client whose owner is the binding id.
+ */
+const transportScope = new AsyncLocalStorage<string>();
+
+/** Runs `fn` with the creating transport session visible to {@link McpTaskStore.create}. */
+export function withTransportSession<T>(transportSessionId: string, fn: () => T): T {
+  return transportScope.run(transportSessionId, fn);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -108,6 +121,12 @@ export interface McpTaskRecord {
   readonly taskId: string;
   readonly evalTaskId: string;
   readonly owner: string;
+  /**
+   * `Mcp-Session-Id` that created the task. A binding may reconnect with a new
+   * transport session while keeping its tasks; `DELETE /mcp` only drops the
+   * tasks of the session it destroys.
+   */
+  readonly transportSessionId: string;
   readonly createdAt: number;
   readonly expiresAt: number;
 }
@@ -143,7 +162,7 @@ export class McpTaskStore {
     return this.byId.size;
   }
 
-  create(owner: string, evalTaskId: string): CreateTaskResult {
+  create(owner: string, evalTaskId: string, transportSessionId?: string): CreateTaskResult {
     const now = this.clock.now();
     this.sweep(now);
     let taskId = this.idFactory();
@@ -152,6 +171,7 @@ export class McpTaskStore {
       taskId,
       evalTaskId,
       owner,
+      transportSessionId: transportSessionId ?? transportScope.getStore() ?? owner,
       createdAt: now,
       expiresAt: now + this.ttlMs,
     });
@@ -188,11 +208,26 @@ export class McpTaskStore {
     return this.byId.delete(taskId);
   }
 
-  /** `DELETE /mcp` clears the tasks created by that transport session. */
+  /** `DELETE /mcp` clears the tasks created by that owner (unbound clients only). */
   clearOwner(owner: string): number {
     let removed = 0;
     for (const [taskId, record] of this.byId) {
       if (record.owner !== owner) continue;
+      this.byId.delete(taskId);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  /**
+   * `DELETE /mcp` / idle transport expiry: drops the tasks created through one
+   * transport session, bound or unbound. Tasks another session of the same
+   * binding created stay resolvable.
+   */
+  clearSession(transportSessionId: string): number {
+    let removed = 0;
+    for (const [taskId, record] of this.byId) {
+      if (record.transportSessionId !== transportSessionId) continue;
       this.byId.delete(taskId);
       removed += 1;
     }
@@ -263,16 +298,35 @@ export async function getMcpTask(
   return toTaskView(taskId, snapshot);
 }
 
-/** `tasks/cancel` acknowledges with `{ resultType: "complete" }`, including already-finished tasks. */
+/**
+ * `tasks/cancel`: cooperative cancel for a working task, and the current
+ * terminal state for one that already finished (protocol §6). Unknown or
+ * evicted eval tasks are `TASK_NOT_FOUND`; the mapping is dropped on the way.
+ */
 export async function cancelMcpTask(
   store: McpTaskStore,
   gateway: ExecutionGateway,
   owner: string,
   taskId: string,
-): Promise<TaskAcknowledgement> {
+): Promise<TaskView | TaskAcknowledgement> {
   const record = store.resolve(owner, taskId);
-  await gateway.cancelTask(owner, record.evalTaskId);
-  return { resultType: 'complete' };
+  const snapshot = await gateway.getTask(owner, record.evalTaskId);
+  if (snapshot === null) {
+    store.remove(taskId);
+    throw new TaskMethodError('TASK_NOT_FOUND', `task ${taskId} is no longer available`);
+  }
+  if (snapshot.status !== 'working') return toTaskView(taskId, snapshot);
+
+  const cancelled = await gateway.cancelTask(owner, record.evalTaskId);
+  if (cancelled) return { resultType: 'complete' };
+
+  // The eval settled between the read and the cancel: report that terminal state.
+  const settled = await gateway.getTask(owner, record.evalTaskId);
+  if (settled === null) {
+    store.remove(taskId);
+    throw new TaskMethodError('TASK_NOT_FOUND', `task ${taskId} is no longer available`);
+  }
+  return toTaskView(taskId, settled);
 }
 
 /** `tasks/update` never produces `input_required`; unknown keys are ignored by the caller. */

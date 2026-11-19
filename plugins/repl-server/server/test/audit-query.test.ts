@@ -15,7 +15,9 @@ import {
   InvalidAuditFilterError,
   listAuditFiles,
   listExecSessions,
+  matchesFilter,
   normalizeFilter,
+  eventStatus,
   queryAudit,
   readEvalTrace,
   type StatsWorkerData,
@@ -215,6 +217,85 @@ test('parseAuditQueryParams validates evalId, status and limit', () => {
   assert.deepEqual(parsed.events, ['tool_result', 'eval_end']);
   assert.equal(parsed.evalId, 3);
   assert.equal(parsed.status, 'error');
+});
+
+test('ai_run maps outcome to status and serverId to the server filter', () => {
+  const base = {
+    v: 1,
+    ts: new Date(DAY_18).toISOString(),
+    event: 'ai_run',
+    identity: 'unbound',
+    binding: null,
+    client: 'admin',
+    mcp: 'admin',
+    kind: 'annotate',
+    trigger: 'manual',
+    serverId: 'srv_ai',
+    template: 'annotate',
+    promptVersion: 1,
+    promptBytes: 10,
+    model: null,
+    durationMs: 5,
+    code: null,
+    resultBytes: 0,
+    costUsd: null,
+    proposalId: null,
+  } as unknown as AuditEvent;
+
+  const failed = { ...base, outcome: 'error' } as AuditEvent;
+  const passed = { ...base, outcome: 'ok' } as AuditEvent;
+  assert.equal(eventStatus(failed), 'error');
+  assert.equal(eventStatus(passed), 'ok');
+  assert.equal(matchesFilter(failed, normalizeFilter({ status: 'error' })), true);
+  assert.equal(matchesFilter(passed, normalizeFilter({ status: 'error' })), false);
+  assert.equal(matchesFilter(failed, normalizeFilter({ server: 'srv_ai' })), true);
+  assert.equal(matchesFilter(failed, normalizeFilter({ server: 'srv_other' })), false);
+});
+
+test('queryAudit finds ai_run events by status and serverId', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'repl-audit-ai-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const base = {
+    v: 1,
+    ts: new Date(DAY_18).toISOString(),
+    event: 'ai_run',
+    identity: 'unbound',
+    binding: null,
+    client: 'admin',
+    mcp: 'admin',
+    kind: 'annotate',
+    trigger: 'manual',
+    serverId: 'srv_ai',
+    template: 'annotate',
+    promptVersion: 1,
+    promptBytes: 10,
+    model: null,
+    durationMs: 5,
+    code: null,
+    resultBytes: 0,
+    costUsd: null,
+    proposalId: null,
+    outcome: 'ok',
+  };
+  const failed = { ...base, ts: new Date(DAY_18 + 10).toISOString(), outcome: 'error', code: 'AI_TIMEOUT' };
+  const passed = { ...base, ts: new Date(DAY_18 + 20).toISOString() };
+  await writeFile(
+    join(dir, 'audit-2026-11-18.jsonl'),
+    `${[JSON.stringify(failed), JSON.stringify(passed)].join('\n')}\n`,
+    'utf8',
+  );
+
+  const hits = await queryAudit(dir, normalizeFilter({ status: 'error', server: 'srv_ai' }), {
+    limit: 100,
+  });
+  assert.equal(hits.events.length, 1);
+  assert.equal(hits.events[0]?.event, 'ai_run');
+  assert.equal(hits.events[0]?.outcome, 'error');
+  assert.equal(hits.events[0]?.code, 'AI_TIMEOUT');
+
+  const byServer = await queryAudit(dir, normalizeFilter({ server: 'srv_ai' }), { limit: 100 });
+  assert.equal(byServer.events.length, 2);
+  assert.ok(byServer.events.every((event) => event.event === 'ai_run'));
 });
 
 test('queryAudit pages across files with a byte-offset cursor and skips torn lines', async (t) => {

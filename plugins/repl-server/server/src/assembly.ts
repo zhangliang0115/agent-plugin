@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { ProcessLedger, newId, type PoolEntry, type ToolCallRequest } from '@zhangliang0115/repl-server-core';
 
 import { createAdminOverviewHandler } from './admin/overview.ts';
-import { createAdminClientsHandler } from './admin/clients.ts';
+import { createAdminClientsHandler, type McpSessionRecord, type SessionRegistry } from './admin/clients.ts';
 import { createAdminDiscoverHandler } from './admin/discover.ts';
 import { createAdminServersHandler, createOperationLauncher, type AdminOperation, type OperationLauncher } from './admin/servers.ts';
-import { createAdminSettingsHandler } from './admin/settings.ts';
+import { createAdminSettingsHandler, type SettingsStore } from './admin/settings.ts';
 import { createAdminToolsHandler } from './admin/tools.ts';
 import { createAdminConfigRoutes, operationStarterFromLauncher } from './admin/config-routes.ts';
 import { createAdminReportsHandler } from './admin/reports.ts';
@@ -27,7 +27,7 @@ import { createDiscoveryService } from './discovery/service.ts';
 import { createAdminDiscoveryHandler } from './discovery/handler.ts';
 import { createFileSecretStore } from './secrets/store.ts';
 import { handleAdminHttp } from './admin/http-adapter.ts';
-import { createSearchPreview, createCatalogService } from './catalog/index.ts';
+import { createSearchPreview, createCatalogService, type CatalogService } from './catalog/index.ts';
 import { createApp, type AppOptions, type McpContext } from './app.ts';
 import { resolveIdentityConfig } from './assembly-identity.ts';
 import {
@@ -39,7 +39,9 @@ import {
 import { openStateDb, migrate } from './db/migrate.ts';
 import { findBindingByToken } from './db/clients.ts';
 import { upsertTool } from './db/tools.ts';
-import { ExecGateway } from './exec/gateway.ts';
+import { ExecGateway, type IdleSweepResult } from './exec/gateway.ts';
+import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
+import { PoolGates } from './pool/gates.ts';
 import { createPoolRuntime } from './pool/runtime.ts';
 import { mcpClientFactory, mcpTransportFactory } from './pool/adapters/client.ts';
 import { createServeRuntime } from './serve/runtime.ts';
@@ -47,7 +49,8 @@ import { createServeCallTool } from './serve/adapter.ts';
 import { loadLocalTokens, stateDbPath } from './local-tokens.ts';
 import { createMethodTable } from './mcp/methods.ts';
 import { JSON_RPC_INVALID_PARAMS, JsonRpcError } from './mcp/errors.ts';
-import type { AuditEvent, Catalog } from './ports.ts';
+import type { AuditEvent } from './ports.ts';
+import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
 import { callTool, type ToolCallResponse } from './tools/call.ts';
@@ -62,15 +65,29 @@ export interface AssemblyOptions {
   bootId?: string;
   /** Test seam: replaces the script-visible tool call. */
   callTool?: (call: ToolCallRequest) => Promise<unknown>;
+  /** Test seam: transport-session idle TTL; defaults to 60 minutes. */
+  transportIdleMs?: number;
+  /** Test seam: background lifecycle sweep interval; defaults to 60 seconds. */
+  sweepIntervalMs?: number;
   log?: (line: string) => void;
 }
 
 export interface Assembly {
   server: Server;
   db: ReturnType<typeof openStateDb>;
-  catalog: Catalog;
+  catalog: CatalogService;
+  /** Live execution gateway; the admin overview and tests read its limits. */
+  gateway: ExecGateway;
+  /**
+   * Effective capacity limits as enforced right now by the gateway, the pool
+   * gates and the serve runtime. `maxExecSessions` is already capped by
+   * `maxWorkers`; the raw values stay visible through `GET /settings`.
+   */
+  capacity(): CapacityLimits;
   /** One-time admin bootstrap token; printed once on startup. */
   adminBootstrapToken: string | null;
+  /** Runs one lifecycle sweep now (transport, worker, serve, task retention). */
+  sweep(): Promise<IdleSweepResult | null>;
   close(): Promise<void>;
 }
 
@@ -85,10 +102,48 @@ function readTaskId(params: Record<string, unknown>): string {
   return taskId;
 }
 
+/** How long shutdown waits for the HTTP server before logging and moving on. */
+const SERVER_CLOSE_TIMEOUT_MS = 5_000;
+
+/** Background idle-lifecycle sweep (design 03 §2.3). */
+const SWEEP_INTERVAL_MS = 60_000;
+
+/**
+ * Stops accepting connections and waits for the listener to close. Idle
+ * keep-alive sockets are dropped first; a lingering request cannot hold
+ * shutdown forever, so the wait is bounded.
+ */
+function closeServer(
+  server: Server,
+  log: (line: string) => void,
+  timeoutMs = SERVER_CLOSE_TIMEOUT_MS,
+): Promise<void> {
+  server.closeIdleConnections();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      log(`repl-server: server.close did not finish within ${timeoutMs}ms; continuing shutdown`);
+      resolve();
+    }, timeoutMs);
+    timer.unref?.();
+    server.close(() => finish());
+  });
+}
+
 /** Wires SQLite, catalog, gateway, MCP methods, admin routes and the HTTP app. */
 export async function assemble(options: AssemblyOptions = {}): Promise<Assembly> {
   const log = options.log ?? ((line: string) => console.error(line));
   const root = options.root ?? process.env['AGENTS_HOME'];
+  const clock = systemClock;
 
   const dataDir = dirname(stateDbPath(root === undefined ? undefined : `${root}/repl-server`));
   const tokens = await loadLocalTokens(dataDir);
@@ -153,6 +208,11 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const toolStore = new DbToolStore(db);
   const bindingStore = new DbClientBindingStore(db);
   const settingsStore = new DbSettingsStore(db);
+  // One merged snapshot at startup: defaults ← stored settings ← env. Every
+  // component below is built from it, so a stored value is live before the
+  // first request and env overrides (tests) apply to all of them.
+  const bootSettings = await settingsStore.read();
+  const bootCapacity = resolveCapacityLimitsFromSettings(bootSettings.settings);
   const secrets = createFileSecretStore(dataDir);
   const ledgerBootId = options.bootId ?? newId('boot');
   const processLedger = new ProcessLedger({ root: dataDir });
@@ -173,12 +233,18 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   };
   let discoveryService: ReturnType<typeof createDiscoveryService> | null = null;
   let aiService: ReturnType<typeof createAiService> | null = null;
+  const poolGates = new PoolGates({
+    callsPerBinding: bootCapacity.maxInFlightCallsPerBindingPerServer,
+    queuedPerBinding: bootCapacity.maxQueuedCallsPerBindingPerServer,
+  });
   const poolRuntime = createPoolRuntime({
     servers: serverStore,
     secrets,
     transportFactory: mcpTransportFactory,
     clientFactory: mcpClientFactory,
+    gates: poolGates,
     ledger: poolLedger,
+    clock,
     audit: {
       write: (event: AuditEvent) => {
         audit.recordTask({ ...event, ts: event.ts ?? new Date().toISOString() });
@@ -262,6 +328,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     tools: toolStore,
     catalog,
     pool: poolRuntime,
+    audit: auditSink,
   });
 
   aiService = createAiService({
@@ -273,6 +340,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     dataDir,
     parseCreateServer,
     log,
+    bootId: ledgerBootId,
     onAiRun: (event) => {
       audit.recordTask({ ...event, ts: event.ts ?? new Date().toISOString() });
     },
@@ -287,6 +355,9 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     revision: () => serverStore.revision(),
     create: async (config: Parameters<typeof serverStore.create>[0]) => {
       const result = await serverStore.create(config);
+      // A config import replaces rows through remove+create; the snapshot must
+      // stop advertising tools of the previous incarnation.
+      catalog.refreshServer(result.server.id);
       ai.onServerCreated(result.server.id);
       return result;
     },
@@ -296,12 +367,181 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       expectedRevision: number,
     ) => {
       const result = await serverStore.update(id, patch, expectedRevision);
+      // The store demotes discovered rows when the mode returns to static; the
+      // snapshot must be rebuilt so the next eval stops seeing them.
+      catalog.refreshServer(id);
       ai.onServerMutated(id);
       return result;
     },
     remove: async (id: string, expectedRevision: number) => {
       const result = await serverStore.remove(id, expectedRevision);
+      // Drop the removed server's tool rows from the live snapshot immediately.
+      catalog.refreshServer(id);
       ai.onServerMutated(id);
+      return result;
+    },
+  };
+
+  const serveRuntime = createServeRuntime({
+    dataDir,
+    maxProcesses: bootCapacity.maxServeProcesses,
+    ...(options.bootId === undefined ? {} : { bootId: options.bootId }),
+    ...(process.env['REPL_CLAUDE_BIN'] === undefined ? {} : { bin: process.env['REPL_CLAUDE_BIN'] }),
+    now: () => clock.now(),
+    log,
+  });
+  const tasks = new McpTaskStore({ clock });
+  const sessions = new TransportSessionRegistry({
+    clock,
+    ...(options.transportIdleMs === undefined ? {} : { idleMs: options.transportIdleMs }),
+  });
+
+  /** Publishes the design 03 §4.5 `eval` frames from the gateway's audit events. */
+  const publishEvalEvent = (event: Record<string, unknown> & { event: string }): void => {
+    if (event.event !== 'eval_start' && event.event !== 'eval_end') return;
+    const frame: Record<string, unknown> = {
+      phase: event.event === 'eval_start' ? 'start' : 'end',
+      execSessionId: event['exec'],
+      binding: event['binding'] ?? null,
+      client: event['client'] ?? '',
+      workspace: event['workspace'],
+    };
+    if (typeof event['evalId'] === 'number') frame['evalId'] = event['evalId'];
+    if (event.event === 'eval_start') {
+      frame['mode'] = event['mode'];
+    } else {
+      frame['ok'] = event['ok'];
+      frame['outcome'] = event['outcome'];
+      frame['ms'] = event['ms'];
+    }
+    eventsHub.publish('eval', frame);
+  };
+
+  const gateway = new ExecGateway({
+    catalog,
+    clock,
+    limits: bootCapacity,
+    serve: {
+      healthy: (execSessionId) => serveRuntime.isHealthy({ execSessionId }),
+      restart: async (execSessionId) => {
+        await serveRuntime.restart({ execSessionId });
+      },
+    },
+    callTool:
+      options.callTool ??
+      (async (
+        call: ToolCallRequest,
+        workspace?: string,
+        binding?: string | null,
+        signal?: AbortSignal,
+        deadline?: number,
+        execSessionId?: string,
+      ) => {
+        if (call.server !== undefined) {
+          return await poolRuntime.callTool(call, {
+            bindingId: binding ?? null,
+            ...(signal === undefined ? {} : { signal }),
+            ...(deadline === undefined ? {} : { deadline }),
+          });
+        }
+        const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
+        const client = await serveRuntime.acquire(
+          key,
+          execSessionId === undefined ? undefined : { execSessionId },
+        );
+        return await createServeCallTool(client)(call, {
+          ...(signal === undefined ? {} : { signal }),
+          ...(deadline === undefined ? {} : { deadline }),
+        });
+      }),
+    onAudit: (event) => {
+      const record = { ...event, ts: new Date().toISOString() };
+      if (event.event.startsWith('tool_')) {
+        audit.recordToolCall(record);
+      } else if (event.event.startsWith('eval_')) {
+        audit.recordEval(record);
+        publishEvalEvent(event);
+      } else {
+        audit.recordTask(record);
+      }
+    },
+    onSessionClosed: async (_workspace, session) => {
+      if (session === undefined) return;
+      // Only this execution session's serve handle is released; a sibling
+      // session in the same workspace keeps its own process (design 03 §2.2).
+      await serveRuntime.release(session.workspace, { execSessionId: session.id });
+    },
+  });
+
+  /** Latest resolved identity per transport session, for the admin client view. */
+  const sessionActivity = new Map<string, { binding: string | null; client: string }>();
+  const sessionRegistry: SessionRegistry = {
+    async list(): Promise<McpSessionRecord[]> {
+      const live = sessions.list();
+      const liveIds = new Set(live.map((session) => session.id));
+      for (const id of [...sessionActivity.keys()]) {
+        if (!liveIds.has(id)) sessionActivity.delete(id);
+      }
+
+      const records = new Map<string, McpSessionRecord>();
+      for (const session of live) {
+        const seen = sessionActivity.get(session.id);
+        records.set(session.id, {
+          mcpSessionId: session.id,
+          bindingId: seen?.binding ?? null,
+          client: seen?.client ?? '',
+          connectedAt: new Date(session.createdAt).toISOString(),
+          lastRequestAt: new Date(session.lastRequestAt).toISOString(),
+        });
+      }
+      // Sessions with no request yet (or whose identity came from a binding)
+      // are enriched from the execution sessions they own.
+      for (const exec of gateway.sessions.list()) {
+        let record = records.get(exec.mcpSessionId);
+        if (record === undefined) {
+          record = {
+            mcpSessionId: exec.mcpSessionId,
+            bindingId: exec.binding,
+            client: exec.clientLabel,
+            lastRequestAt: new Date(exec.lastRequestAt).toISOString(),
+          };
+          records.set(exec.mcpSessionId, record);
+        }
+        if (record.bindingId === null) record.bindingId = exec.binding;
+        if (record.client === '') record.client = exec.clientLabel;
+        const ids = record.execSessionIds ?? [];
+        ids.push(exec.id);
+        record.execSessionIds = ids;
+      }
+      return [...records.values()];
+    },
+  };
+
+  /**
+   * Applies a committed capacity snapshot to every runtime component. The
+   * store wrapper covers every writer; the settings handler also calls this
+   * after a PATCH. Values were validated before the write, so a failure here
+   * can only come from a malformed test env override.
+   */
+  const applyCapacitySettings = (settings: unknown): void => {
+    try {
+      const limits = resolveCapacityLimitsFromSettings(settings);
+      gateway.updateLimits(limits);
+      poolRuntime.gates.updateLimits({
+        callsPerBinding: limits.maxInFlightCallsPerBindingPerServer,
+        queuedPerBinding: limits.maxQueuedCallsPerBindingPerServer,
+      });
+      serveRuntime.updateLimits({ maxProcesses: limits.maxServeProcesses });
+    } catch (error) {
+      // The write already committed; a bad stored value must not fail the PATCH.
+      log(`repl-server: capacity settings were not applied: ${(error as Error).message}`);
+    }
+  };
+  const settingsWithHooks: SettingsStore = {
+    read: () => settingsStore.read(),
+    replace: async (settings, expectedRevision) => {
+      const result = await settingsStore.replace(settings, expectedRevision);
+      applyCapacitySettings(result.settings);
       return result;
     },
   };
@@ -311,15 +551,31 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       servers: adminServerStore,
       pool: poolControl,
       operations,
-      discovery: { demote: (id: string) => discoveryService?.demote(id) ?? 0 },
+      onToolsRefreshed: (id) => {
+        ai.onServerMutated(id);
+        void ai.onToolsIndexed(id, { explicit: true });
+      },
     }),
     createAdminToolsHandler({
       servers: adminServerStore,
       tools: toolStore,
       retrieval: createSearchPreview({ db }),
     }),
-    createAdminClientsHandler({ bindings: bindingStore, onBindingChanged: async () => 0 }),
-    createAdminSettingsHandler({ settings: settingsStore }),
+    createAdminClientsHandler({
+      bindings: bindingStore,
+      sessions: sessionRegistry,
+      onBindingChanged: async (bindingId) => {
+        const affected = gateway.sessions
+          .list()
+          .filter((record) => record.binding === bindingId).length;
+        await gateway.destroyOwner(bindingId);
+        return affected;
+      },
+    }),
+    createAdminSettingsHandler({
+      settings: settingsWithHooks,
+      onSettingsChanged: (capacity) => applyCapacitySettings(capacity),
+    }),
     createAdminDiscoverHandler({ servers: adminServerStore }),
     createAdminConfigRoutes({
       secrets,
@@ -332,39 +588,6 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     createAdminAiHandler({ ai }),
     ...audit.handlers(),
   ];
-
-  const serveRuntime = createServeRuntime({
-    dataDir,
-    ...(options.bootId === undefined ? {} : { bootId: options.bootId }),
-    ...(process.env['REPL_CLAUDE_BIN'] === undefined ? {} : { bin: process.env['REPL_CLAUDE_BIN'] }),
-    log,
-  });
-
-  const gateway = new ExecGateway({
-    catalog,
-    callTool:
-      options.callTool ??
-      (async (call: ToolCallRequest, workspace?: string, binding?: string | null) => {
-        if (call.server !== undefined) {
-          return await poolRuntime.callTool(call, { bindingId: binding ?? null });
-        }
-        const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
-        const client = await serveRuntime.acquire(key);
-        return await createServeCallTool(client)(call);
-      }),
-    onAudit: (event) => {
-      const record = { ...event, ts: new Date().toISOString() };
-      if (event.event.startsWith('tool_')) audit.recordToolCall(record);
-      else if (event.event.startsWith('eval_')) audit.recordEval(record);
-      else audit.recordTask(record);
-    },
-    onSessionClosed: async (workspace) => {
-      const key = workspace === '' || workspace === '.' ? process.cwd() : workspace;
-      await serveRuntime.release(key);
-    },
-  });
-  const tasks = new McpTaskStore();
-  const sessions = new TransportSessionRegistry();
 
   const dispatcher = createMethodTable<McpContext>({
     toolsList: () => ({ tools: listTools() }),
@@ -394,11 +617,17 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     overview: () => {
       const pool = poolRuntime.snapshot();
       const gatewayStats = gateway.stats();
+      const limits = gateway.sessions.limits;
       return {
         capacity: {
-          maxExecSessions: 8,
-          maxWorkspacesPerMcpSession: 4,
-          maxInFlightEvalsPerExecSession: 8,
+          maxExecSessions: limits.maxExecSessions,
+          maxWorkspacesPerMcpSession: limits.maxWorkspacesPerMcpSession,
+          maxInFlightEvalsPerExecSession: limits.maxInFlightEvalsPerExecSession,
+          // Cold keys report what the live components enforce, not the raw row.
+          maxServeProcesses: serveRuntime.maxProcesses,
+          maxWorkers: limits.maxWorkers,
+          maxInFlightCallsPerBindingPerServer: poolRuntime.gates.callsPerBinding,
+          maxQueuedCallsPerBindingPerServer: poolRuntime.gates.queuedPerBinding,
         },
         pool: { total: pool.total, ready: pool.ready, reconnecting: pool.reconnecting, failed: pool.failed },
         sessions: {
@@ -427,6 +656,9 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     dispatcher,
     reports,
     log,
+    onSessionActivity: (transportId, identity) => {
+      sessionActivity.set(transportId, { binding: identity.binding, client: identity.client });
+    },
     frames: {
       recordIn: (input) => audit.recordFrameIn(input as unknown as Parameters<typeof audit.recordFrameIn>[0]),
       recordOut: (input) => audit.recordFrameOut(input as unknown as Parameters<typeof audit.recordFrameOut>[0]),
@@ -450,22 +682,80 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   publishPoolState();
   alertDispatcher.start();
 
+  let closing = false;
+  let closePromise: Promise<void> | null = null;
+  let activeSweep: Promise<IdleSweepResult | null> | null = null;
+  const sweepNow = (): Promise<IdleSweepResult | null> => {
+    if (closing || activeSweep !== null) return Promise.resolve(null);
+    const run = (async (): Promise<IdleSweepResult | null> => {
+      try {
+        // Transport expiry first: its close cascade drops exec sessions and tasks
+        // of the expired `Mcp-Session-Id` before the worker/serve sweep runs.
+        try {
+          await sessions.sweep();
+        } catch (error) {
+          log(`repl-server: transport sweep failed: ${(error as Error).message}`);
+        }
+        return await gateway.sweepIdle();
+      } catch (error) {
+        log(`repl-server: idle sweep failed: ${(error as Error).message}`);
+        return null;
+      }
+    })();
+    activeSweep = run;
+    void run.then(
+      () => {
+        if (activeSweep === run) activeSweep = null;
+      },
+      () => {
+        if (activeSweep === run) activeSweep = null;
+      },
+    );
+    return run;
+  };
+  const sweepTimer = setInterval(() => {
+    void sweepNow();
+  }, options.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
+
   return {
     server,
     db,
     catalog,
+    gateway,
+    capacity: () => ({
+      ...gateway.sessions.limits,
+      maxServeProcesses: serveRuntime.maxProcesses,
+      maxInFlightCallsPerBindingPerServer: poolRuntime.gates.callsPerBinding,
+      maxQueuedCallsPerBindingPerServer: poolRuntime.gates.queuedPerBinding,
+    }),
     adminBootstrapToken: adminSession.bootstrapToken,
-    async close() {
+    sweep: sweepNow,
+    close() {
+      if (closePromise !== null) return closePromise;
+      closing = true;
+      clearInterval(sweepTimer);
       clearInterval(poolStateTimer);
-      await gateway.disposeAll();
-      await poolRuntime.dispose();
-      await serveRuntime.disposeAll();
-      eventsHub.close();
-      auditHub.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await alertDispatcher.close();
-      await audit.close();
-      db.close();
+      closePromise = (async () => {
+        // A sweep that started before `closing` owns the gateway until it ends.
+        if (activeSweep !== null) await activeSweep.catch(() => undefined);
+        await gateway.disposeAll();
+        await poolRuntime.dispose();
+        await serveRuntime.disposeAll();
+        eventsHub.close();
+        auditHub.close();
+        await closeServer(server, log);
+        await alertDispatcher.close();
+        const closableAi = ai as { close?: () => void | Promise<void> };
+        try {
+          await closableAi.close?.();
+        } catch (error) {
+          log(`repl-server: ai service close failed: ${(error as Error).message}`);
+        }
+        await audit.close();
+        db.close();
+      })();
+      return closePromise;
     },
   };
 }

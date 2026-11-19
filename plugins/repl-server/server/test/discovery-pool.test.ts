@@ -7,6 +7,7 @@ import type { ToolCallRequest } from '@zhangliang0115/repl-server-core/src/types
 import { PoolGates } from '../src/pool/gates.ts';
 import {
   ConnectionPool,
+  POOL_DEFAULTS,
   type HttpTransportOptions,
   type PoolCallPrepare,
   type PoolClient,
@@ -432,6 +433,8 @@ function runtimeHarness(options: {
   toolDiscovery?: PoolRuntimeServerRecord['toolDiscovery'];
   policies?: (serverId: string, toolName: string) => PoolToolPolicy;
   prepare?: PoolPrepareProvider;
+  clock?: { now(): number };
+  callTimeoutMs?: number;
 } = {}): RuntimeHarness {
   const clients = new FakeClients();
   const transports = new FakeTransports();
@@ -465,8 +468,9 @@ function runtimeHarness(options: {
     gates: new PoolGates(),
     health: false,
     connectTimeoutMs: 500,
-    callTimeoutMs: 1_000,
+    callTimeoutMs: options.callTimeoutMs ?? 1_000,
     backoffMs: [1, 1, 1],
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
     policies: {
       get: (serverId, toolName) =>
         options.policies === undefined
@@ -597,6 +601,166 @@ test('R-10: prepared calls on a parallel policy are promoted to serial', async (
     assert.equal(client.maxActive, 1, 'search/call pairs never interleave');
   } finally {
     await env.runtime.dispose();
+  }
+});
+
+test('R-04: two different tools called concurrently keep search/call pairs serial', async () => {
+  const env = runtimeHarness({ prepare: (_server, tool) => prepareInfo(tool) });
+  try {
+    await env.runtime.callTool(call('lazy', 'warmup'));
+    const client = env.clients.clients[0];
+    assert.ok(client);
+    client.impl = async (name) => {
+      await tick(5);
+      return { content: [{ type: 'text', text: name }] };
+    };
+
+    const before = client.calls.length;
+    await Promise.all([
+      env.runtime.callTool(call('lazy', 'alpha')),
+      env.runtime.callTool(call('lazy', 'beta')),
+    ]);
+
+    const names = client.calls.slice(before).map((entry) => entry.name);
+    const alphaFirst =
+      names[0] === 'search_tools'
+      && names[1] === 'alpha'
+      && names[2] === 'search_tools'
+      && names[3] === 'beta';
+    const betaFirst =
+      names[0] === 'search_tools'
+      && names[1] === 'beta'
+      && names[2] === 'search_tools'
+      && names[3] === 'alpha';
+    assert.ok(
+      alphaFirst || betaFirst,
+      `search/call pairs must not interleave, got ${names.join(',')}`,
+    );
+    assert.equal(client.maxActive, 1, 'the serial promotion also covers parallel rows');
+  } finally {
+    await env.runtime.dispose();
+  }
+});
+
+test('R-05: after a reconnect the next call searches again', async () => {
+  const env = runtimeHarness({ prepare: (_server, tool) => prepareInfo(tool) });
+  try {
+    await env.runtime.callTool(call('lazy', 'alpha'));
+    const firstClient = env.clients.clients[0];
+    assert.ok(firstClient);
+    assert.deepEqual(firstClient.calls.map((entry) => entry.name), ['search_tools', 'alpha']);
+
+    env.transports.transports[0]?.emitClose(new Error('socket gone'));
+    await waitFor(() => env.runtime.snapshot().entries[0]?.state === 'ready');
+
+    const secondClient = env.clients.clients[1];
+    assert.ok(secondClient, 'the reconnect opened a new connection');
+    await env.runtime.callTool(call('lazy', 'alpha'));
+    assert.deepEqual(
+      secondClient.calls.map((entry) => entry.name).slice(0, 2),
+      ['search_tools', 'alpha'],
+      'the new connection has an empty prepare cache',
+    );
+  } finally {
+    await env.runtime.dispose();
+  }
+});
+
+test('R-14: prepare uses min(15s, remaining) and shares the call deadline', async () => {
+  assert.equal(POOL_DEFAULTS.callTimeoutMs, 60_000);
+  assert.equal(POOL_DEFAULTS.prepareTimeoutMs, 15_000);
+
+  // Clock reads: the lazy connect, the in-flight start and the deadline all see
+  // t=0, so the call gets the default 60s budget. The prepare start then jumps
+  // to t=59_950, leaving only 50ms; a prepare that ignored the remaining budget
+  // would run for its own 15s. The test therefore finishes in ~50ms.
+  let reads = 0;
+  const capped = runtimeHarness({
+    callTimeoutMs: POOL_DEFAULTS.callTimeoutMs,
+    prepare: (_server, tool) => prepareInfo(tool),
+    clock: {
+      now: () => {
+        reads += 1;
+        return reads < 4 ? 0 : 59_950;
+      },
+    },
+  });
+  try {
+    // The client is created lazily on connect; install the impl before that.
+    capped.clients.configure = (created) => {
+      created.impl = async (name) => {
+        if (name === 'search_tools') return await new Promise(() => {});
+        return { content: [] };
+      };
+    };
+    const started = Date.now();
+    await assert.rejects(
+      capped.runtime.callTool(call('lazy', 'alpha')),
+      (error: unknown) => {
+        assert.ok(error instanceof McpToolError);
+        assert.equal(error.code, 'MCP_DISCOVERY_PREPARE_FAILED');
+        assert.equal((error.detail as { reason?: string }).reason, 'timeout');
+        return true;
+      },
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 20, `prepare should wait for the remaining budget, took ${elapsed}ms`);
+    assert.ok(elapsed < 900, `prepare must not use 15s, took ${elapsed}ms`);
+    assert.deepEqual(
+      capped.clients.clients[0]?.calls.map((entry) => entry.name),
+      ['search_tools'],
+      'the business call is never sent after a failed warm-up',
+    );
+  } finally {
+    await capped.runtime.dispose();
+  }
+
+  // Slow search + slow business fit in one budget when together they stay
+  // within it, and the combined call is cut at the shared deadline when not.
+  const fitting = runtimeHarness({ callTimeoutMs: 120, prepare: (_s, tool) => prepareInfo(tool) });
+  try {
+    fitting.clients.configure = (created) => {
+      created.impl = async (name) => {
+        await tick(30);
+        return { content: [{ type: 'text', text: name }] };
+      };
+    };
+    const started = Date.now();
+    await fitting.runtime.callTool(call('lazy', 'alpha'));
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `search+business stayed inside the budget, took ${elapsed}ms`);
+    assert.deepEqual(
+      fitting.clients.clients[0]?.calls.map((entry) => entry.name),
+      ['search_tools', 'alpha'],
+    );
+  } finally {
+    await fitting.runtime.dispose();
+  }
+
+  const overBudget = runtimeHarness({
+    callTimeoutMs: 120,
+    prepare: (_s, tool) => prepareInfo(tool),
+  });
+  try {
+    overBudget.clients.configure = (created) => {
+      created.impl = async (name) => {
+        if (name === 'search_tools') {
+          await tick(80);
+          return { content: [] };
+        }
+        await tick(200);
+        return { content: [] };
+      };
+    };
+    const started = Date.now();
+    await assert.rejects(
+      overBudget.runtime.callTool(call('lazy', 'alpha')),
+      (error: unknown) => (error as { code?: string }).code === 'MCP_CALL_TIMEOUT',
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `the shared 120ms deadline cut the call, took ${elapsed}ms`);
+  } finally {
+    await overBudget.runtime.dispose();
   }
 });
 

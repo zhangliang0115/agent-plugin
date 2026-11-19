@@ -122,14 +122,10 @@ function errorCode(response: AdminResponse): string {
   return String((error as Record<string, unknown>)['code']);
 }
 
-function createHandler(
-  store: MemoryServerStore,
-  demoted: string[] = [],
-): AdminHandler {
+function createHandler(store: MemoryServerStore): AdminHandler {
   return createAdminServersHandler({
     servers: store,
     pool: new FakePool(),
-    discovery: { demote: (id) => demoted.push(id) },
   });
 }
 
@@ -297,11 +293,12 @@ test('PATCH /servers/:id validates toolDiscovery and clears it with null', async
   assert.equal((bodyOf(cleared)['server'] as Record<string, unknown>)['toolDiscovery'], null);
 });
 
-test('switching mode back to static calls the discovery demotion hook', async () => {
+test('switching mode back to static commits without an admin-layer demotion hook', async () => {
+  // The real store demotes discovered rows inside the same transaction; the
+  // handler must no longer need a discovery dependency to make the switch.
   const store = new MemoryServerStore();
-  const demoted: string[] = [];
   await addHttpServer(store, 'hexhub');
-  const handler = createHandler(store, demoted);
+  const handler = createHandler(store);
   const revision = await store.revision();
 
   const saved = await call(
@@ -312,7 +309,10 @@ test('switching mode back to static calls the discovery demotion hook', async ()
     }),
   );
   assert.equal(saved.status, 200);
-  assert.deepEqual(demoted, []);
+  assert.equal(
+    ((bodyOf(saved)['server'] as Record<string, unknown>)['toolDiscovery'] as Record<string, unknown>)['mode'],
+    'search',
+  );
 
   const nextRevision = bodyOf(saved)['revision'] as number;
   const cleared = await call(
@@ -323,7 +323,8 @@ test('switching mode back to static calls the discovery demotion hook', async ()
     }),
   );
   assert.equal(cleared.status, 200);
-  assert.deepEqual(demoted, ['hexhub']);
+  assert.equal((bodyOf(cleared)['server'] as Record<string, unknown>)['toolDiscovery'], null);
+  assert.equal(store.records.get('hexhub')?.toolDiscovery, null);
 });
 
 test('builtin servers cannot configure tool discovery', async () => {

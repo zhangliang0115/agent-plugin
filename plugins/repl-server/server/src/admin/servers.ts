@@ -484,6 +484,8 @@ export interface ServerConfigPatch {
   enabled?: boolean;
   connectMode?: ConnectMode;
   summary?: string | null;
+  /** Provenance of `summary`; set by `parseServerPatch` whenever `summary` moves. */
+  summarySource?: string | null;
   category?: string | null;
   tags?: string[];
   timeoutMs?: number;
@@ -560,16 +562,13 @@ export interface AdminServersDeps {
   /** `POST /servers/:id/test` budget; docs freeze 10s. */
   testTimeoutMs?: number;
   /**
-   * Discovery lifecycle hook. Called after a committed `PATCH /servers/:id`
-   * switches `toolDiscovery.mode` from search to static, so the implementation
-   * can mark every `discovered_via='search'` row stale and rebuild the catalog.
-   * Optional to keep existing callers source-compatible.
+   * Called after `POST /servers/:id/tools/refresh` and `/restart` complete, so
+   * assembly can discard the server's pending AI annotation and re-run the
+   * auto preview against the new tool set. Best-effort: a failing hook never
+   * turns a successful refresh into a failed operation.
    */
-  discovery?: AdminServersDiscoveryHooks;
-}
-
-export interface AdminServersDiscoveryHooks {
-  demote(serverId: string): Promise<unknown> | unknown;
+  onToolsRefreshed?: (serverId: string) => void | Promise<void>;
+  log?: (line: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +711,12 @@ function readNullableString(value: unknown, field: string, max = 8192): string |
   return expectString(value, field, { allowEmpty: true, max });
 }
 
+/** Whitespace-only text means "no value"; non-blank text is kept verbatim. */
+export function nullIfBlank(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  return value.trim() === '' ? null : value;
+}
+
 function readNullableAbsolutePath(value: unknown, field: string): string | null {
   const text = readNullableString(value, field, 4096);
   if (text !== null && text !== '' && !isAbsolute(text)) {
@@ -813,7 +818,19 @@ function assertTransportConfig(
   }
 }
 
-export function parseCreateServer(body: Record<string, unknown>): ServerConfig {
+export interface ParseCreateServerOptions {
+  /**
+   * Provenance recorded when the new server carries a non-empty summary.
+   * Manual registration (the default) records `manual`; AI apply passes `ai`.
+   * A null summary always records a null source.
+   */
+  summarySource?: 'ai' | 'manual';
+}
+
+export function parseCreateServer(
+  body: Record<string, unknown>,
+  options: ParseCreateServerOptions = {},
+): ServerConfig {
   rejectUnknownFields(body, CREATE_FIELDS);
 
   const rawId = body['id'];
@@ -869,7 +886,9 @@ export function parseCreateServer(body: Record<string, unknown>): ServerConfig {
   }
 
   const summary =
-    body['summary'] === undefined ? null : readNullableString(body['summary'], 'summary');
+    body['summary'] === undefined
+      ? null
+      : nullIfBlank(readNullableString(body['summary'], 'summary'));
   const category =
     body['category'] === undefined ? null : readNullableString(body['category'], 'category', 128);
   const tags = body['tags'] === undefined ? [] : expectStringArray(body['tags'], 'tags', { maxLength: 64 });
@@ -899,7 +918,7 @@ export function parseCreateServer(body: Record<string, unknown>): ServerConfig {
     enabled,
     connectMode,
     summary,
-    summarySource: summary === null ? null : 'manual',
+    summarySource: summary === null ? null : (options.summarySource ?? 'manual'),
     category,
     tags,
     timeoutMs,
@@ -946,7 +965,15 @@ function parseServerPatch(
   if ('args' in body) patch.args = readArgs(body['args'], 'args');
   if ('enabled' in body) patch.enabled = expectBoolean(body['enabled'], 'enabled');
   if ('connectMode' in body) patch.connectMode = readConnectMode(body['connectMode']);
-  if ('summary' in body) patch.summary = readNullableString(body['summary'], 'summary');
+  if ('summary' in body) {
+    patch.summary = nullIfBlank(readNullableString(body['summary'], 'summary'));
+    // Only a real summary change moves its provenance: clients send every field
+    // on edit, so an unchanged summary must keep an AI-authored source.
+    // A manual edit owns the summary; clearing it removes the provenance too.
+    if (patch.summary !== current.summary) {
+      patch.summarySource = patch.summary === null ? null : 'manual';
+    }
+  }
   if ('category' in body) {
     patch.category = readNullableString(body['category'], 'category', 128);
   }
@@ -1169,21 +1196,10 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
     // Validate the patch before the precondition so malformed bodies always get 400/422.
     const patch = parseServerPatch(current, requireObjectBody(request));
     assertRevision(await deps.servers.revision(), expected);
-    const wasSearch = current.toolDiscovery?.mode === 'search';
+    // A switch from search back to static demotes discovered rows inside the
+    // server-store transaction; assembly refreshes the catalog snapshot after
+    // the write, so no extra hook is needed here.
     const { server, revision } = await deps.servers.update(id, patch, expected);
-
-    // Switching discovery back to static demotes every discovered row. Doing it
-    // after the committed update keeps the server config authoritative; the hook
-    // also rebuilds the catalog snapshot so stale rows disappear immediately.
-    const nextDiscovery = patch.toolDiscovery;
-    if (
-      deps.discovery !== undefined &&
-      wasSearch &&
-      nextDiscovery !== undefined &&
-      (nextDiscovery === null || nextDiscovery.mode === 'static')
-    ) {
-      await deps.discovery.demote(id);
-    }
 
     return adminJson(200, {
       server: viewServer(server, await deps.pool.state(server.id)),
@@ -1226,6 +1242,20 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
     return adminJson(200, { deleted: true, id, revision, forced: force });
   }
 
+  async function notifyToolsRefreshed(id: string): Promise<void> {
+    const hook = deps.onToolsRefreshed;
+    if (hook === undefined) return;
+    try {
+      await hook(id);
+    } catch (error) {
+      // The tools themselves are already indexed; a stale AI preview is not a
+      // reason to report the refresh as failed.
+      deps.log?.(
+        `onToolsRefreshed(${id}) failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async function connect(id: string, action: 'connect' | 'disconnect' | 'restart'): Promise<AdminResponse> {
     const server = await deps.servers.get(id);
     if (server === null) {
@@ -1243,7 +1273,10 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
         ? operations.launch('connect', id, () => deps.pool.connect(id))
         : action === 'disconnect'
           ? operations.launch('disconnect', id, () => deps.pool.disconnect(id))
-          : operations.launch('restart', id, () => deps.pool.restart(id));
+          : operations.launch('restart', id, async () => {
+              await deps.pool.restart(id);
+              await notifyToolsRefreshed(id);
+            });
 
     return adminJson(202, { ...operation });
   }
@@ -1317,7 +1350,10 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
       throw new AdminApiError(409, 'SERVER_DISABLED', `server ${id} is disabled`, { serverId: id });
     }
 
-    const operation = operations.launch('tools_refresh', id, () => deps.pool.refreshTools(id));
+    const operation = operations.launch('tools_refresh', id, async () => {
+      await deps.pool.refreshTools(id);
+      await notifyToolsRefreshed(id);
+    });
     return adminJson(202, { ...operation });
   }
 

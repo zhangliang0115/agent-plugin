@@ -656,11 +656,301 @@ export function pageFrame(
   return { section, body };
 }
 
+export interface TabIntroOptions {
+  title: string;
+  description: string;
+  hint?: string;
+}
+
+/** Section intro at the top of a management tab: title, one-line scope, optional hint. */
+export function tabIntro(options: TabIntroOptions): HTMLElement {
+  const intro = el('header', 'tab-intro');
+  add(
+    intro,
+    el('h2', 'tab-intro-title', options.title),
+    el('p', 'tab-intro-description', options.description),
+  );
+  if (options.hint !== undefined && options.hint !== '') {
+    const hint = el('p', 'tab-intro-hint');
+    add(hint, icon('info', 13), el('span', '', options.hint));
+    add(intro, hint);
+  }
+  return intro;
+}
+
+export interface FieldOptions {
+  /** Guidance shown below the control when there is no error. */
+  hint?: string;
+  /** Validation message; marks the control `aria-invalid` and is announced by AT. */
+  error?: string;
+}
+
 /** Label + control pair used by every form on the management page. */
-export function field(labelText: string, control: HTMLElement): HTMLLabelElement {
+export function field(
+  labelText: string,
+  control: HTMLElement,
+  options: FieldOptions = {},
+): HTMLLabelElement {
   const wrapper = el('label', 'field');
   add(wrapper, el('span', 'field-label', labelText), control);
+  const describedBy: string[] = [];
+
+  if (options.hint !== undefined && options.hint !== '') {
+    const hint = el('span', 'field-hint', options.hint);
+    hint.id = nextSharedId('field-hint');
+    describedBy.push(hint.id);
+    add(wrapper, hint);
+  }
+
+  if (options.error !== undefined && options.error !== '') {
+    const message = el('span', 'field-error', options.error);
+    message.id = nextSharedId('field-error');
+    describedBy.push(message.id);
+    control.setAttribute('aria-invalid', 'true');
+    add(wrapper, message);
+  }
+
+  if (describedBy.length > 0) {
+    const existing = control.getAttribute('aria-describedby');
+    const ids = describedBy.join(' ');
+    control.setAttribute(
+      'aria-describedby',
+      existing === null || existing === '' ? ids : `${existing} ${ids}`,
+    );
+  }
   return wrapper;
+}
+
+// ---------------------------------------------------------------------------
+// Management UX components
+// ---------------------------------------------------------------------------
+
+let sharedIdSequence = 0;
+
+function nextSharedId(prefix: string): string {
+  sharedIdSequence += 1;
+  return `${prefix}-${sharedIdSequence}`;
+}
+
+export interface SectionGroupOptions {
+  title: string;
+  description?: string;
+  /** Initial expanded state for the collapsible variant; collapsed when omitted. */
+  open?: boolean;
+  collapsible?: boolean;
+  body: HTMLElement[];
+}
+
+function sectionGroupHeading(description: string | undefined): HTMLElement | null {
+  if (description === undefined || description === '') return null;
+  return el('p', 'section-group-description', description);
+}
+
+/** Card-level group used by the server editor; `<details>` when `collapsible`. */
+export function sectionGroup(options: SectionGroupOptions): HTMLElement {
+  const body = el('div', 'section-group-body');
+  for (const child of options.body) body.appendChild(child);
+
+  if (options.collapsible === true) {
+    const details = el('details', 'section-group section-group-collapsible');
+    details.open = options.open === true;
+    const summary = el('summary', 'section-group-summary');
+    const heading = el('span', 'section-group-heading');
+    add(heading, el('span', 'section-group-title', options.title));
+    if (options.description !== undefined && options.description !== '') {
+      add(heading, el('span', 'section-group-description', options.description));
+    }
+    add(summary, heading);
+    add(details, summary, body);
+    return details;
+  }
+
+  const section = el('section', 'card section-group');
+  const header = el('header', 'section-group-header');
+  const heading = el('div', 'section-group-heading');
+  add(heading, el('h3', 'section-group-title', options.title));
+  const description = sectionGroupHeading(options.description);
+  if (description !== null) add(heading, description);
+  add(header, heading);
+  add(section, header, body);
+  return section;
+}
+
+export type InlineProgressState = 'running' | 'done' | 'error';
+
+export interface InlineProgressOptions {
+  label: string;
+  detail?: string;
+  state: InlineProgressState;
+  onRetry?: () => void;
+}
+
+export interface InlineProgressHandle {
+  readonly element: HTMLElement;
+  /** Updates the state and, when provided, replaces the detail line. */
+  update(state: InlineProgressState, detail?: string): void;
+}
+
+/** Inline status row for long-running actions; announced through `aria-live="polite"`. */
+export function inlineProgress(options: InlineProgressOptions): InlineProgressHandle {
+  const element = el('div', 'inline-progress');
+  element.setAttribute('aria-live', 'polite');
+
+  const indicator = el('span', 'inline-progress-indicator');
+  indicator.setAttribute('aria-hidden', 'true');
+  const text = el('span', 'inline-progress-text');
+  const label = el('span', 'inline-progress-label', options.label);
+  const detail = el('span', 'inline-progress-detail');
+  add(text, label, detail);
+
+  const track = el('span', 'inline-progress-track');
+  track.setAttribute('aria-hidden', 'true');
+  add(track, el('span', 'inline-progress-fill'));
+
+  let retry: HTMLButtonElement | null = null;
+  if (options.onRetry !== undefined) {
+    const callback = options.onRetry;
+    retry = button('重试', () => callback(), { size: 'sm', variant: 'secondary' });
+    retry.classList.add('inline-progress-retry');
+  }
+
+  function update(state: InlineProgressState, nextDetail?: string): void {
+    element.dataset['state'] = state;
+    if (nextDetail !== undefined) detail.textContent = nextDetail;
+    detail.hidden = detail.textContent === '';
+    track.hidden = state !== 'running';
+    if (retry !== null) retry.hidden = state !== 'error';
+  }
+
+  add(element, indicator, text, track);
+  if (retry !== null) add(element, retry);
+  update(options.state, options.detail);
+  return { element, update };
+}
+
+export interface StatusDetailOptions {
+  label: string;
+  tone: Tone;
+  detail: string;
+  /** Expanded diagnostics such as lastError, last refresh and a suggested action. */
+  lines?: string[];
+}
+
+/**
+ * Status badge with a disclosure for diagnostics. With no `lines` it renders as a
+ * static row; otherwise the head is a native `<button>` (Enter/Space work) that
+ * toggles `aria-expanded` and the panel.
+ */
+export function statusDetail(options: StatusDetailOptions): HTMLElement {
+  const wrapper = el('div', 'status-detail');
+  const lines = options.lines?.filter((line) => line !== '') ?? [];
+
+  if (lines.length === 0) {
+    const row = el('div', 'status-detail-head');
+    add(row, badge(options.label, options.tone), el('span', 'status-detail-text', options.detail));
+    add(wrapper, row);
+    return wrapper;
+  }
+
+  const panelId = nextSharedId('status-detail');
+  const toggle = el('button', 'status-detail-toggle');
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', panelId);
+  add(
+    toggle,
+    badge(options.label, options.tone),
+    el('span', 'status-detail-text', options.detail),
+    el('span', 'status-detail-chevron'),
+  );
+
+  const panel = el('div', 'status-detail-lines');
+  panel.id = panelId;
+  panel.hidden = true;
+  const list = el('ul', 'status-detail-list');
+  for (const line of lines) add(list, el('li', '', line));
+  add(panel, list);
+
+  toggle.addEventListener('click', () => {
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!expanded));
+    panel.hidden = expanded;
+  });
+
+  const row = el('div', 'status-detail-head');
+  add(row, toggle);
+  add(wrapper, row, panel);
+  return wrapper;
+}
+
+export interface TemplateCardOptions {
+  title: string;
+  description: string;
+  icon?: string;
+  onClick: () => void;
+}
+
+/** Clickable template tile used as empty-table guidance; rendered as a real button. */
+export function templateCard(options: TemplateCardOptions): HTMLElement {
+  const card = el('button', 'template-card');
+  card.type = 'button';
+
+  if (options.icon !== undefined) {
+    const glyph = el('span', 'template-card-icon');
+    glyph.setAttribute('aria-hidden', 'true');
+    add(glyph, icon(options.icon, 18));
+    add(card, glyph);
+  }
+
+  const text = el('span', 'template-card-text');
+  add(
+    text,
+    el('span', 'template-card-title', options.title),
+    el('span', 'template-card-description', options.description),
+  );
+  const arrow = el('span', 'template-card-arrow');
+  arrow.setAttribute('aria-hidden', 'true');
+  add(arrow, icon('arrow-right', 14));
+
+  add(card, text, arrow);
+  card.addEventListener('click', () => options.onClick());
+  return card;
+}
+
+const ERROR_ACTION_HINTS: Readonly<Record<string, string>> = {
+  CAPACITY_EXCEEDED: '并发容量已满，请等待运行中的任务结束后重试。',
+  WS_LIMIT: '工作区数量已达上限，请先移除不再使用的工作区。',
+  WS_INVALID: '工作区路径不可用，请检查路径是否存在且可访问。',
+  MCP_SERVER_UNAVAILABLE: 'MCP server 当前不可用，请检查进程状态后重试。',
+  MCP_QUEUE_FULL: '该 server 的调用队列已满，请稍后重试。',
+  MCP_CALL_TIMEOUT: 'MCP 调用超时，请检查 server 状态或调大 timeoutMs 后重试。',
+  EXCLUSIVE_TIMEOUT: '等待独占调用超时，请稍后重试。',
+  AI_RUNNER_UNAVAILABLE: 'AI 服务不可用，请确认 AI 配置与运行环境后重试。',
+};
+
+const DEFAULT_ERROR_ACTION_HINT = '请查看详情后重试。';
+const CONFLICT_ACTION_HINT = '配置已在别处修改，请刷新后重试。';
+
+/** Maps a server error code to a Chinese next-step hint; unknown codes use `fallback`. */
+export function errorActionHint(code: string | undefined, fallback?: string): string {
+  const normalized = code?.trim().toUpperCase() ?? '';
+  if (normalized === '409' || normalized === 'CONFLICT' || normalized.endsWith('_CONFLICT')) {
+    return CONFLICT_ACTION_HINT;
+  }
+  const exact = ERROR_ACTION_HINTS[normalized];
+  if (exact !== undefined) return exact;
+  if (normalized.startsWith('DISCOVERY_')) {
+    if (normalized === 'DISCOVERY_BUSY') return '已有扫描正在进行，请稍后重试。';
+    if (normalized === 'DISCOVERY_EMPTY_PREVIEW') {
+      return '预览结果为空，请调整查询条件后重新预览。';
+    }
+    if (normalized === 'DISCOVERY_PARTIAL_STALE_UNCONFIRMED') {
+      return '预览不完整，请重新预览并确认。';
+    }
+    return '工具发现失败，请检查查询条件后重新扫描。';
+  }
+  if (fallback !== undefined && fallback !== '') return fallback;
+  return DEFAULT_ERROR_ACTION_HINT;
 }
 
 export interface InputOptions {

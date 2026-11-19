@@ -28,6 +28,7 @@ import {
 } from '@zhangliang0115/repl-server-core';
 import { keeperLaunch } from '@zhangliang0115/repl-server-core/src/process/keeper.ts';
 
+import { CAPACITY_DEFAULTS } from '../exec/capacity.ts';
 import { ServeClient, type ServeClientProcess } from './client.ts';
 
 /** Options handed to the injected spawn; mirrors the subset the keeper needs. */
@@ -68,26 +69,82 @@ export interface ServeRuntimeOptions {
   readonly terminateGraceMs?: number;
   readonly killWaitMs?: number;
   readonly now?: () => number;
+  /**
+   * Max concurrently active serve entries (one keeper + serve pair each).
+   * Defaults to `CAPACITY_DEFAULTS.maxServeProcesses`; `PATCH /settings` can
+   * hot-apply it through {@link ServeRuntime.updateLimits}.
+   */
+  readonly maxProcesses?: number;
+}
+
+/**
+ * Identity of the execution session that owns a serve handle. Passing it makes
+ * the keeper/serve pair private to that execution session (design 03 §2.2):
+ * two execution sessions never share a serve process even when their
+ * workspace is the same.
+ */
+export interface ServeSessionIdentity {
+  /** `es_...`; the preferred isolation key. */
+  execSessionId?: string;
+  mcpSessionId?: string;
+  binding?: string | null;
 }
 
 export interface ServeRuntime {
+  /** Current cap on active serve entries. */
+  readonly maxProcesses: number;
   /**
    * Returns the serve client for `workspace`, starting keeper + serve on first
-   * use. Concurrent calls for the same workspace share one startup.
+   * use. Concurrent calls for the same key share one startup. Without a
+   * `session` identity the workspace is the key (legacy/one-workspace mode).
+   *
+   * Rejects with `CAPACITY_EXCEEDED` when the process cap is reached and this
+   * is a new entry; existing entries are always handed back.
    */
-  acquire(workspace: string): Promise<ServeClient>;
-  /** Stops the keeper group for `workspace` and closes the transport. No-op when absent. */
-  release(workspace: string): Promise<void>;
-  /** Stops every workspace. The runtime rejects further acquisitions afterwards. */
+  acquire(workspace: string, session?: ServeSessionIdentity): Promise<ServeClient>;
+  /** Stops the keeper group for one key and closes the transport. No-op when absent. */
+  release(workspace: string, session?: ServeSessionIdentity): Promise<void>;
+  /**
+   * True when the entry for this execution session is usable. A missing entry
+   * counts as healthy: there is nothing that needs a restart.
+   */
+  isHealthy(session: ServeSessionIdentity): boolean;
+  /**
+   * Restarts the entry for this execution session. Returns false when no entry
+   * exists or the manager is already disposed.
+   */
+  restart(session: ServeSessionIdentity): Promise<boolean>;
+  /** Stops every workspace/session. The runtime rejects further acquisitions afterwards. */
   disposeAll(): Promise<void>;
+  /**
+   * Hot-applies the serve process cap. Entries already running are not
+   * stopped; the next acquisition of a new entry enforces the new value.
+   */
+  updateLimits(limits: { maxProcesses?: number }): void;
 }
 
 interface RuntimeEntry {
+  readonly key: string;
   readonly workspace: string;
   readonly sessionId: string;
   manager: ServeManager;
   client: ServeClient | null;
   starting: Promise<ServeClient> | null;
+}
+
+/** Execution-session keys are stable across evals and released exactly once. */
+function entryKey(workspace: string, session: ServeSessionIdentity | undefined): string {
+  if (session?.execSessionId !== undefined && session.execSessionId !== '') {
+    return `exec:${session.execSessionId}`;
+  }
+  return `workspace:${workspace}`;
+}
+
+/** Key of the private entry for one execution session; null without an id. */
+function sessionEntryKey(session: ServeSessionIdentity): string | null {
+  return session.execSessionId === undefined || session.execSessionId === ''
+    ? null
+    : `exec:${session.execSessionId}`;
 }
 
 const defaultSpawn: ServeSpawn = (command, args, options) =>
@@ -111,6 +168,7 @@ class ServeRuntimeImpl implements ServeRuntime {
   private readonly now: (() => number) | undefined;
   private readonly ledger: ProcessLedger;
   private readonly entries = new Map<string, RuntimeEntry>();
+  private maxProcessesValue: number;
   private sessionCounter = 0;
   private disposed = false;
 
@@ -152,22 +210,39 @@ class ServeRuntimeImpl implements ServeRuntime {
     );
     this.killWaitMs = positiveOption(options.killWaitMs, SERVE_HEALTH_DEFAULTS.killWaitMs, 'killWaitMs', true);
     this.now = options.now;
+    this.maxProcessesValue = options.maxProcesses ?? CAPACITY_DEFAULTS.maxServeProcesses;
+    assertMaxProcesses(this.maxProcessesValue);
   }
 
-  async acquire(workspace: string): Promise<ServeClient> {
+  get maxProcesses(): number {
+    return this.maxProcessesValue;
+  }
+
+  updateLimits(limits: { maxProcesses?: number }): void {
+    if (limits.maxProcesses === undefined) return;
+    assertMaxProcesses(limits.maxProcesses);
+    this.maxProcessesValue = limits.maxProcesses;
+  }
+
+  async acquire(workspace: string, session?: ServeSessionIdentity): Promise<ServeClient> {
     assertWorkspace(workspace);
     if (this.disposed) throw unavailable(workspace, new Error('serve runtime is disposed'));
 
-    const existing = this.entries.get(workspace);
+    const key = entryKey(workspace, session);
+    const existing = this.entries.get(key);
     if (existing !== undefined) return await this.clientOf(existing);
+
+    if (this.entries.size >= this.maxProcessesValue) {
+      throw capacityExceeded(workspace, this.entries.size, this.maxProcessesValue);
+    }
 
     let entry: RuntimeEntry;
     try {
-      entry = this.makeEntry(workspace);
+      entry = this.makeEntry(key, workspace);
     } catch (error) {
       throw unavailable(workspace, error);
     }
-    this.entries.set(workspace, entry);
+    this.entries.set(key, entry);
     const starting = this.startEntry(entry);
     entry.starting = starting;
     void starting.then(
@@ -181,17 +256,43 @@ class ServeRuntimeImpl implements ServeRuntime {
     try {
       return await starting;
     } catch (error) {
-      if (this.entries.get(workspace) === entry) this.entries.delete(workspace);
+      if (this.entries.get(key) === entry) this.entries.delete(key);
       throw error;
     }
   }
 
-  async release(workspace: string): Promise<void> {
+  async release(workspace: string, session?: ServeSessionIdentity): Promise<void> {
     assertWorkspace(workspace);
-    const entry = this.entries.get(workspace);
+    const key = entryKey(workspace, session);
+    const entry = this.entries.get(key);
     if (entry === undefined) return;
-    this.entries.delete(workspace);
+    this.entries.delete(key);
     await this.stopEntry(entry, 'release');
+  }
+
+  isHealthy(session: ServeSessionIdentity): boolean {
+    const key = sessionEntryKey(session);
+    if (key === null) return true;
+    if (this.disposed) return false;
+    const entry = this.entries.get(key);
+    if (entry === undefined) return true;
+    const client = entry.client;
+    return client !== null && !client.isClosed;
+  }
+
+  async restart(session: ServeSessionIdentity): Promise<boolean> {
+    const key = sessionEntryKey(session);
+    if (key === null || this.disposed) return false;
+    const entry = this.entries.get(key);
+    if (entry === undefined) return false;
+    try {
+      if (entry.starting !== null) await entry.starting.catch(() => undefined);
+      const record = await entry.manager.restart('manual');
+      return record !== null;
+    } catch (error) {
+      this.log(`[serve] ${entry.sessionId} restart failed: ${describe(error)}`);
+      return false;
+    }
   }
 
   async disposeAll(): Promise<void> {
@@ -209,11 +310,12 @@ class ServeRuntimeImpl implements ServeRuntime {
     throw unavailable(entry.workspace, new Error('serve process is not running'));
   }
 
-  private makeEntry(workspace: string): RuntimeEntry {
+  private makeEntry(key: string, workspace: string): RuntimeEntry {
     this.sessionCounter += 1;
-    const hash = createHash('sha256').update(workspace).digest('hex').slice(0, 12);
+    const hash = createHash('sha256').update(key).digest('hex').slice(0, 12);
     const sessionId = `es_${hash}_${this.sessionCounter}`;
     const entry: RuntimeEntry = {
+      key,
       workspace,
       sessionId,
       manager: null as unknown as ServeManager,
@@ -424,6 +526,24 @@ function unavailable(workspace: string, error: unknown): McpToolError {
     retryable: true,
     detail: { workspace },
   });
+}
+
+function assertMaxProcesses(value: number): void {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new RangeError('maxProcesses must be a positive integer');
+  }
+}
+
+/** New serve entry rejected because the process cap is already used up. */
+function capacityExceeded(workspace: string, current: number, limit: number): McpToolError {
+  return new McpToolError(
+    `serve process quota exceeded for ${workspace} (${current}/${limit})`,
+    {
+      code: 'CAPACITY_EXCEEDED',
+      retryable: true,
+      detail: { workspace, resource: 'serve_processes', current, limit },
+    },
+  );
 }
 
 function describe(error: unknown): string {

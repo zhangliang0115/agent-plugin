@@ -209,6 +209,13 @@ export interface EvalServe {
   restart(): Promise<void> | void;
 }
 
+/**
+ * Resolves the serve handle for one execution session. The gateway passes a
+ * resolver so every session inspects its own serve process instead of a
+ * process-wide flag.
+ */
+export type ServeResolver = (execSessionId: string) => EvalServe | undefined;
+
 export interface ExecSessionOptions {
   /** `es_...`; unique per process. */
   id: string;
@@ -220,7 +227,8 @@ export interface ExecSessionOptions {
    * `start()` must be idempotent and respawn with the last `state` snapshot.
    */
   createExecutor: (session: ExecSession) => EvalExecutor;
-  serve?: EvalServe;
+  /** Serve handle or per-session resolver, used by the L3 hard wall. */
+  serve?: EvalServe | ServeResolver;
   limits?: Partial<ExecSessionLimits>;
   /** Time source for deadlines and timestamps. Defaults to `Date.now`. */
   now?: () => number;
@@ -299,7 +307,7 @@ export class ExecSession {
   readonly lock = new EvalLock();
 
   private readonly createExecutor: (session: ExecSession) => EvalExecutor;
-  private readonly serve: EvalServe | undefined;
+  private readonly resolveServe: ServeResolver;
   private readonly nowFn: () => number;
   private readonly onEvent: ((event: EvalSessionEvent) => void) | undefined;
 
@@ -320,7 +328,11 @@ export class ExecSession {
     this.id = options.id;
     this.workspace = options.workspace ?? '';
     this.createExecutor = options.createExecutor;
-    this.serve = options.serve;
+    const serve = options.serve;
+    this.resolveServe =
+      typeof serve === 'function'
+        ? serve
+        : () => serve;
     this.nowFn = options.now ?? (() => Date.now());
     this.onEvent = options.onEvent;
 
@@ -341,6 +353,19 @@ export class ExecSession {
 
   get executor(): EvalExecutor | null {
     return this.executorValue;
+  }
+
+  /**
+   * Hot-applies limits that do not affect an eval already in flight. Today this
+   * is the per-session in-flight quota (`PATCH /settings` capacity changes);
+   * timeout budgets stay fixed for the process lifetime.
+   */
+  updateLimits(limits: Partial<ExecSessionLimits>): ExecSessionLimits {
+    if (limits.inFlightLimit !== undefined) {
+      assertLimit('inFlightLimit', limits.inFlightLimit, 1);
+      this.limits.inFlightLimit = limits.inFlightLimit;
+    }
+    return this.limits;
   }
 
   /** Current worker generation. Messages from another epoch are dropped. */
@@ -620,10 +645,19 @@ export class ExecSession {
     return run;
   }
 
-  serveHealthy(): boolean {
-    if (this.serve === undefined) return true;
+  private serveHandle(): EvalServe | undefined {
     try {
-      return this.serve.healthy();
+      return this.resolveServe(this.id);
+    } catch {
+      return undefined;
+    }
+  }
+
+  serveHealthy(): boolean {
+    const serve = this.serveHandle();
+    if (serve === undefined) return true;
+    try {
+      return serve.healthy();
     } catch {
       return false;
     }
@@ -631,13 +665,47 @@ export class ExecSession {
 
   /** Returns true when a restart was attempted and did not throw. */
   async restartServe(): Promise<boolean> {
-    if (this.serve === undefined) return false;
+    const serve = this.serveHandle();
+    if (serve === undefined) return false;
     try {
-      await this.serve.restart();
+      await serve.restart();
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Idle hibernation: terminates the worker but keeps the executor attached, so
+   * the next eval respawns it through `start()` and restores the last `state`
+   * snapshot. A no-op while any eval is registered or when no worker was ever
+   * built. Returns true when a live worker was terminated cleanly.
+   */
+  async hibernateWorker(): Promise<boolean> {
+    const reset = this.resetRun;
+    if (reset !== null) {
+      try {
+        await reset;
+      } catch {
+        // The reset owner already observed the failure.
+      }
+    }
+    if (this.inFlight > 0 || this.active.size > 0) return false;
+    const executor = this.executorValue;
+    if (executor === null) return false;
+
+    let terminated = true;
+    try {
+      terminated = await executor.terminate(this.limits.terminateMs);
+    } catch {
+      terminated = false;
+    }
+    // A request may have started an eval while the old worker was terminating;
+    // its new epoch is valid, so it must not be bumped away.
+    if (this.inFlight > 0 || this.active.size > 0) return false;
+    // A wedged worker keeps the executor; its next start() reports the problem.
+    this.bumpWorkerEpoch();
+    return terminated;
   }
 
   notifyWorkerReset(report: HardStopReport): void {

@@ -412,7 +412,7 @@ test('capacity evicts expired then consumed records before rejecting', () => {
   assert.throws(() => store2.get('cb_a', old), UnknownTaskError);
 });
 
-test('defaults come from constants.ts', () => {
+test('defaults scale with the capacity model and add a per-owner limit', () => {
   const clock = fakeClock(5_000);
   const store = new TaskStore({ clock });
   const taskId = store.create(1, 'cb_a');
@@ -420,10 +420,37 @@ test('defaults come from constants.ts', () => {
   assert.equal(snapshot.createdAt, 5_000);
   assert.equal(snapshot.expiresAt, 5_000 + LIMITS.taskTtlMs);
 
-  for (let evalId = 2; evalId <= LIMITS.inFlightPerExecSession; evalId += 1) {
-    store.create(evalId, 'cb_a');
-  }
-  assert.throws(() => store.create(99, 'cb_a'), codeIs('CAPACITY_EXCEEDED'));
+  // Nine finished tasks of one owner no longer block another owner.
+  for (let evalId = 2; evalId <= 9; evalId += 1) store.create(evalId, 'cb_a');
+  assert.equal(store.countForOwner('cb_a'), 9);
+  assert.doesNotThrow(() => store.create(1, 'cb_b'));
+  assert.equal(store.countForOwner('cb_b'), 1);
+
+  // The owner slice is 32 (4 × 8); the process-wide table is 64 (8 × 8).
+  for (let evalId = 10; evalId <= 32; evalId += 1) store.create(evalId, 'cb_a');
+  assert.throws(() => store.create(33, 'cb_a'), codeIs('CAPACITY_EXCEEDED'));
+  assert.equal(store.countForOwner('cb_a'), 32);
+
+  for (let index = 0; index < 31; index += 1) store.create(index, 'cb_c');
+  assert.equal(store.size, 64);
+  assert.throws(() => store.create(1, 'cb_d'), codeIs('CAPACITY_EXCEEDED'));
+});
+
+test('updateLimits applies new capacities without evicting eagerly', () => {
+  const { store } = newStore({ capacity: 10 });
+  for (let evalId = 1; evalId <= 4; evalId += 1) store.create(evalId, 'cb_a');
+
+  store.updateLimits({ capacity: 2, ownerCapacity: 2 });
+  assert.deepEqual(store.limits, { capacity: 2, ownerCapacity: 2 });
+  assert.equal(store.size, 4);
+  assert.throws(() => store.create(5, 'cb_b'), codeIs('CAPACITY_EXCEEDED'));
+
+  const smaller = new TaskStore({ clock: fakeClock(), capacity: 10, ownerCapacity: 2 });
+  smaller.create(1, 'cb_a');
+  smaller.create(2, 'cb_a');
+  assert.doesNotThrow(() => smaller.create(1, 'cb_b'));
+  assert.throws(() => smaller.create(3, 'cb_a'), codeIs('CAPACITY_EXCEEDED'));
+  assert.throws(() => smaller.updateLimits({ ownerCapacity: 0 }), RangeError);
 });
 
 test('settling unknown or expired tasks is a no-op', () => {
@@ -445,4 +472,32 @@ test('rejects invalid store options', () => {
 test('rejects an empty owner', () => {
   const { store } = newStore();
   assert.throws(() => store.create(1, ''), TypeError);
+});
+
+test('setEvalId patches the placeholder, and the maintenance helpers stay owner-scoped', () => {
+  const { store } = newStore();
+  const first = store.create(0, 'cb_a');
+  const second = store.create(0, 'cb_a');
+  const foreign = store.create(3, 'cb_b');
+
+  assert.equal(store.setEvalId(first, 41), true);
+  assert.equal(store.get('cb_a', first).evalId, 41);
+  assert.equal(store.setEvalId('t_missing', 1), false);
+
+  assert.deepEqual(store.unconsumedIds('cb_a'), [first, second]);
+  assert.deepEqual(store.unconsumedIds('cb_b'), [foreign]);
+
+  assert.equal(store.has(first), true);
+  assert.equal(store.remove(first), true);
+  assert.equal(store.has(first), false);
+  assert.equal(store.remove(first), false);
+
+  assert.equal(store.removeOwner('cb_a'), 1);
+  assert.equal(store.size, 1);
+  assert.equal(store.removeOwner('cb_b'), 1);
+  assert.equal(store.size, 0);
+
+  store.create(1, 'cb_a');
+  store.clear();
+  assert.equal(store.size, 0);
 });

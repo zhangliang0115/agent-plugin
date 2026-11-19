@@ -459,6 +459,8 @@ export function parseAuditEvent(text: string): AuditEvent | null {
 export function eventStatus(event: AuditEvent): AuditStatus {
   if (event.event === 'tool_result') return event.ok === false ? 'error' : 'ok';
   if (event.event === 'eval_end') return event.outcome === 'timeout' ? 'timeout' : 'ok';
+  // AI runs carry `outcome` instead of `ok` (design 08 §2.4).
+  if (event.event === 'ai_run') return event.outcome === 'error' ? 'error' : 'ok';
   return 'ok';
 }
 
@@ -482,7 +484,14 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
     return false;
   }
   if (filter.tool !== undefined && event.tool !== filter.tool) return false;
-  if (filter.server !== undefined && event.server !== filter.server) return false;
+  // ai_run records the target server as `serverId` (design 08 §2.4).
+  if (
+    filter.server !== undefined &&
+    event.server !== filter.server &&
+    event.serverId !== filter.server
+  ) {
+    return false;
+  }
   if (filter.status !== undefined && eventStatus(event) !== filter.status) return false;
   if (filter.minMs !== undefined) {
     if (typeof event.ms !== 'number' || event.ms < filter.minMs) return false;
@@ -910,6 +919,7 @@ const STATS_WORKER_SOURCE = [
   'function statusOf(event) {',
   "  if (event.event === 'tool_result') return event.ok === false ? 'error' : 'ok';",
   "  if (event.event === 'eval_end') return event.outcome === 'timeout' ? 'timeout' : 'ok';",
+  "  if (event.event === 'ai_run') return event.outcome === 'error' ? 'error' : 'ok';",
   "  return 'ok';",
   '}',
   '',
@@ -927,7 +937,7 @@ const STATS_WORKER_SOURCE = [
   '  if (filter.evalId !== undefined && Number(event.evalId) !== filter.evalId) return false;',
   '  if (filter.taskId !== undefined && event.evalTaskId !== filter.taskId && event.taskId !== filter.taskId) return false;',
   '  if (filter.tool !== undefined && event.tool !== filter.tool) return false;',
-  '  if (filter.server !== undefined && event.server !== filter.server) return false;',
+  '  if (filter.server !== undefined && event.server !== filter.server && event.serverId !== filter.server) return false;',
   '  if (filter.status !== undefined && statusOf(event) !== filter.status) return false;',
   '  if (filter.minMs !== undefined) {',
   '    if (typeof event.ms !== "number" || event.ms < filter.minMs) return false;',

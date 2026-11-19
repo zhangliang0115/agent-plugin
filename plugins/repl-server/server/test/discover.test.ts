@@ -106,6 +106,33 @@ test('legacy initialize returns protocolVersion and a top-level serverInfo', asy
   });
 });
 
+test('server/discover rejects an unsupported pinned version with data.supportedVersions', async () => {
+  const rpc = createMethodTable();
+
+  for (const pinned of ['2025-11-25', '']) {
+    const response = expectError(
+      await rpc.handle({
+        jsonrpc: '2.0',
+        id: 10,
+        method: 'server/discover',
+        params: { _meta: { 'io.modelcontextprotocol/protocolVersion': pinned } },
+      }),
+    );
+    assert.equal(response.error.code, JSON_RPC_INVALID_REQUEST);
+    assert.deepEqual(response.error.data, { supportedVersions: ['2026-07-28'] });
+  }
+
+  // A missing pin and a supported pin both succeed.
+  for (const params of [{}, { _meta: { 'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION } }]) {
+    const response = expectResult(
+      await rpc.handle({ jsonrpc: '2.0', id: 11, method: 'server/discover', params }),
+    );
+    assert.deepEqual((response.result as { supportedVersions: string[] }).supportedVersions, [
+      '2026-07-28',
+    ]);
+  }
+});
+
 test('initialize with an unsupported version is -32600 with data.supportedVersions', async () => {
   const rpc = createMethodTable();
   const response = expectError(

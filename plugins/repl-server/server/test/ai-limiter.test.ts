@@ -64,3 +64,28 @@ test('a waiter that exceeds maxWaitMs is rejected with waitedMs', async () => {
   release();
   await blocker;
 });
+
+test('close rejects queued waiters, clears their timers and refuses new runs', async () => {
+  const limiter = createAiLimiter({ maxRunning: 1, maxQueued: 2, maxWaitMs: 5_000 });
+  let release: () => void = () => undefined;
+  const inFlight = limiter.run(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  await tick();
+
+  const queued = limiter.run(() => Promise.resolve());
+  assert.deepEqual(limiter.snapshot(), { running: 1, queued: 1 });
+
+  limiter.close();
+  await expectCode(queued, 'AI_RUNNER_UNAVAILABLE');
+  assert.deepEqual(limiter.snapshot(), { running: 1, queued: 0 });
+  await expectCode(limiter.run(() => Promise.resolve()), 'AI_RUNNER_UNAVAILABLE');
+
+  // In-flight work is the runner's to terminate; the limiter only stops new work.
+  release();
+  await inFlight;
+  limiter.close();
+});

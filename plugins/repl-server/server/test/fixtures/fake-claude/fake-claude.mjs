@@ -6,8 +6,49 @@
  * FAKE_CLAUDE_MODE. `payload` reads FAKE_CLAUDE_PAYLOAD (inline JSON or a file)
  * to inject arbitrary proposal/annotation values. `pidfile` lets the timeout
  * test confirm the process group is gone.
+ *
+ * The CLI gate probes `--version` and `--help` before the first spawn:
+ * - FAKE_CLAUDE_PROBE_LOG appends one line per probe (`version` / `help`);
+ * - FAKE_CLAUDE_HELP_MISSING (comma separated) omits flags from `--help`;
+ * - FAKE_CLAUDE_VERSION_FAIL=1 makes `--version` exit non-zero.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+
+const argv = process.argv.slice(2);
+const REQUIRED_FLAGS = [
+  '--safe-mode',
+  '--mcp-config',
+  '--strict-mcp-config',
+  '--no-session-persistence',
+];
+
+if (argv.includes('--version')) {
+  if (process.env.FAKE_CLAUDE_PROBE_LOG) {
+    appendFileSync(process.env.FAKE_CLAUDE_PROBE_LOG, 'version\n');
+  }
+  if (process.env.FAKE_CLAUDE_VERSION_FAIL === '1') process.exit(3);
+  process.stdout.write('claude 9.9.9 (fake)\n');
+  process.exit(0);
+}
+
+if (argv.includes('--help')) {
+  if (process.env.FAKE_CLAUDE_PROBE_LOG) {
+    appendFileSync(process.env.FAKE_CLAUDE_PROBE_LOG, 'help\n');
+  }
+  const missing = new Set(
+    (process.env.FAKE_CLAUDE_HELP_MISSING ?? '').split(',').filter((flag) => flag !== ''),
+  );
+  const lines = ['Usage: claude [options]'];
+  for (const flag of REQUIRED_FLAGS) {
+    if (!missing.has(flag)) lines.push(`  ${flag}`);
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+  process.exit(0);
+}
+
+if (process.env.FAKE_CLAUDE_PIDFILE) {
+  writeFileSync(process.env.FAKE_CLAUDE_PIDFILE, String(process.pid));
+}
 
 function okProposal() {
   return {
@@ -46,10 +87,6 @@ function okAnnotation() {
     ],
     warnings: [],
   };
-}
-
-if (process.env.FAKE_CLAUDE_PIDFILE) {
-  writeFileSync(process.env.FAKE_CLAUDE_PIDFILE, String(process.pid));
 }
 
 let input = '';

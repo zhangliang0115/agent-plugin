@@ -8,6 +8,10 @@
  * Every response is parsed once: JSON bodies are returned as-is, non-JSON bodies (for
  * example the JSONL audit export) are returned as text, and failures become
  * {@link ApiError} with the server's unified `{ error: { code, message, details } }` shape.
+ *
+ * Long-lived views use {@link ApiClient.stream}: a same-origin `EventSource` wrapper that
+ * keeps the Cookie session, remembers the last event id, reports `gap` frames, reconnects
+ * with backoff and degrades to callback-driven polling when the stream stays down.
  * @module
  */
 
@@ -74,6 +78,8 @@ export interface ApiClientOptions {
   csrfToken?: string | null;
   /** Called after a `401`, so the shell can fall back to the token gate. */
   onUnauthorized?: () => void;
+  /** Injection point for SSE; `null` forces the polling fallback. */
+  eventSource?: EventSourceFactory | null;
 }
 
 export interface ApiClient {
@@ -89,7 +95,69 @@ export interface ApiClient {
   put<T>(path: string, body?: unknown, options?: BodylessOptions): Promise<T>;
   patch<T>(path: string, body?: unknown, options?: BodylessOptions): Promise<T>;
   delete<T>(path: string, options?: BodylessOptions): Promise<T>;
+  /** Opens one same-origin SSE subscription; see {@link createEventStream}. */
+  stream(path: string, options?: EventStreamOptions): EventStream;
 }
+
+/** One parsed server-sent event. `data` stays generic because audit rows grow per type. */
+export interface StreamEvent {
+  /** SSE event name; unnamed frames arrive as `message`. */
+  type: string;
+  /** `JSON.parse`d body, or the raw string when the body is not JSON. */
+  data: unknown;
+  /** Unparsed `data:` text, kept for tolerant consumers. */
+  raw: string;
+  /** `id:` of this frame, or `null` when the server omitted one. */
+  id: string | null;
+  /** Latest position for a manual resume. */
+  lastEventId: string | null;
+}
+
+export type StreamState = 'connecting' | 'open' | 'reconnecting' | 'fallback' | 'closed';
+
+/** Payload of `event: gap` (`docs/03 §4.5`): the replay window lost frames. */
+export interface StreamGap {
+  oldestEventId: string | null;
+}
+
+export interface EventStreamOptions {
+  /** Event names to listen for; defaults to `['message']`. */
+  eventTypes?: readonly string[];
+  /** Initial position, appended as `?lastEventId=` and reused by later reconnects. */
+  lastEventId?: string | null;
+  onEvent?: (event: StreamEvent) => void;
+  /** `gap` means a full refresh is required; the stream is not continuous. */
+  onGap?: (gap: StreamGap) => void;
+  onStateChange?: (state: StreamState) => void;
+  /** Poll tick while the stream is `fallback`/`reconnecting`; also runs once on resume. */
+  onFallbackPoll?: () => void;
+  /** Fallback cadence in milliseconds; `0` disables polling. Defaults to 5000. */
+  fallbackPollMs?: number;
+  /** Consecutive failures before the polling fallback takes over. Defaults to 3. */
+  fallbackAfter?: number;
+  /** Close while hidden and reconnect on return; defaults to `true`. */
+  pauseWhenHidden?: boolean;
+  /** Injection point for tests/non-browser hosts. `null` disables SSE outright. */
+  createEventSource?: EventSourceFactory | null;
+}
+
+export interface EventStream {
+  readonly state: StreamState;
+  readonly lastEventId: string | null;
+  close(): void;
+}
+
+/** Minimal `EventSource` surface so tests and non-browser hosts can supply their own. */
+export interface EventSourceLike {
+  readonly readyState: number;
+  addEventListener(type: string, listener: (event: Event) => void): void;
+  close(): void;
+}
+
+export type EventSourceFactory = (
+  url: string,
+  init?: { withCredentials?: boolean },
+) => EventSourceLike;
 
 interface ParsedError {
   code: string;
@@ -104,6 +172,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const baseUrl = normalizeBase(options.baseUrl ?? API_BASE);
   const trustedBase = isSameOriginBase(baseUrl);
+  const eventSourceFactory = options.eventSource;
 
   let token = options.token !== undefined ? normalizeToken(options.token) : readStoredToken(storage);
   let csrfToken = options.csrfToken !== undefined ? normalizeToken(options.csrfToken) : null;
@@ -215,6 +284,15 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     return request<T>(path, { ...requestOptions, method: 'DELETE' });
   }
 
+  function stream(path: string, streamOptions: EventStreamOptions = {}): EventStream {
+    const address = endpoint(baseUrl, path);
+    const createEventSource =
+      streamOptions.createEventSource === undefined
+        ? eventSourceFactory
+        : streamOptions.createEventSource;
+    return createEventStream(address, { ...streamOptions, createEventSource });
+  }
+
   return {
     baseUrl,
     getToken,
@@ -228,7 +306,249 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     put,
     patch,
     delete: remove,
+    stream,
   };
+}
+
+const EVENT_SOURCE_CLOSED = 2;
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000] as const;
+const DEFAULT_FALLBACK_POLL_MS = 5_000;
+const DEFAULT_FALLBACK_AFTER = 3;
+
+/**
+ * Same-origin SSE subscription with a polling fallback.
+ *
+ * The browser's `EventSource` reconnects on its own and sends `Last-Event-ID` for the
+ * frames it already saw; this wrapper adds what a plain `EventSource` does not give the
+ * page: a `gap` callback (replay window overflow), a manual position for reconnects after
+ * a visibility pause, bounded backoff after a fatal error, and an `onFallbackPoll` tick
+ * when the stream stays down. Tokens cannot be attached to `EventSource`; the static
+ * admin page relies on its same-origin Cookie session, and Bearer-only deployments fall
+ * back to the polling path.
+ */
+export function createEventStream(url: string, options: EventStreamOptions = {}): EventStream {
+  const factory = resolveEventSourceFactory(options.createEventSource);
+  const eventTypes = normalizeEventTypes(options.eventTypes);
+  const fallbackPollMs = options.fallbackPollMs ?? DEFAULT_FALLBACK_POLL_MS;
+  const fallbackAfter = Math.max(1, options.fallbackAfter ?? DEFAULT_FALLBACK_AFTER);
+  const pauseWhenHidden = options.pauseWhenHidden !== false;
+
+  let state: StreamState = 'closed';
+  let lastEventId = options.lastEventId ?? null;
+  let source: EventSourceLike | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let failures = 0;
+  let attempt = 0;
+  let closed = false;
+
+  function setState(next: StreamState): void {
+    if (state === next) return;
+    state = next;
+    options.onStateChange?.(next);
+  }
+
+  function closeSource(): void {
+    if (source === null) return;
+    const current = source;
+    source = null;
+    current.close();
+  }
+
+  function clearReconnectTimer(): void {
+    if (reconnectTimer === null) return;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  function clearPollTimer(): void {
+    if (pollTimer === null) return;
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  function scheduleReconnect(): void {
+    if (closed || reconnectTimer !== null || isDocumentHidden()) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)] ?? 15_000;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      attempt += 1;
+      connect();
+    }, delay);
+  }
+
+  function startFallback(): void {
+    setState('fallback');
+    if (fallbackPollMs > 0 && pollTimer === null) {
+      pollTimer = setInterval(() => {
+        if (!closed && !isDocumentHidden()) options.onFallbackPoll?.();
+      }, fallbackPollMs);
+    }
+    scheduleReconnect();
+  }
+
+  function handleFrame(type: string, event: Event): void {
+    if (closed) return;
+    const frame = event as MessageEvent<unknown>;
+    const id =
+      typeof frame.lastEventId === 'string' && frame.lastEventId !== '' ? frame.lastEventId : null;
+    if (id !== null) lastEventId = id;
+    const raw = typeof frame.data === 'string' ? frame.data : '';
+    if (type === 'gap') {
+      options.onGap?.({ oldestEventId: readOldestEventId(parseStreamData(raw)) });
+      return;
+    }
+    options.onEvent?.({ type, data: parseStreamData(raw), raw, id, lastEventId });
+  }
+
+  function handleOpen(): void {
+    if (closed) return;
+    const reconnected = failures > 0 || attempt > 0;
+    failures = 0;
+    attempt = 0;
+    clearPollTimer();
+    // The server only replays from an `Last-Event-ID` header that a recreated
+    // EventSource cannot set, so let the caller catch up through its poll once.
+    if (reconnected) options.onFallbackPoll?.();
+    setState('open');
+  }
+
+  function handleError(): void {
+    if (closed) return;
+    failures += 1;
+    if (failures >= fallbackAfter) {
+      closeSource();
+      startFallback();
+      return;
+    }
+    // While the browser is retrying (`readyState === CONNECTING`) it owns the backoff.
+    if (source !== null && source.readyState !== EVENT_SOURCE_CLOSED) {
+      setState('reconnecting');
+      return;
+    }
+    closeSource();
+    setState('reconnecting');
+    scheduleReconnect();
+  }
+
+  function connect(): void {
+    if (closed || isDocumentHidden()) return;
+    clearReconnectTimer();
+    closeSource();
+    if (factory === null) {
+      startFallback();
+      return;
+    }
+    setState(failures === 0 && attempt === 0 ? 'connecting' : 'reconnecting');
+    let created: EventSourceLike;
+    try {
+      created = factory(withLastEventId(url, lastEventId), { withCredentials: true });
+    } catch {
+      failures += 1;
+      if (failures >= fallbackAfter) startFallback();
+      else scheduleReconnect();
+      return;
+    }
+    source = created;
+    for (const type of eventTypes) {
+      if (type === 'gap') continue;
+      created.addEventListener(type, (event) => handleFrame(type, event));
+    }
+    // `gap` is always delivered regardless of the requested event types.
+    created.addEventListener('gap', (event) => handleFrame('gap', event));
+    created.addEventListener('open', handleOpen);
+    created.addEventListener('error', handleError);
+  }
+
+  const onVisibility = (): void => {
+    if (closed || !pauseWhenHidden) return;
+    if (isDocumentHidden()) {
+      closeSource();
+      clearReconnectTimer();
+      clearPollTimer();
+      setState('reconnecting');
+      return;
+    }
+    failures = 0;
+    attempt = 0;
+    // The new EventSource cannot set the `Last-Event-ID` header by hand, so the caller
+    // catches up through a poll while the server replays from the query parameter.
+    options.onFallbackPoll?.();
+    connect();
+  };
+
+  if (pauseWhenHidden && typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibility);
+  }
+
+  if (factory === null) startFallback();
+  else connect();
+
+  return {
+    get state(): StreamState {
+      return state;
+    },
+    get lastEventId(): string | null {
+      return lastEventId;
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      closeSource();
+      clearReconnectTimer();
+      clearPollTimer();
+      if (pauseWhenHidden && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility);
+      }
+      setState('closed');
+    },
+  };
+}
+
+function resolveEventSourceFactory(
+  factory: EventSourceFactory | null | undefined,
+): EventSourceFactory | null {
+  if (factory === null) return null;
+  if (factory !== undefined) return factory;
+  if (typeof EventSource === 'undefined') return null;
+  return (url, init) => new EventSource(url, init) as unknown as EventSourceLike;
+}
+
+function normalizeEventTypes(types: readonly string[] | undefined): readonly string[] {
+  if (types === undefined) return ['message'];
+  const unique: string[] = [];
+  for (const type of types) {
+    const trimmed = typeof type === 'string' ? type.trim() : '';
+    if (trimmed !== '' && !unique.includes(trimmed)) unique.push(trimmed);
+  }
+  return unique.length === 0 ? ['message'] : unique;
+}
+
+function withLastEventId(url: string, lastEventId: string | null): string {
+  if (lastEventId === null || lastEventId === '') return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}lastEventId=${encodeURIComponent(lastEventId)}`;
+}
+
+function parseStreamData(raw: string): unknown {
+  if (raw === '') return undefined;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+}
+
+function readOldestEventId(data: unknown): string | null {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>)['oldestEventId'];
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && value !== '') return value;
+  return null;
+}
+
+function isDocumentHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
 }
 
 function normalizeBase(baseUrl: string): string {

@@ -63,3 +63,21 @@ export const AI_ENV_KEYS = [
 ] as const;
 
 export const AI_MCP_CONFIG_JSON = '{"mcpServers":{}}';
+
+/**
+ * Flags the resolved CLI must advertise in `--help`. They are the contract the
+ * runner relies on; a CLI missing any of them is reported as unavailable
+ * instead of spawning it without the isolation it promises.
+ */
+export const AI_REQUIRED_FLAGS = [
+  '--safe-mode',
+  '--mcp-config',
+  '--strict-mcp-config',
+  '--no-session-persistence',
+] as const;
+
+/** Budget for each `--version` / `--help` probe. */
+export const AI_PROBE_TIMEOUT_MS = 5_000;
+
+/** Grace between SIGTERM and SIGKILL when a run times out (08 §2.2). */
+export const AI_TERMINATE_GRACE_MS = 2_000;

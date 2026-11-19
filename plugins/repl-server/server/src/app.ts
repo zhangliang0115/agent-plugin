@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
+import { isAllowedHost } from './auth/tokens.ts';
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
 import type { JsonRpcDispatcher } from './mcp/jsonrpc.ts';
 import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
 import type { ReportService } from './reports/service.ts';
 import type { TransportSessionRegistry } from './sessions/transport.ts';
 import type { McpTaskStore } from './tasks/mcp-tasks.ts';
+import { withTransportSession } from './tasks/mcp-tasks.ts';
 import { VERSION } from '@zhangliang0115/repl-server-core';
 
 export interface McpContext {
@@ -35,6 +37,11 @@ export interface AppOptions {
     recordIn(input: Record<string, unknown>): void;
     recordOut(input: Record<string, unknown>): void;
   };
+  /**
+   * Observes the identity resolved for a request on a transport session. The
+   * admin client list uses it to show live binding/client per `Mcp-Session-Id`.
+   */
+  onSessionActivity?: (transportId: string, identity: RequestIdentity) => void;
   health?: () => Record<string, unknown>;
   log?: (line: string) => void;
 }
@@ -112,6 +119,15 @@ export function createApp(options: AppOptions): Server {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
 
     try {
+      // DNS-rebinding guard for the public surfaces; the admin layer applies
+      // the same check on its own path (protocol.md §1).
+      if ((url.pathname === '/health' || url.pathname === '/mcp') && !isAllowedHost(req.headers.host)) {
+        sendJson(res, 403, {
+          error: { code: 'FORBIDDEN_HOST', message: `host not allowed: ${req.headers.host ?? '<missing>'}` },
+        });
+        return;
+      }
+
       if (req.method === 'GET' && url.pathname === '/health') {
         sendJson(res, 200, { ok: true, version: VERSION, ...(options.health?.() ?? {}) });
         return;
@@ -178,7 +194,13 @@ export function createApp(options: AppOptions): Server {
       let transportId: string;
       if (requestedId === undefined) {
         const session = options.sessions.create(method === 'initialize' ? 'legacy' : 'modern', {
-          onClose: (reason) => log(`repl-server: transport closed (${reason})`),
+          onClose: async (reason) => {
+            log(`repl-server: transport closed (${reason})`);
+            // DELETE /mcp and idle expiry both land here: drop the exec
+            // sessions, their workers/serve handles and this session's tasks.
+            await options.gateway.destroyOwner(session.id);
+            options.tasks.clearSession(session.id);
+          },
         });
         transportId = session.id;
       } else {
@@ -203,6 +225,7 @@ export function createApp(options: AppOptions): Server {
       }
 
       const identity = toRequestIdentity(outcome, { mcp: transportId });
+      options.onSessionActivity?.(transportId, identity);
       const messageId = (message as { id?: unknown }).id;
       options.frames?.recordIn({
         mcp: transportId,
@@ -223,7 +246,11 @@ export function createApp(options: AppOptions): Server {
         ...(options.reports === undefined ? {} : { reports: options.reports }),
       };
 
-      const response = await options.dispatcher.handle(message, context);
+      // Task mappings record the creating transport session here, so the
+      // DELETE cascade can find bound tasks whose owner is the binding id.
+      const response = await withTransportSession(transportId, () =>
+        options.dispatcher.handle(message, context),
+      );
       log(`repl-server: mcp ${method ?? 'notification'} -> ${response === null ? 202 : 200}`);
       if (response === null) {
         res.writeHead(202, { 'mcp-session-id': transportId });

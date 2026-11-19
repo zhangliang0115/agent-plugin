@@ -312,6 +312,93 @@ test('import upserts by server id and removes servers absent from the document',
   assert.equal(await store.get('old'), null);
 });
 
+test('import keeps summary_source in sync when a summary changes', async (t) => {
+  const { handler, store } = await setup(t, [
+    stdioServer('pg', { summary: 'AI 摘要', summarySource: 'ai' }),
+    stdioServer('stable', { summary: '保持不变', summarySource: 'ai' }),
+    stdioServer('moved', { summary: '同摘要换传输', summarySource: 'ai' }),
+  ]);
+
+  const response = await post(handler, {
+    servers: [
+      {
+        id: 'pg',
+        label: 'pg',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', 'pg'],
+        summary: '人工摘要',
+      },
+      {
+        id: 'stable',
+        label: 'stable',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', 'stable'],
+        summary: '保持不变',
+      },
+      {
+        id: 'fresh',
+        label: 'fresh',
+        transport: 'stdio',
+        command: 'node',
+        summary: '新服务器摘要',
+      },
+      {
+        id: 'bare',
+        label: 'bare',
+        transport: 'stdio',
+        command: 'node',
+      },
+      {
+        id: 'moved',
+        label: 'moved',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+        summary: '同摘要换传输',
+      },
+    ],
+  });
+  assert.equal(response.status, 200);
+
+  assert.equal((await store.get('pg'))?.summarySource, 'manual');
+  assert.equal((await store.get('stable'))?.summarySource, 'ai');
+  assert.equal((await store.get('fresh'))?.summarySource, 'manual');
+  assert.equal((await store.get('bare'))?.summarySource, null);
+  assert.equal((await store.get('moved'))?.summarySource, 'ai');
+});
+
+test('import stores blank summaries as null without a source', async (t) => {
+  const { handler, store } = await setup(t, [
+    stdioServer('pg', { summary: 'AI 摘要', summarySource: 'ai' }),
+  ]);
+
+  const response = await post(handler, {
+    servers: [
+      {
+        id: 'pg',
+        label: 'pg',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', 'pg'],
+        summary: '',
+      },
+      {
+        id: 'fresh',
+        label: 'fresh',
+        transport: 'stdio',
+        command: 'node',
+        summary: '   ',
+      },
+    ],
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await store.get('pg'))?.summary, null);
+  assert.equal((await store.get('pg'))?.summarySource, null);
+  assert.equal((await store.get('fresh'))?.summary, null);
+  assert.equal((await store.get('fresh'))?.summarySource, null);
+});
+
 test('a transport change replaces the row instead of silently keeping the old one', async (t) => {
   const { handler, store } = await setup(t, [stdioServer('remote')]);
 

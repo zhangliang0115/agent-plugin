@@ -189,6 +189,8 @@ interface StoredPreview {
 interface Tombstone {
   state: 'expired' | 'applied';
   at: number;
+  /** The server that owned the preview; other servers keep seeing 404. */
+  serverId: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -317,7 +319,7 @@ export function createDiscoveryService(deps: DiscoveryServiceDeps): DiscoverySer
     for (const [id, preview] of previews) {
       if (preview.expiresAt <= now) {
         previews.delete(id);
-        tombstones.set(id, { state: 'expired', at: now });
+        tombstones.set(id, { state: 'expired', at: now, serverId: preview.serverId });
       }
     }
     for (const [id, tombstone] of tombstones) {
@@ -329,7 +331,7 @@ export function createDiscoveryService(deps: DiscoveryServiceDeps): DiscoverySer
       const preview = previews.get(oldest.value);
       previews.delete(oldest.value);
       if (preview !== undefined) {
-        tombstones.set(oldest.value, { state: 'expired', at: now });
+        tombstones.set(oldest.value, { state: 'expired', at: now, serverId: preview.serverId });
       }
     }
   }
@@ -587,7 +589,11 @@ export function createDiscoveryService(deps: DiscoveryServiceDeps): DiscoverySer
       }
       if (preview.expiresAt <= now) {
         previews.delete(discoveryId);
-        tombstones.set(discoveryId, { state: 'expired', at: now });
+        tombstones.set(discoveryId, {
+          state: 'expired',
+          at: now,
+          serverId: preview.serverId,
+        });
         throw new AdminApiError(
           410,
           'DISCOVERY_PREVIEW_EXPIRED',
@@ -600,6 +606,16 @@ export function createDiscoveryService(deps: DiscoveryServiceDeps): DiscoverySer
 
     const tombstone = tombstones.get(discoveryId);
     if (tombstone !== undefined && now - tombstone.at <= DISCOVERY_PREVIEW_TTL_MS) {
+      if (tombstone.serverId !== serverId) {
+        // Same answer as an id that was never created: other servers must not
+        // learn that a preview ever existed (design 07 §3.7).
+        throw new AdminApiError(
+          404,
+          'DISCOVERY_PREVIEW_NOT_FOUND',
+          `discovery preview ${discoveryId} does not belong to server ${serverId}`,
+          { discoveryId },
+        );
+      }
       throw new AdminApiError(
         410,
         'DISCOVERY_PREVIEW_EXPIRED',
@@ -672,7 +688,11 @@ export function createDiscoveryService(deps: DiscoveryServiceDeps): DiscoverySer
       throw error;
     }
 
-    tombstones.set(preview.discoveryId, { state: 'applied', at: clock.now() });
+    tombstones.set(preview.discoveryId, {
+      state: 'applied',
+      at: clock.now(),
+      serverId: preview.serverId,
+    });
     if (result.changed) catalog.refreshServer(serverId);
 
     audit({

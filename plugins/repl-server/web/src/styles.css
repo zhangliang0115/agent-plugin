@@ -1841,6 +1841,518 @@ th.mono {
   animation: spin 0.8s linear infinite;
 }
 
+/* ------------------------------------------------- management UX shared */
+
+/* Tab intro ------------------------------------------------------------ */
+
+.tab-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 2px 0;
+}
+
+.tab-intro-title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.tab-intro-description {
+  max-width: 760px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.tab-intro-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 760px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tab-intro-hint > .icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--accent-strong);
+}
+
+/* Section groups ------------------------------------------------------- */
+
+.section-group {
+  min-width: 0;
+}
+
+.card.section-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.card.section-group:hover {
+  transform: none;
+}
+
+.section-group-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-group-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.section-group-title {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.section-group-description {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.section-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  min-width: 0;
+}
+
+details.section-group {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs), var(--inset-highlight);
+}
+
+details.section-group > .section-group-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--text);
+  font-size: 13px;
+  list-style: none;
+}
+
+details.section-group > .section-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+details.section-group > .section-group-summary::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(-45deg);
+  transition: transform var(--speed) var(--ease);
+}
+
+details.section-group[open] > .section-group-summary::after {
+  transform: rotate(45deg);
+}
+
+details.section-group > .section-group-summary:hover {
+  background: var(--surface-hover);
+}
+
+details.section-group > .section-group-body {
+  padding: 4px 16px 16px;
+}
+
+/* Inline progress ------------------------------------------------------ */
+
+.inline-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  font-size: 12.5px;
+}
+
+.inline-progress-indicator {
+  position: relative;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.inline-progress[data-state="running"] .inline-progress-indicator {
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+.inline-progress[data-state="done"] .inline-progress-indicator {
+  background: var(--ok-soft);
+  box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.4);
+}
+
+.inline-progress[data-state="done"] .inline-progress-indicator::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 2.5px;
+  width: 5px;
+  height: 2.5px;
+  border-bottom: 1.5px solid var(--ok);
+  border-left: 1.5px solid var(--ok);
+  transform: rotate(-45deg);
+}
+
+.inline-progress[data-state="error"] .inline-progress-indicator {
+  background: var(--error-soft);
+  box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.45);
+}
+
+.inline-progress[data-state="error"] .inline-progress-indicator::after {
+  content: "!";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--error);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.inline-progress-text {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.inline-progress-label {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.inline-progress-detail {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.inline-progress-track {
+  flex: 1 1 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-strong);
+}
+
+.inline-progress-fill {
+  display: block;
+  width: 32%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gradient);
+  animation: progress-indeterminate 1.1s ease-in-out infinite;
+}
+
+.inline-progress-retry {
+  margin-left: auto;
+}
+
+.inline-progress[data-state="error"] {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: var(--error-soft);
+}
+
+.inline-progress[data-state="done"] {
+  border-color: rgba(52, 211, 153, 0.24);
+}
+
+@keyframes progress-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+/* Status detail -------------------------------------------------------- */
+
+.status-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.status-detail-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  min-width: 0;
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  text-align: left;
+}
+
+.status-detail-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.status-detail-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.status-detail-text {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+.status-detail-chevron {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(-45deg);
+  transition: transform var(--speed) var(--ease);
+}
+
+.status-detail-toggle[aria-expanded="true"] .status-detail-chevron {
+  transform: rotate(45deg);
+}
+
+.status-detail-lines {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+}
+
+.status-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+}
+
+/* Template cards ------------------------------------------------------- */
+
+.template-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs), var(--inset-highlight);
+  color: var(--text);
+  text-align: left;
+  transition:
+    background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease),
+    transform var(--speed) var(--ease);
+}
+
+.template-card:hover {
+  border-color: var(--border-bright);
+  background: var(--surface-hover);
+  transform: translateY(-1px);
+}
+
+.template-card:active {
+  transform: translateY(0);
+}
+
+.template-card:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.template-card-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.template-card-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.template-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.template-card-description {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+.template-card-arrow {
+  flex: 0 0 auto;
+  margin-top: 8px;
+  color: var(--text-faint);
+  transition:
+    color var(--speed) var(--ease),
+    transform var(--speed) var(--ease);
+}
+
+.template-card:hover .template-card-arrow {
+  color: var(--accent-strong);
+  transform: translateX(2px);
+}
+
+/* Field messages ------------------------------------------------------- */
+
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--error);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.field-error::before {
+  content: "!";
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.field [aria-invalid="true"] {
+  border-color: rgba(248, 113, 113, 0.6);
+}
+
+.field [aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 2px var(--error-soft);
+}
+
+@media (max-width: 640px) {
+  .section-group-header,
+  details.section-group > .section-group-summary {
+    padding: 12px 14px;
+  }
+
+  .section-group-body,
+  details.section-group > .section-group-body {
+    padding: 14px;
+  }
+
+  details.section-group > .section-group-body {
+    padding-top: 2px;
+  }
+
+  .inline-progress {
+    align-items: flex-start;
+  }
+
+  .inline-progress-text {
+    flex-basis: calc(100% - 30px);
+  }
+
+  .inline-progress-retry {
+    margin-left: 22px;
+  }
+
+  .template-card {
+    padding: 12px 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-progress[data-state="running"] .inline-progress-indicator,
+  .inline-progress-fill {
+    animation: none;
+  }
+
+  .template-card:hover,
+  .template-card:hover .template-card-arrow {
+    transform: none;
+  }
+
+  details.section-group > .section-group-summary::after,
+  .status-detail-chevron {
+    transition: none;
+  }
+}
+
 /* ---------------------------------------------------------------- utility */
 
 .muted {

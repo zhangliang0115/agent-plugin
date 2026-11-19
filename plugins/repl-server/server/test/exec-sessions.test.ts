@@ -84,6 +84,26 @@ test('creates one execution session per (Mcp-Session-Id, workspace) lazily', () 
   );
 });
 
+test('the session key includes the binding, so identities never share a record', () => {
+  const clock = new ManualClock();
+  const registry = new ExecSessionRegistry({ clock });
+
+  const unbound = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/repo' });
+  const bound = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/repo', binding: 'cb_work' });
+  const boundAgain = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/repo', binding: 'cb_work' });
+
+  assert.notEqual(unbound, bound);
+  assert.equal(boundAgain, bound);
+  assert.equal(registry.size, 2);
+  assert.equal(registry.find('mcp_a', '/repo'), unbound);
+  assert.equal(registry.find('mcp_a', '/repo', 'cb_work'), bound);
+  assert.equal(registry.find('mcp_a', '/repo', 'cb_other'), undefined);
+
+  // Both records still belong to the same transport session and are destroyed together.
+  assert.equal(registry.destroyByMcpSession('mcp_a'), 2);
+  assert.equal(registry.size, 0);
+});
+
 test('records binding and client label; idFactory is injectable', () => {
   const clock = new ManualClock(42);
   let next = 0;

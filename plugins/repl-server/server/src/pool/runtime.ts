@@ -19,11 +19,16 @@
  */
 
 import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
+import {
+  normalizeMcpResult,
+  type ServeToolResult,
+} from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
 import type { ToolCallRequest } from '@zhangliang0115/repl-server-core/src/types.ts';
 
 import type { ServerPoolControl, ServerRuntimeState } from '../admin/servers.ts';
 import type { ToolDiscoveryConfig } from '../discovery/types.ts';
 import type { AuditSink, Clock, ProcessLedger } from '../ports.ts';
+import { systemClock } from '../ports.ts';
 import { resolveServerSecrets } from '../secrets/resolve.ts';
 import type { SecretField, SecretFieldValue } from '../secrets/resolve.ts';
 import type { SecretStore } from '../secrets/store.ts';
@@ -194,6 +199,11 @@ export interface PoolToolCallOptions {
   /** Binding id for the per-binding quota; `null` groups unbound clients. */
   bindingId?: string | null;
   signal?: AbortSignal;
+  /**
+   * Absolute epoch-ms budget for this call (the gateway's L1 deadline). The
+   * runtime aborts the call, including one still queueing for a gate.
+   */
+  deadline?: number;
 }
 
 export interface PoolRuntime {
@@ -322,6 +332,67 @@ function disabledError(serverId: string): McpToolError {
   });
 }
 
+function callCancelledError(serverId: string, toolName: string): McpToolError {
+  return new McpToolError(`call ${serverId}.${toolName} was cancelled`, {
+    code: 'MCP_CALL_CANCELLED',
+    server: serverId,
+    tool: toolName,
+  });
+}
+
+function callTimeoutError(serverId: string, toolName: string, budgetMs: number): McpToolError {
+  return new McpToolError(`call ${serverId}.${toolName} exceeded its ${budgetMs}ms budget`, {
+    code: 'MCP_CALL_TIMEOUT',
+    server: serverId,
+    tool: toolName,
+    retryable: true,
+  });
+}
+
+/**
+ * Rejects as soon as the call-level signal fires, even while the inner promise
+ * is still queueing for a gate. The queued continuation checks the same signal
+ * and exits without reaching the upstream, so the cancellation leaves no
+ * pending work behind.
+ */
+function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  serverId: string,
+  toolName: string,
+): Promise<T> {
+  const reason = (): unknown => signal.reason ?? callCancelledError(serverId, toolName);
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(reason());
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      void promise.catch(() => undefined);
+      reject(reason());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function retiringError(serverId: string): McpToolError {
   return new McpToolError(`MCP server ${serverId} is being retired`, {
     code: 'MCP_SERVER_UNAVAILABLE',
@@ -352,6 +423,7 @@ class PoolRuntimeImpl implements PoolRuntime {
   readonly control: ServerPoolControl;
 
   private readonly options: PoolRuntimeOptions;
+  private readonly clock: Clock;
   private readonly specCache = new Map<string, CachedSpec>();
   private readonly registrations = new Map<string, Promise<PoolRuntimeServerRecord>>();
   private readonly active = new Map<string, number>();
@@ -362,13 +434,14 @@ class PoolRuntimeImpl implements PoolRuntime {
 
   constructor(options: PoolRuntimeOptions) {
     this.options = options;
+    this.clock = options.clock ?? systemClock;
     this.pool = new ConnectionPool({
       transportFactory: options.transportFactory,
       clientFactory: options.clientFactory,
       ...(options.ledger !== undefined ? { ledger: options.ledger } : {}),
       ...(options.audit !== undefined ? { audit: options.audit } : {}),
       ...(options.onStderr !== undefined ? { onStderr: options.onStderr } : {}),
-      ...(options.clock !== undefined ? { clock: options.clock } : {}),
+      clock: this.clock,
       ...(options.random !== undefined ? { random: options.random } : {}),
       ...(options.connectTimeoutMs !== undefined
         ? { connectTimeoutMs: options.connectTimeoutMs }
@@ -403,12 +476,51 @@ class PoolRuntimeImpl implements PoolRuntime {
   async callTool(call: ToolCallRequest, options: PoolToolCallOptions = {}): Promise<unknown> {
     this.assertUsable();
     const route = resolveToolRoute(call);
+
+    // One controller per call. The caller's signal (eval cancel / gateway L1
+    // abort) and this call's absolute deadline both feed it; a call still
+    // queueing for a gate observes the abort and leaves without reaching the
+    // upstream, so no stale pending work survives the cancellation.
+    const controller = new AbortController();
+    const callerSignal = options.signal;
+    const forwardAbort = (): void => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted === true) forwardAbort();
+    else callerSignal?.addEventListener('abort', forwardAbort, { once: true });
+
+    const budget =
+      options.deadline === undefined ? undefined : Math.max(0, options.deadline - this.clock.now());
+    const timer =
+      budget === undefined
+        ? undefined
+        : setTimeout(
+            () => controller.abort(callTimeoutError(route.server, route.tool, budget)),
+            budget,
+          );
+    timer?.unref?.();
+
+    try {
+      return await this.callWithSignal(route, call, options, controller.signal);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      callerSignal?.removeEventListener('abort', forwardAbort);
+    }
+  }
+
+  private async callWithSignal(
+    route: ToolRoute,
+    call: ToolCallRequest,
+    options: PoolToolCallOptions,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    this.throwIfAborted(signal, route.server, route.tool);
     if (this.retiring.has(route.server)) throw retiringError(route.server);
 
     const record = await this.ensureRegistered(route.server);
+    this.throwIfAborted(signal, route.server, route.tool);
     if (!record.enabled) throw disabledError(route.server);
 
     const policy = await this.resolvePolicy(route.server, route.tool);
+    this.throwIfAborted(signal, route.server, route.tool);
     // A scan said the tool is gone. `staleOverride` keeps it searchable, not
     // callable (design 03 §5.1 / 07 §4.7); the script proxy can bypass search,
     // so the check belongs here as well.
@@ -428,31 +540,48 @@ class PoolRuntimeImpl implements PoolRuntime {
 
     const bindingId = options.bindingId ?? null;
 
-    return await this.track(route.server, () =>
-      this.gates.run(route.server, bindingId, effectivePolicy, async () => {
-        this.assertUsable();
-        if (this.retiring.has(route.server)) throw retiringError(route.server);
+    return await raceAbort(
+      this.track(route.server, () =>
+        this.gates.run(route.server, bindingId, effectivePolicy, async () => {
+          this.throwIfAborted(signal, route.server, route.tool);
+          this.assertUsable();
+          if (this.retiring.has(route.server)) throw retiringError(route.server);
 
-        // Lazy connect with in-flight dedupe lives in the pool; calling it here
-        // also gives `onTools` a chance to publish the freshly listed tools.
-        await this.pool.ensureConnected(route.server);
-        await this.publishTools(route.server);
+          // Lazy connect with in-flight dedupe lives in the pool; calling it here
+          // also gives `onTools` a chance to publish the freshly listed tools.
+          await this.pool.ensureConnected(route.server);
+          await this.publishTools(route.server);
+          this.throwIfAborted(signal, route.server, route.tool);
 
-        const result = await this.pool.callTool(route.server, route.tool, call.args, {
-          bindingId,
-          ...(options.signal !== undefined ? { signal: options.signal } : {}),
-          ...(prepare === undefined ? {} : { prepare }),
-        });
+          const result = await this.pool.callTool(route.server, route.tool, call.args, {
+            bindingId,
+            signal,
+            ...(prepare === undefined ? {} : { prepare }),
+          });
 
-        // The first version does not proxy upstream tasks. Dropping the task id
-        // would leave the script with an unusable result, so reject explicitly.
-        const upstreamTask = upstreamTaskOf(result);
-        if (upstreamTask !== undefined) {
-          throw upstreamTaskError(route.server, route.tool, upstreamTask);
-        }
-        return result;
-      }),
+          // The first version does not proxy upstream tasks. Dropping the task id
+          // would leave the script with an unusable result, so reject explicitly.
+          const upstreamTask = upstreamTaskOf(result);
+          if (upstreamTask !== undefined) {
+            throw upstreamTaskError(route.server, route.tool, upstreamTask);
+          }
+          // Hand scripts the same `{ text, images, documents }` shape as the
+          // serve path. Without this, image/PDF base64 blocks are serialized
+          // into the XML text instead of the gateway's media collector.
+          if (result === undefined || result === null) return result;
+          return normalizeMcpResult(result as ServeToolResult);
+        }),
+      ),
+      signal,
+      route.server,
+      route.tool,
     );
+  }
+
+  /** Drops a queued call once its caller or its deadline has aborted it. */
+  private throwIfAborted(signal: AbortSignal, serverId: string, tool: string): void {
+    if (!signal.aborted) return;
+    throw signal.reason ?? callCancelledError(serverId, tool);
   }
 
   async discoverTools(serverId: string, options: PoolDiscoverOptions): Promise<unknown> {
@@ -640,6 +769,10 @@ class PoolRuntimeImpl implements PoolRuntime {
       },
       restart: async (id) => {
         this.specCache.delete(id);
+        // A restart must republish even when the tool names did not change:
+        // descriptions/schemas may have moved, and AI previews must see the
+        // fresh rows.
+        this.publishedTools.delete(id);
         await this.ensureRegistered(id);
         await this.pool.disconnect(id);
         await this.pool.ensureConnected(id);
@@ -647,6 +780,7 @@ class PoolRuntimeImpl implements PoolRuntime {
       },
       refreshTools: async (id) => {
         this.specCache.delete(id);
+        this.publishedTools.delete(id);
         await this.ensureRegistered(id);
         // `PoolClient.listTools` is only reachable through a connection, so a
         // refresh is a controlled reconnect that re-runs initialize + tools/list.

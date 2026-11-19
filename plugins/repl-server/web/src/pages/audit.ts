@@ -2,20 +2,27 @@
  * eval gantt and side-by-side protocol frames (RS-18, 03 §4.6–4.7).
  *
  * All data comes from `/admin/api/audit/*` through the typed API client. The live view
- * polls through that client (so token and same-origin rules stay in one place), batches
- * incoming events for {@link BATCH_MS} before touching the DOM, keeps at most
- * {@link MAX_EVENTS} events in a ring buffer, and pauses polling plus rendering while
- * the document is hidden. Rendering is throttled to roughly 30 fps.
+ * subscribes to `/admin/api/audit/stream` (same cookie session), batches incoming events
+ * for {@link BATCH_MS} before touching the DOM, keeps at most {@link MAX_EVENTS} events in
+ * a ring buffer, and pauses the subscription plus rendering while the document is hidden.
+ * A gap frame forces a full refresh; the 2s `/audit/query` poll stays as the disconnect
+ * fallback and still refreshes the stat row. Rendering is throttled to roughly 30 fps.
  *
  * The table is a virtual scroller keyed by event identity: only the visible rows exist in
  * the DOM, so a full 5000-event buffer costs the same as one viewport. Export streams the
  * applied filter as JSONL through the same client.
+ *
+ * Filters default to the last hour (local time) and persist to a versioned localStorage
+ * key; corrupt records fall back to the defaults. The column picker persists which
+ * optional columns are visible, and secondary columns are dropped automatically on
+ * narrow viewports without touching the event buffers or the live filter.
  *
  * Audit events are intentionally typed loosely: the JSONL schema grows per event type,
  * and the page must still render unfamiliar fields instead of dropping the row.
  * @module
  */
 
+import { ApiError, type EventStream } from '../lib/api.ts';
 import {
   durationTone,
   formatBytes,
@@ -33,12 +40,14 @@ import {
   badge,
   button,
   cardSection,
+  checkbox,
   copyButton,
   createDrawer,
   definitionList,
   describeError,
   el,
   emptyState,
+  errorActionHint,
   field,
   icon,
   loading,
@@ -111,7 +120,7 @@ interface FramesResponse {
   droppedFrames?: number;
 }
 
-interface Filters {
+export interface AuditFilters {
   from: string;
   to: string;
   event: string;
@@ -122,6 +131,8 @@ interface Filters {
   status: string;
   minMs: string;
   live: boolean;
+  /** Preset minutes as a string (`'60'`); empty means a custom from/to range. */
+  range: string;
 }
 
 interface Bucket {
@@ -151,6 +162,7 @@ interface ListView {
 }
 
 interface FilterControls {
+  range: HTMLSelectElement;
   from: HTMLInputElement;
   to: HTMLInputElement;
   eventType: HTMLSelectElement;
@@ -161,6 +173,7 @@ interface FilterControls {
   server: HTMLInputElement;
   minMs: HTMLInputElement;
   live: HTMLInputElement;
+  setAdvanced(open: boolean): void;
 }
 
 interface CellOptions {
@@ -169,12 +182,16 @@ interface CellOptions {
   title?: string;
 }
 
-interface Column {
+export interface AuditColumn {
   key: string;
   label: string;
   flex: number;
   align?: 'right';
   mono?: boolean;
+  /** Always visible; the column picker cannot hide it. */
+  fixed?: boolean;
+  /** Dropped automatically on narrow viewports. */
+  secondary?: boolean;
 }
 
 const MAX_EVENTS = 5_000;
@@ -197,7 +214,16 @@ const RANGE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: '自定义时间' },
 ];
 
-const DEFAULT_RANGE = '60';
+/** Default preset: the last hour, rendered in the browser's local timezone. */
+export const DEFAULT_RANGE = '60';
+
+/** Versioned keys; the `version` field inside the records must match as well. */
+export const FILTER_STORAGE_KEY = ['repl-server', 'admin', 'audit', 'filters', 'v1'].join('.');
+export const COLUMN_STORAGE_KEY = ['repl-server', 'admin', 'audit', 'columns', 'v1'].join('.');
+
+const STORAGE_VERSION = 1;
+const NARROW_MEDIA_QUERY = '(max-width: 900px)';
+const PRESET_MINUTES: readonly number[] = [15, 60, 360, 1_440, 10_080];
 
 const EVENT_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: '全部事件' },
@@ -218,15 +244,16 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'timeout', label: 'timeout' },
 ];
 
-const COLUMNS: ReadonlyArray<Column> = [
-  { key: 'time', label: '时间', flex: 1.15 },
-  { key: 'client', label: '客户端 / binding', flex: 1.5 },
-  { key: 'tool', label: '工具 / 方法', flex: 1.75, mono: true },
-  { key: 'mode', label: '模式', flex: 0.75 },
-  { key: 'queue', label: 'queueMs', flex: 0.8, align: 'right' },
-  { key: 'ms', label: 'ms', flex: 0.75, align: 'right' },
+export const AUDIT_COLUMNS: ReadonlyArray<AuditColumn> = [
+  { key: 'time', label: '时间', flex: 1.15, fixed: true },
+  { key: 'client', label: '客户端 / binding', flex: 1.5, secondary: true },
+  { key: 'server', label: 'server', flex: 1.05, mono: true, secondary: true },
+  { key: 'tool', label: '工具 / 方法', flex: 1.75, mono: true, fixed: true },
+  { key: 'mode', label: '模式', flex: 0.75, secondary: true },
+  { key: 'queueMs', label: 'queueMs', flex: 0.8, align: 'right', mono: true },
+  { key: 'ms', label: 'ms', flex: 0.75, align: 'right', mono: true },
   { key: 'status', label: '状态', flex: 0.8 },
-  { key: 'eval', label: 'exec / eval', flex: 1.35, mono: true },
+  { key: 'eval', label: 'exec / eval', flex: 1.35, mono: true, secondary: true },
 ];
 
 export function createAuditPage(context: PageContext): PageHandle {
@@ -235,20 +262,9 @@ export function createAuditPage(context: PageContext): PageHandle {
     '调用列表、eval 轨迹与协议帧；筛选在服务端流式完成，实时视图最多保留 5000 条。',
   );
 
-  const initialFrom = toDateTimeLocal(Date.now() - 3_600_000);
+  const initialFilters = parsePersistedAuditFilters(readStorage(FILTER_STORAGE_KEY));
   const state = {
-    filters: {
-      from: initialFrom,
-      to: '',
-      event: '',
-      client: '',
-      binding: '',
-      tool: '',
-      server: '',
-      status: '',
-      minMs: '',
-      live: true,
-    } as Filters,
+    filters: { ...initialFilters },
     events: [] as AuditEvent[],
     seen: new Set<string>(),
     pending: [] as AuditEvent[],
@@ -259,16 +275,31 @@ export function createAuditPage(context: PageContext): PageHandle {
     loadingMore: false,
     exporting: false,
     error: null as string | null,
+    errorCode: null as string | null,
     stats: null as AuditStats | null,
     statsError: null as string | null,
+    statsErrorCode: null as string | null,
     notice: null as { text: string; tone: NoticeTone } | null,
     drawer: null as AuditEvent | null,
   };
+
+  let columnVisibility = parsePersistedColumns(readStorage(COLUMN_STORAGE_KEY));
+  const narrowMedia =
+    typeof window.matchMedia === 'function' ? window.matchMedia(NARROW_MEDIA_QUERY) : null;
+  let narrow = narrowMedia?.matches === true;
+  const onNarrowChange = (event: MediaQueryListEvent): void => {
+    narrow = event.matches;
+    invalidateList();
+    renderNow();
+  };
+  narrowMedia?.addEventListener('change', onNarrowChange);
 
   let destroyed = false;
   let loadToken = 0;
   let statsToken = 0;
   let pollTicks = 0;
+  let streamOpen = false;
+  let stream: EventStream | null = null;
   let batchTimer: ReturnType<typeof setTimeout> | null = null;
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
   let paintFrame: number | null = null;
@@ -278,6 +309,8 @@ export function createAuditPage(context: PageContext): PageHandle {
 
   const banner = el('div');
   const pendingKeys = new Set<string>();
+  const rangeSummary = el('p', 'muted');
+  setStyle(rangeSummary, { fontSize: '11.5px' });
   let listView: ListView | null = null;
   let filterControls: FilterControls;
   const filterCard = buildFilterCard();
@@ -307,7 +340,10 @@ export function createAuditPage(context: PageContext): PageHandle {
       padding: '16px 18px',
     });
 
-    const range = selectControl(RANGE_OPTIONS, { value: DEFAULT_RANGE, ariaLabel: '时间范围' });
+    const range = selectControl(RANGE_OPTIONS, {
+      value: state.filters.range,
+      ariaLabel: '时间范围',
+    });
     const from = textInput({ type: 'datetime-local', value: state.filters.from });
     const to = textInput({ type: 'datetime-local', value: state.filters.to });
     const eventType = selectControl(EVENT_OPTIONS, {
@@ -357,6 +393,8 @@ export function createAuditPage(context: PageContext): PageHandle {
       label: '实时',
       onChange: (checked) => {
         state.filters.live = checked;
+        persistFilters(state.filters);
+        syncLiveStream();
         scheduleRender();
       },
     });
@@ -391,42 +429,35 @@ export function createAuditPage(context: PageContext): PageHandle {
       more.title = open ? '收起更多筛选' : '展开更多筛选';
     }
 
+    const columnPanel = buildColumnPanel();
+    const columns = button(
+      '列',
+      () => {
+        const open = columnPanel.hidden === true;
+        columnPanel.hidden = !open;
+        columns.setAttribute('aria-expanded', String(open));
+        columns.title = open ? '收起列选择' : '选择显示列';
+      },
+      { variant: 'ghost', size: 'sm', icon: 'layers' },
+    );
+    columns.setAttribute('aria-expanded', 'false');
+    columns.title = '选择显示列';
+
     const apply = button('应用', () => undefined, {
       type: 'submit',
       variant: 'primary',
       icon: 'check',
     });
-    const reset = button('重置', () => {
-      const now = Date.now();
-      state.filters = {
-        from: toDateTimeLocal(now - 3_600_000),
-        to: '',
-        event: '',
-        client: '',
-        binding: '',
-        tool: '',
-        server: '',
-        status: '',
-        minMs: '',
-        live: true,
-      };
-      range.value = DEFAULT_RANGE;
-      from.value = state.filters.from;
-      to.value = '';
-      eventType.value = '';
-      status.value = '';
-      search.value = '';
-      client.value = '';
-      binding.value = '';
-      server.value = '';
-      minMs.value = '';
-      live.input.checked = true;
-      setAdvanced(false);
-      applyFilters();
-    }, { variant: 'secondary', icon: 'refresh' });
+    const reset = button(
+      '清空筛选',
+      () => {
+        clearFilters();
+      },
+      { variant: 'secondary', icon: 'refresh' },
+    );
 
     const head = el('div', 'toolbar');
-    add(head, el('p', 'eyebrow', '筛选'), el('span', 'spacer'), more);
+    add(head, el('p', 'eyebrow', '筛选'), el('span', 'spacer'), columns, more);
 
     const primary = el('div', 'toolbar');
     add(
@@ -470,9 +501,10 @@ export function createAuditPage(context: PageContext): PageHandle {
       range.value = '';
     });
 
-    add(card, head, primary, advanced);
+    add(card, head, primary, rangeSummary, advanced, columnPanel);
     card.dataset['from'] = 'audit-filter';
     filterControls = {
+      range,
       from,
       to,
       eventType,
@@ -483,8 +515,43 @@ export function createAuditPage(context: PageContext): PageHandle {
       server,
       minMs,
       live: live.input,
+      setAdvanced,
     };
     return card;
+  }
+
+  function buildColumnPanel(): HTMLElement {
+    const panel = el('div', 'toolbar');
+    panel.hidden = true;
+    setStyle(panel, {
+      flexWrap: 'wrap',
+      gap: '10px 16px',
+      padding: '10px 12px',
+      border: '1px solid var(--border)',
+      borderRadius: 'var(--radius)',
+      background: 'var(--surface-inset)',
+    });
+
+    const hint = el(
+      'p',
+      'muted',
+      '勾选要显示的列；窄屏（≤900px）自动隐藏客户端、server、模式与 exec/eval 列。',
+    );
+    setStyle(hint, { flex: '1 0 100%', fontSize: '11.5px' });
+    add(panel, hint);
+
+    for (const column of AUDIT_COLUMNS) {
+      if (column.fixed === true) continue;
+      const item = checkbox(column.label, columnVisibility[column.key] !== false);
+      item.input.addEventListener('change', () => {
+        columnVisibility = { ...columnVisibility, [column.key]: item.input.checked };
+        writeStorage(COLUMN_STORAGE_KEY, serializeColumnVisibility(columnVisibility));
+        invalidateList();
+        renderNow();
+      });
+      add(panel, item.wrapper);
+    }
+    return panel;
   }
 
   function flexibleField(labelText: string, control: HTMLElement, flex: string): HTMLLabelElement {
@@ -506,7 +573,10 @@ export function createAuditPage(context: PageContext): PageHandle {
       status: controls.status.value,
       minMs: controls.minMs.value,
       live: controls.live.checked,
+      range: controls.range.value,
     };
+    persistFilters(state.filters);
+    renderRangeSummary();
     state.events = [];
     state.seen.clear();
     state.pending = [];
@@ -517,9 +587,11 @@ export function createAuditPage(context: PageContext): PageHandle {
     state.loading = true;
     state.loadingMore = false;
     state.error = null;
+    state.errorCode = null;
     state.notice = null;
     state.stats = null;
     state.statsError = null;
+    state.statsErrorCode = null;
     invalidateList();
     loadToken += 1;
     statsToken += 1;
@@ -531,6 +603,54 @@ export function createAuditPage(context: PageContext): PageHandle {
     renderNow();
     void loadFirstPage(loadToken);
     void loadStats();
+    syncLiveStream();
+  }
+
+  /** Returns every filter control to the first-entry defaults and applies them. */
+  function clearFilters(): void {
+    const controls = filterControls;
+    state.filters = defaultAuditFilters(Date.now());
+    controls.range.value = DEFAULT_RANGE;
+    controls.from.value = state.filters.from;
+    controls.to.value = '';
+    controls.eventType.value = '';
+    controls.status.value = '';
+    controls.client.value = '';
+    controls.binding.value = '';
+    controls.tool.value = '';
+    controls.server.value = '';
+    controls.minMs.value = '';
+    controls.live.checked = true;
+    controls.setAdvanced(false);
+    applyFilters();
+  }
+
+  /** Grows the window without ever shrinking it; past the last preset it doubles the span. */
+  function expandTimeRange(): void {
+    const next = expandedRangeMinutes(rangeMinutes(state.filters));
+    const controls = filterControls;
+    const preset = RANGE_OPTIONS.some((option) => option.value === String(next));
+    controls.range.value = preset ? String(next) : '';
+    controls.from.value = toDateTimeLocal(Date.now() - next * 60_000);
+    controls.to.value = '';
+    applyFilters();
+  }
+
+  function renderRangeSummary(): void {
+    const filters = state.filters;
+    const preset = RANGE_OPTIONS.find(
+      (option) => option.value !== '' && option.value === filters.range,
+    );
+    const label = preset === undefined ? '自定义时间' : preset.label;
+    const from = parseTime(filters.from);
+    const to = parseTime(filters.to);
+    const fromText = from === null ? '不限' : formatTimestamp(from);
+    const toText = to === null ? '至今' : formatTimestamp(to);
+    rangeSummary.textContent = `当前范围（本地时区）：${label} · ${fromText} → ${toText}`;
+  }
+
+  function persistFilters(filters: AuditFilters): void {
+    writeStorage(FILTER_STORAGE_KEY, serializeAuditFilters(filters));
   }
 
   function filterQuery(): Record<string, string | number | undefined> {
@@ -553,20 +673,29 @@ export function createAuditPage(context: PageContext): PageHandle {
   // -------------------------------------------------------------------------
 
   async function loadFirstPage(token: number): Promise<void> {
+    // Stream frames can arrive while this request is in flight; `applyFilters` has
+    // already dropped the old rows, so keeping the current buffers only carries rows
+    // that belong to the current filter set.
     try {
       const response = await context.api.get<AuditQueryResponse>('/audit/query', {
         query: { ...filterQuery(), limit: PAGE_SIZE },
         signal: controller.signal,
       });
       if (destroyed || token !== loadToken) return;
+      const carried = state.events;
+      const inFlight = state.pending;
+      state.pending = [];
+      pendingKeys.clear();
       state.events = [];
       state.seen.clear();
-      state.pending = [];
       appendEvents(Array.isArray(response.events) ? response.events : []);
+      appendEvents(carried);
+      appendEvents(inFlight);
       state.cursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
       state.hasMore = response.hasMore === true;
       state.loading = false;
       state.error = null;
+      state.errorCode = null;
       renderBanner();
       renderNow();
       scheduleRender();
@@ -575,6 +704,7 @@ export function createAuditPage(context: PageContext): PageHandle {
       if (controller.signal.aborted) return;
       state.loading = false;
       state.error = describeError(error);
+      state.errorCode = error instanceof ApiError ? error.code : null;
       renderBanner();
       renderNow();
     }
@@ -601,6 +731,7 @@ export function createAuditPage(context: PageContext): PageHandle {
       if (destroyed || token !== loadToken) return;
       state.loadingMore = false;
       state.error = describeError(error);
+      state.errorCode = error instanceof ApiError ? error.code : null;
       renderBanner();
       renderFooter();
     }
@@ -616,11 +747,13 @@ export function createAuditPage(context: PageContext): PageHandle {
       if (destroyed || token !== statsToken) return;
       state.stats = stats;
       state.statsError = null;
+      state.statsErrorCode = null;
       scheduleRender();
     } catch (error) {
       if (destroyed || token !== statsToken || controller.signal.aborted) return;
       state.stats = null;
       state.statsError = describeError(error);
+      state.statsErrorCode = error instanceof ApiError ? error.code : null;
       scheduleRender();
     }
   }
@@ -648,7 +781,8 @@ export function createAuditPage(context: PageContext): PageHandle {
       toast('已导出当前筛选结果', 'ok');
     } catch (error) {
       if (destroyed) return;
-      toast(`导出失败：${describeError(error)}`, 'error');
+      const hint = errorActionHint(error instanceof ApiError ? error.code : undefined);
+      toast(`导出失败：${describeError(error)}。${hint}`, 'error');
     } finally {
       state.exporting = false;
       if (!destroyed) renderFooter();
@@ -679,10 +813,93 @@ export function createAuditPage(context: PageContext): PageHandle {
   // Live polling and batching
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Live stream (SSE) with the 2s poll as fallback
+  // -------------------------------------------------------------------------
+
+  function syncLiveStream(): void {
+    if (state.filters.live) startStream();
+    else stopStream();
+  }
+
+  function stopStream(): void {
+    stream?.close();
+    stream = null;
+    streamOpen = false;
+  }
+
+  function startStream(): void {
+    if (destroyed || !state.filters.live) return;
+    stopStream();
+    stream = context.api.stream('/audit/stream', {
+      eventTypes: ['audit', 'message'],
+      onEvent: (frame) => {
+        const incoming = auditEventsFromStreamPayload(frame.data).filter(matchesLiveFilters);
+        if (incoming.length > 0) enqueueBatch(incoming);
+      },
+      onGap: () => {
+        state.notice = {
+          text: '实时流出现缺口（服务端回放窗口已溢出），已触发全量刷新；较早事件可能缺失。',
+          tone: 'queue',
+        };
+        renderBanner();
+        refreshFromScratch();
+      },
+      onStateChange: (next) => {
+        streamOpen = next === 'open';
+        scheduleRender();
+      },
+      onFallbackPoll: () => {
+        void pollLive();
+      },
+    });
+  }
+
+  /** Re-runs the first page and stats without dropping rows until the response lands. */
+  function refreshFromScratch(): void {
+    loadToken += 1;
+    void loadFirstPage(loadToken);
+    void loadStats();
+  }
+
+  /** The stream is unfiltered; keep only rows that match the current form filters. */
+  function matchesLiveFilters(event: AuditEvent): boolean {
+    const filters = state.filters;
+    if (filters.event !== '' && event.event !== filters.event) return false;
+    const time = parseEventTime(event);
+    const from = parseTime(filters.from);
+    const to = parseTime(filters.to);
+    if (from !== null && (time === null || time < from)) return false;
+    if (to !== null && (time === null || time > to)) return false;
+    const client = filters.client.trim();
+    if (client !== '' && eventText(event, 'client') !== client) return false;
+    const binding = filters.binding.trim();
+    if (binding !== '' && eventText(event, 'binding') !== binding) return false;
+    const tool = filters.tool.trim();
+    if (tool !== '' && eventText(event, 'tool') !== tool) return false;
+    const server = filters.server.trim();
+    if (server !== '') {
+      // `ai_run` carries no `server`; the server-side filter also accepts `serverId`.
+      const serverId = eventText(event, 'server') ?? eventText(event, 'serverId');
+      if (serverId !== server) return false;
+    }
+    if (filters.status !== '' && (eventStatus(event) || 'ok') !== filters.status) return false;
+    const minMs = filters.minMs.trim();
+    if (minMs !== '') {
+      const minimum = Number(minMs);
+      const duration = eventDuration(event);
+      if (!Number.isFinite(minimum) || duration === null || duration < minimum) return false;
+    }
+    return true;
+  }
+
   async function pollLive(): Promise<void> {
     if (!state.filters.live || state.loading) return;
     pollTicks += 1;
     if (pollTicks % STATS_EVERY_TICKS === 0) void loadStats();
+    // While the SSE stream is healthy it carries new events; this loop stays as the
+    // disconnect fallback and still refreshes stats on its own cadence.
+    if (streamOpen) return;
 
     const last = latestTimestamp();
     const from = last ?? new Date(Date.now() - 60_000).toISOString();
@@ -745,13 +962,18 @@ export function createAuditPage(context: PageContext): PageHandle {
   function renderBanner(): void {
     banner.replaceChildren();
     if (state.error !== null) {
-      add(banner, notice(`查询失败：${state.error}`, 'error'));
+      const hint = errorActionHint(
+        state.errorCode ?? undefined,
+        '检查 /admin/api/audit/query 后重试。',
+      );
+      add(banner, notice(`查询失败：${state.error}。${hint}`, 'error'));
     }
     if (state.notice !== null) {
       add(banner, notice(state.notice.text, state.notice.tone));
     }
     if (state.statsError !== null) {
-      add(banner, notice(`统计不可用：${state.statsError}`, 'queue'));
+      const hint = errorActionHint(state.statsErrorCode ?? undefined, '缩小时间范围后重试。');
+      add(banner, notice(`统计不可用：${state.statsError}。${hint}`, 'queue'));
     }
   }
 
@@ -1034,20 +1256,49 @@ export function createAuditPage(context: PageContext): PageHandle {
 
   function renderList(): void {
     if (state.loading && state.events.length === 0) {
-      listView = null;
+      invalidateList();
       listHost.replaceChildren(loading('正在读取审计事件…'));
       return;
     }
     if (state.events.length === 0) {
-      listView = null;
-      listHost.replaceChildren(
-        emptyState(
-          state.error === null ? '当前筛选没有事件。' : '事件加载失败。',
-          state.error === null
-            ? '放宽时间范围或清空过滤条件；实时开关只追加新事件，不回填历史。'
-            : '检查 /admin/api/audit/query 后重试。',
-        ),
-      );
+      invalidateList();
+      if (state.error !== null) {
+        const hint = errorActionHint(
+          state.errorCode ?? undefined,
+          '检查 /admin/api/audit/query 后重试。',
+        );
+        listHost.replaceChildren(
+          actionEmptyState('事件加载失败。', `${state.error}。${hint}`, [
+            button('重试', () => refreshEvents(), {
+              variant: 'primary',
+              size: 'sm',
+              icon: 'refresh',
+            }),
+            button('清空筛选', () => clearFilters(), { variant: 'secondary', size: 'sm' }),
+          ]),
+        );
+      } else {
+        const next = expandedRangeMinutes(rangeMinutes(state.filters));
+        listHost.replaceChildren(
+          actionEmptyState(
+            '当前筛选没有事件。',
+            '放宽时间范围或清空过滤条件；实时开关只追加新事件，不回填历史。',
+            [
+              button('清空筛选', () => clearFilters(), {
+                variant: 'secondary',
+                size: 'sm',
+                icon: 'refresh',
+              }),
+              button('扩大时间范围', () => expandTimeRange(), {
+                variant: 'ghost',
+                size: 'sm',
+                icon: 'clock',
+                title: `切换到${rangeLabel(next)}`,
+              }),
+            ],
+          ),
+        );
+      }
       return;
     }
     if (listView !== null) {
@@ -1063,6 +1314,8 @@ export function createAuditPage(context: PageContext): PageHandle {
 
     const card = cardSection({
       title: '调用列表',
+      subtitle:
+        '每行一通调用：queueMs 是排队等待，ms 是执行耗时；左侧色条标出失败（红）与超时（橙）。',
       icon: 'audit',
       flush: true,
       actions: meta,
@@ -1078,7 +1331,7 @@ export function createAuditPage(context: PageContext): PageHandle {
       letterSpacing: '0.05em',
       textTransform: 'uppercase',
     });
-    for (const column of COLUMNS) {
+    for (const column of currentColumns()) {
       headerRow.appendChild(
         listCell(column.label, column.flex, { mono: column.mono, align: column.align }),
       );
@@ -1150,7 +1403,11 @@ export function createAuditPage(context: PageContext): PageHandle {
     if (listView === null) return;
     listView.count.textContent = listSummary();
     listView.badges.replaceChildren();
-    if (state.filters.live) listView.badges.appendChild(badge('实时', 'info'));
+    if (state.filters.live) {
+      listView.badges.appendChild(
+        badge(streamOpen ? 'SSE 实时' : '轮询兜底', streamOpen ? 'info' : 'queue'),
+      );
+    }
     if (state.truncated) listView.badges.appendChild(badge('实时视图已截断', 'queue'));
     listView.spacer.style.height = `${state.events.length * ROW_HEIGHT}px`;
     listView.paint();
@@ -1158,6 +1415,10 @@ export function createAuditPage(context: PageContext): PageHandle {
 
   function invalidateList(): void {
     listView = null;
+    if (paintFrame !== null) {
+      window.cancelAnimationFrame(paintFrame);
+      paintFrame = null;
+    }
   }
 
   function listSummary(): string {
@@ -1172,6 +1433,10 @@ export function createAuditPage(context: PageContext): PageHandle {
     return state.events[state.events.length - 1 - index];
   }
 
+  function currentColumns(): readonly AuditColumn[] {
+    return visibleAuditColumns(columnVisibility, narrow);
+  }
+
   function buildListRow(event: AuditEvent): HTMLElement {
     const row = el('div', 'virtual-row');
     const status = eventStatus(event);
@@ -1182,51 +1447,14 @@ export function createAuditPage(context: PageContext): PageHandle {
     row.setAttribute('role', 'row');
     row.setAttribute('aria-label', listRowLabel(event));
 
-    const time = parseEventTime(event);
-    const queueMs = asNumber(event['queueMs']);
-    const duration = eventDuration(event);
-    const queueCell = listCell(formatDuration(queueMs), 0.8, {
-      mono: true,
-      align: 'right',
-      title: queueMs === null ? 'queueMs 缺失' : `queueMs ${formatDuration(queueMs)}`,
-    });
-    if (queueMs !== null && queueMs >= 500) setStyle(queueCell, { color: 'var(--queue)' });
-    const durationCell = listCell(formatDuration(duration), 0.75, {
-      mono: true,
-      align: 'right',
-      title: duration === null ? 'ms 缺失' : `ms ${formatDuration(duration)}`,
-    });
-    if (duration !== null && duration >= SLOW_MS) setStyle(durationCell, { color: 'var(--slow)' });
-
-    const statusCell = el('span');
-    setStyle(statusCell, {
-      display: 'flex',
-      alignItems: 'center',
-      flex: '0.8 1 0%',
-      minWidth: '0',
-    });
-    add(statusCell, status === '' ? el('span', 'muted', '—') : badge(status, statusTone(status)));
+    for (const column of currentColumns()) {
+      row.appendChild(buildColumnCell(column, event));
+    }
 
     const chevron = icon('chevron-right', 14);
     chevron.style.flex = '0 0 auto';
     chevron.style.color = 'var(--text-faint)';
-
-    add(
-      row,
-      listCell(time === null ? '—' : formatTime(time), 1.15, {
-        title: formatTimestamp(event.ts ?? null),
-      }),
-      listCell(eventText(event, 'client') ?? eventText(event, 'binding') ?? '—', 1.5),
-      listCell(eventText(event, 'tool') ?? eventText(event, 'method') ?? event.event ?? '—', 1.75, {
-        mono: true,
-      }),
-      listCell(eventText(event, 'mode') ?? eventText(event, 'concurrency') ?? '—', 0.75),
-      queueCell,
-      durationCell,
-      statusCell,
-      listCell(evalLabel(event), 1.35, { mono: true }),
-      chevron,
-    );
+    row.appendChild(chevron);
 
     row.addEventListener('click', () => openEvent(event));
     row.addEventListener('keydown', (keyboard) => {
@@ -1236,6 +1464,81 @@ export function createAuditPage(context: PageContext): PageHandle {
       }
     });
     return row;
+  }
+
+  function buildColumnCell(column: AuditColumn, event: AuditEvent): HTMLElement {
+    switch (column.key) {
+      case 'time': {
+        const time = parseEventTime(event);
+        return listCell(time === null ? '—' : formatTime(time), column.flex, {
+          title: formatTimestamp(event.ts ?? null),
+        });
+      }
+      case 'client':
+        return listCell(eventClientLabel(event), column.flex);
+      case 'server': {
+        const serverId = eventText(event, 'server') ?? eventText(event, 'serverId');
+        return listCell(serverId ?? '—', column.flex, {
+          mono: true,
+          title: serverId ?? 'server 缺失',
+        });
+      }
+      case 'tool':
+        return listCell(eventSubject(event), column.flex, { mono: true });
+      case 'mode':
+        return listCell(eventModeLabel(event), column.flex);
+      case 'queueMs': {
+        const queueMs = asNumber(event['queueMs']);
+        const cell = listCell(formatDuration(queueMs), column.flex, {
+          mono: true,
+          align: 'right',
+          title: queueMs === null ? 'queueMs 缺失' : `queueMs ${formatDuration(queueMs)}`,
+        });
+        if (queueMs !== null && queueMs >= 500) setStyle(cell, { color: 'var(--queue)' });
+        return cell;
+      }
+      case 'ms': {
+        const duration = eventDuration(event);
+        const cell = listCell(formatDuration(duration), column.flex, {
+          mono: true,
+          align: 'right',
+          title: duration === null ? 'ms 缺失' : `ms ${formatDuration(duration)}`,
+        });
+        if (duration !== null && duration >= SLOW_MS) setStyle(cell, { color: 'var(--slow)' });
+        return cell;
+      }
+      case 'status':
+        return buildStatusCell(event, column.flex);
+      case 'eval':
+        return listCell(evalLabel(event), column.flex, { mono: true });
+      default:
+        return listCell('—', column.flex);
+    }
+  }
+
+  function buildStatusCell(event: AuditEvent, flex: number): HTMLElement {
+    const status = eventStatus(event);
+    const statusCell = el('span');
+    setStyle(statusCell, {
+      display: 'flex',
+      alignItems: 'center',
+      flex: `${flex} 1 0%`,
+      minWidth: '0',
+    });
+    if (status === '') {
+      add(statusCell, el('span', 'muted', '—'));
+    } else {
+      const pill = badge(status, statusTone(status));
+      const outcome = eventText(event, 'outcome');
+      if (outcome !== null) pill.title = `outcome ${outcome}`;
+      add(statusCell, pill);
+    }
+    if (eventCancelled(event)) {
+      // Display-only marker; `cancelled` stays out of the status vocabulary (§4.6).
+      setStyle(statusCell, { gap: '4px' });
+      add(statusCell, el('span', 'muted', '已取消'));
+    }
+    return statusCell;
   }
 
   function listCell(text: string, flex: number, options: CellOptions = {}): HTMLElement {
@@ -1256,7 +1559,16 @@ export function createAuditPage(context: PageContext): PageHandle {
 
   function listRowLabel(event: AuditEvent): string {
     const time = parseEventTime(event);
-    return `${time === null ? 'unknown time' : formatTimestamp(time)} ${event.event ?? 'event'} ${eventText(event, 'tool') ?? eventText(event, 'method') ?? ''}`;
+    const parts = [
+      time === null ? 'unknown time' : formatTimestamp(time),
+      event.event ?? 'event',
+      eventSubject(event),
+    ];
+    const serverId = eventText(event, 'serverId');
+    if (serverId !== null) parts.push(serverId);
+    const outcome = eventText(event, 'outcome');
+    if (outcome !== null) parts.push(outcome);
+    return parts.join(' ');
   }
 
   function evalLabel(event: AuditEvent): string {
@@ -1268,6 +1580,49 @@ export function createAuditPage(context: PageContext): PageHandle {
     return taskId === null ? '—' : formatId(taskId, 14);
   }
 
+  /** `emptyState` plus an action row, so an empty table always suggests a next step. */
+  function actionEmptyState(
+    title: string,
+    hint: string,
+    actions: readonly HTMLElement[],
+  ): HTMLElement {
+    const box = emptyState(title, hint);
+    const body = box.querySelector<HTMLElement>('.empty-body');
+    if (body !== null && actions.length > 0) {
+      const toolbar = el('div', 'toolbar');
+      setStyle(toolbar, { marginTop: '10px', justifyContent: 'center' });
+      add(toolbar, ...actions);
+      body.appendChild(toolbar);
+    }
+    return box;
+  }
+
+  /** One-line "what this is / how to read it" hint inside a card. */
+  function helpText(text: string): HTMLElement {
+    const hint = el('p', 'muted', text);
+    setStyle(hint, { fontSize: '11.5px', lineHeight: '1.55', maxWidth: '760px' });
+    return hint;
+  }
+
+  function rangeLabel(minutes: number): string {
+    const preset = RANGE_OPTIONS.find((option) => option.value === String(minutes));
+    if (preset !== undefined) return preset.label;
+    if (minutes % 1_440 === 0) return `最近 ${minutes / 1_440} 天`;
+    if (minutes % 60 === 0) return `最近 ${minutes / 60} 小时`;
+    return `最近 ${minutes} 分钟`;
+  }
+
+  function refreshEvents(): void {
+    loadToken += 1;
+    state.loading = true;
+    state.error = null;
+    state.errorCode = null;
+    renderBanner();
+    renderNow();
+    void loadFirstPage(loadToken);
+    void loadStats();
+  }
+
   function renderFooter(): void {
     listFooter.replaceChildren();
     const summary = el('span', 'muted', listSummary());
@@ -1277,17 +1632,11 @@ export function createAuditPage(context: PageContext): PageHandle {
       icon: 'download',
       disabled: state.exporting,
     });
-    const refresh = button(
-      '刷新',
-      () => {
-        loadToken += 1;
-        state.loading = true;
-        renderNow();
-        void loadFirstPage(loadToken);
-        void loadStats();
-      },
-      { variant: 'ghost', size: 'sm', icon: 'refresh' },
-    );
+    const refresh = button('刷新', () => refreshEvents(), {
+      variant: 'ghost',
+      size: 'sm',
+      icon: 'refresh',
+    });
     const more = button('加载更多', () => void loadMore(), {
       variant: 'secondary',
       size: 'sm',
@@ -1313,7 +1662,7 @@ export function createAuditPage(context: PageContext): PageHandle {
     const traceHost = el('div');
     const framesHost = el('div');
     add(content, traceHost, framesHost);
-    drawer.open(eventText(event, 'tool') ?? event.event ?? '事件详情', content);
+    drawer.open(eventSubject(event), content);
 
     void loadTrace(event, traceHost, ticket);
     void loadFrames(event, framesHost, ticket);
@@ -1321,10 +1670,13 @@ export function createAuditPage(context: PageContext): PageHandle {
 
   function buildEventSummary(event: AuditEvent): HTMLElement {
     const status = eventStatus(event);
+    const actions: HTMLSpanElement[] = [];
+    if (status !== '') actions.push(badge(status, statusTone(status)));
+    if (eventCancelled(event)) actions.push(badge('已取消', 'info'));
     const card = cardSection({
       title: '事件概要',
       icon: 'info',
-      ...(status === '' ? {} : { actions: badge(status, statusTone(status)) }),
+      ...(actions.length === 0 ? {} : { actions }),
     });
 
     const entries: Array<{ label: string; value: Node | string; mono?: boolean }> = [
@@ -1334,8 +1686,14 @@ export function createAuditPage(context: PageContext): PageHandle {
       { label: 'binding', value: eventText(event, 'binding') ?? 'unbound', mono: true },
       { label: 'exec', value: eventText(event, 'exec') ?? '—', mono: true },
       { label: 'evalId', value: formatNumber(asNumber(event['evalId'])) },
-      { label: '工具', value: eventText(event, 'tool') ?? eventText(event, 'method') ?? '—', mono: true },
-      { label: 'server', value: eventText(event, 'server') ?? '—', mono: true },
+      { label: '工具 / kind', value: eventSubject(event), mono: true },
+      {
+        label: 'server / serverId',
+        value: eventText(event, 'server') ?? eventText(event, 'serverId') ?? '—',
+        mono: true,
+      },
+      { label: 'kind', value: eventText(event, 'kind') ?? '—', mono: true },
+      { label: 'outcome', value: eventText(event, 'outcome') ?? '—' },
       {
         label: 'queueMs / ms',
         value: `${formatDuration(asNumber(event['queueMs']))} / ${formatDuration(eventDuration(event))}`,
@@ -1390,7 +1748,13 @@ export function createAuditPage(context: PageContext): PageHandle {
       host.replaceChildren(buildGanttSection(events, exec, evalId));
     } catch (error) {
       if (destroyed || ticket !== drawerTicket) return;
-      host.replaceChildren(notice(`eval 轨迹读取失败：${describeError(error)}`, 'error'));
+      const hint = errorActionHint(
+        error instanceof ApiError ? error.code : undefined,
+        '检查 eval 轨迹接口后重试。',
+      );
+      host.replaceChildren(
+        notice(`eval 轨迹读取失败：${describeError(error)}。${hint}`, 'error'),
+      );
     }
   }
 
@@ -1407,6 +1771,12 @@ export function createAuditPage(context: PageContext): PageHandle {
     });
 
     const spans = buildGanttSpans(events);
+    add(
+      card.body,
+      helpText(
+        '怎么读：每行一次工具调用，横轴为时间；半透明黄色段是排队（queueMs），实心条是执行（ms），红色条表示该次调用失败。',
+      ),
+    );
     if (spans.length === 0) {
       add(card.body, emptyState('这次 eval 没有 tool_call/tool_result。', '甘特只画工具调用；其他事件见原始轨迹。'));
     } else {
@@ -1608,7 +1978,11 @@ export function createAuditPage(context: PageContext): PageHandle {
       host.replaceChildren(buildFramesSection(response, mcp, id));
     } catch (error) {
       if (destroyed || ticket !== drawerTicket) return;
-      host.replaceChildren(notice(`协议帧读取失败：${describeError(error)}`, 'error'));
+      const hint = errorActionHint(
+        error instanceof ApiError ? error.code : undefined,
+        '确认 mcp / id 与时间范围后重试。',
+      );
+      host.replaceChildren(notice(`协议帧读取失败：${describeError(error)}。${hint}`, 'error'));
     }
   }
 
@@ -1647,8 +2021,20 @@ export function createAuditPage(context: PageContext): PageHandle {
     });
 
     const frames = Array.isArray(response.frames) ? response.frames : [];
+    add(
+      card.body,
+      helpText(
+        '怎么读：同一 request id 的请求与响应并排显示；左列是 params，右列是 result 或 error，durMs 为往返耗时。',
+      ),
+    );
     if (frames.length === 0) {
-      add(card.body, emptyState('没有匹配的协议帧。', '协议帧模式可能为 off，或请求/响应不在当前时间范围内。'));
+      add(
+        card.body,
+        emptyState(
+          '没有匹配的协议帧。',
+          '协议帧记录模式可能为 off（关闭后不落盘），或这对请求/响应不在当前筛选的时间范围内；可调整时间范围后重试。',
+        ),
+      );
       return card.element;
     }
     for (const frame of frames.slice(0, FRAME_LIMIT)) {
@@ -1763,6 +2149,36 @@ export function createAuditPage(context: PageContext): PageHandle {
     return null;
   }
 
+  /** Tool for calls; `kind` for `ai_run`; the event name as the last resort. */
+  function eventSubject(event: AuditEvent): string {
+    return (
+      eventText(event, 'tool') ??
+      eventText(event, 'method') ??
+      eventText(event, 'kind') ??
+      event.event ??
+      '—'
+    );
+  }
+
+  function eventClientLabel(event: AuditEvent): string {
+    if (event.event === 'ai_run') {
+      const client = eventText(event, 'client') ?? 'admin';
+      const serverId = eventText(event, 'serverId') ?? eventText(event, 'server');
+      return serverId === null ? client : `${client} · ${serverId}`;
+    }
+    return eventText(event, 'client') ?? eventText(event, 'binding') ?? '—';
+  }
+
+  function eventModeLabel(event: AuditEvent): string {
+    if (event.event === 'ai_run') {
+      const outcome = eventText(event, 'outcome');
+      const trigger = eventText(event, 'trigger');
+      if (outcome !== null && trigger !== null) return `${outcome} · ${trigger}`;
+      return outcome ?? trigger ?? '—';
+    }
+    return eventText(event, 'mode') ?? eventText(event, 'concurrency') ?? '—';
+  }
+
   function eventDuration(event: AuditEvent): number | null {
     return (
       asNumber(event['ms']) ??
@@ -1770,21 +2186,6 @@ export function createAuditPage(context: PageContext): PageHandle {
       asNumber(event['elapsedMs']) ??
       asNumber(event['durMs'])
     );
-  }
-
-  function eventStatus(event: AuditEvent): string {
-    const explicit = event['status'];
-    if (typeof explicit === 'string' && explicit !== '') return explicit;
-    if (event.event === 'tool_result') return event['ok'] === false ? 'error' : 'ok';
-    if (event.event === 'eval_end') {
-      if (event['outcome'] === 'timeout') return 'timeout';
-      if (event['outcome'] === 'cancelled') return 'cancelled';
-      if (event['outcome'] === 'failed' || event['outcome'] === 'error') return 'error';
-      return 'ok';
-    }
-    if (event['ok'] === true) return 'ok';
-    if (event['ok'] === false) return 'error';
-    return '';
   }
 
   // -------------------------------------------------------------------------
@@ -1799,15 +2200,19 @@ export function createAuditPage(context: PageContext): PageHandle {
     }
   });
 
+  renderRangeSummary();
   renderNow();
   void loadFirstPage(loadToken);
   void loadStats();
+  syncLiveStream();
 
   return {
     element: section,
     destroy(): void {
       destroyed = true;
       drawerTicket += 1;
+      narrowMedia?.removeEventListener('change', onNarrowChange);
+      stopStream();
       polling.stop();
       removeVisibility();
       controller.abort();
@@ -1824,6 +2229,73 @@ export function createAuditPage(context: PageContext): PageHandle {
 // ---------------------------------------------------------------------------
 // Module-level pure helpers
 // ---------------------------------------------------------------------------
+
+/** Status mapping shared by the table, trend and live filter (`docs/03 §4.6`).
+ *
+ * Mirrors the server-side mapping in `server/src/audit/query.ts` so the live SSE rows,
+ * the trend buckets and `/audit/query?status=` agree. For `eval_end` only
+ * `outcome=timeout` is `timeout`: every other outcome — including `cancelled`, `failed`
+ * and `worker_dead` — is `ok`, so cancellation is surfaced through
+ * {@link eventCancelled} instead of a status value. For `tool_result` only `ok=false` is
+ * `error`; `ai_run` uses its `outcome` (`error`/`ok`, design 08 §2.4) because the admin
+ * AI call has no `ok` column. Other event types keep a display-only fallback.
+ */
+export function eventStatus(event: AuditEvent): string {
+  const explicit = event['status'];
+  if (typeof explicit === 'string' && explicit !== '') return normalizeExplicitStatus(explicit);
+  if (event.event === 'tool_result') return event['ok'] === false ? 'error' : 'ok';
+  if (event.event === 'eval_end') return event['outcome'] === 'timeout' ? 'timeout' : 'ok';
+  if (event.event === 'ai_run') return event['outcome'] === 'error' ? 'error' : 'ok';
+  // Other events may still carry `outcome`; keep a display-friendly fallback for those
+  // without letting `cancelled` leak into the status vocabulary.
+  const outcome = event['outcome'];
+  if (typeof outcome === 'string' && outcome !== '') {
+    const normalized = outcome.toLowerCase();
+    if (normalized === 'timeout') return 'timeout';
+    if (normalized === 'failed' || normalized === 'error') return 'error';
+    return 'ok';
+  }
+  if (event['ok'] === true) return 'ok';
+  if (event['ok'] === false) return 'error';
+  return '';
+}
+
+/** `cancelled` is display-only (`design 03 §4.6`); it never participates in status filters. */
+function normalizeExplicitStatus(status: string): string {
+  const normalized = status.toLowerCase();
+  return normalized === 'cancelled' || normalized === 'canceled' ? 'ok' : status;
+}
+
+/** Display-only cancellation hint for the list and drawer; does not affect filtering. */
+export function eventCancelled(event: AuditEvent): boolean {
+  const outcome = event['outcome'];
+  if (typeof outcome !== 'string' || outcome === '') return false;
+  const normalized = outcome.toLowerCase();
+  return normalized === 'cancelled' || normalized === 'canceled';
+}
+
+/**
+ * Normalizes one `/audit/stream` payload. The server publishes one event object per
+ * frame; arrays and `{ events: [...] }` wrappers are accepted for forward compatibility,
+ * and malformed frames are ignored instead of breaking the live view.
+ */
+export function auditEventsFromStreamPayload(data: unknown): AuditEvent[] {
+  if (Array.isArray(data)) return data.filter(isAuditEvent);
+  if (isRecord(data)) {
+    const nested = data['events'];
+    if (Array.isArray(nested)) return nested.filter(isAuditEvent);
+    if (isAuditEvent(data)) return [data];
+  }
+  return [];
+}
+
+function isAuditEvent(value: unknown): value is AuditEvent {
+  return isRecord(value) && typeof value['ts'] === 'string' && typeof value['event'] === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function compareByTime(left: AuditEvent, right: AuditEvent): number {
   const a = parseEventTime(left) ?? 0;
@@ -1866,7 +2338,21 @@ function asNumber(value: unknown): number | null {
 }
 
 function eventKey(event: AuditEvent): string {
-  const fields = ['ts', 'event', 'exec', 'evalId', 'callSeq', 'id', 'rpcId', 'tool', 'taskId', 'mcp'];
+  const fields = [
+    'ts',
+    'event',
+    'exec',
+    'evalId',
+    'callSeq',
+    'id',
+    'rpcId',
+    'tool',
+    'taskId',
+    'mcp',
+    'kind',
+    'serverId',
+    'proposalId',
+  ];
   return fields
     .map((field) => {
       const value = event[field];
@@ -1887,4 +2373,220 @@ function callKey(event: AuditEvent): string | null {
 
 function exportStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+// ---------------------------------------------------------------------------
+// Filter and column persistence (pure; storage access is guarded separately)
+// ---------------------------------------------------------------------------
+
+/** First-entry defaults: the last hour (local time), live on, no other filters. */
+export function defaultAuditFilters(now: number = Date.now()): AuditFilters {
+  return {
+    from: toDateTimeLocal(now - Number(DEFAULT_RANGE) * 60_000),
+    to: '',
+    event: '',
+    client: '',
+    binding: '',
+    tool: '',
+    server: '',
+    status: '',
+    minMs: '',
+    live: true,
+    range: DEFAULT_RANGE,
+  };
+}
+
+/**
+ * Reads the versioned filter record. Preset ranges are recomputed against `now` so
+ * "最近 15 分钟" means the last 15 minutes on the next visit, not a stale window;
+ * custom ranges keep their stored from/to. Corrupt or unknown payloads fall back to
+ * {@link defaultAuditFilters}.
+ */
+export function parsePersistedAuditFilters(
+  raw: string | null,
+  now: number = Date.now(),
+): AuditFilters {
+  const fallback = defaultAuditFilters(now);
+  if (raw === null || raw.trim() === '') return fallback;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (!isRecord(parsed) || parsed['version'] !== STORAGE_VERSION) return fallback;
+  const range = parsed['range'];
+  if (typeof range !== 'string') return fallback;
+
+  let from: string;
+  let to: string;
+  if (range !== '') {
+    if (!isPresetRange(range)) return fallback;
+    from = toDateTimeLocal(now - Number(range) * 60_000);
+    to = '';
+  } else {
+    const storedFrom = parsed['from'];
+    const storedTo = parsed['to'];
+    if (typeof storedFrom !== 'string' || typeof storedTo !== 'string') return fallback;
+    if (storedFrom.trim() === '' && storedTo.trim() === '') return fallback;
+    if (storedFrom.trim() !== '' && !isDateTimeLocal(storedFrom)) return fallback;
+    if (storedTo.trim() !== '' && !isDateTimeLocal(storedTo)) return fallback;
+    from = storedFrom;
+    to = storedTo;
+  }
+
+  return {
+    from,
+    to,
+    event: pickOption(parsed['event'], EVENT_OPTIONS),
+    client: pickString(parsed['client']),
+    binding: pickString(parsed['binding']),
+    tool: pickString(parsed['tool']),
+    server: pickString(parsed['server']),
+    status: pickOption(parsed['status'], STATUS_OPTIONS),
+    minMs: pickMinMs(parsed['minMs']),
+    live: typeof parsed['live'] === 'boolean' ? parsed['live'] : true,
+    range,
+  };
+}
+
+export function serializeAuditFilters(filters: AuditFilters): string {
+  return JSON.stringify({
+    version: STORAGE_VERSION,
+    range: filters.range,
+    from: filters.from,
+    to: filters.to,
+    event: filters.event,
+    client: filters.client,
+    binding: filters.binding,
+    tool: filters.tool,
+    server: filters.server,
+    status: filters.status,
+    minMs: filters.minMs,
+    live: filters.live,
+  });
+}
+
+/** Preset minutes when `range` is set; otherwise the span of a custom range. */
+export function rangeMinutes(
+  filters: Pick<AuditFilters, 'range' | 'from' | 'to'>,
+  now: number = Date.now(),
+): number | null {
+  if (isPresetRange(filters.range)) return Number(filters.range);
+  const from = parseTime(filters.from);
+  if (from === null) return null;
+  const to = parseTime(filters.to) ?? now;
+  return Math.max(0, (to - from) / 60_000);
+}
+
+/** Next larger preset; unknown/empty spans start at the one-hour default. */
+export function nextRangeMinutes(current: number | null): number {
+  const fallback = Number(DEFAULT_RANGE);
+  if (current === null || !Number.isFinite(current) || current <= 0) return fallback;
+  return (
+    PRESET_MINUTES.find((minutes) => minutes > current) ??
+    PRESET_MINUTES[PRESET_MINUTES.length - 1] ??
+    fallback
+  );
+}
+
+/** "扩大时间范围" target: next preset, or twice the span once past the last preset. */
+export function expandedRangeMinutes(current: number | null): number {
+  if (current === null || !Number.isFinite(current) || current <= 0) {
+    return Number(DEFAULT_RANGE);
+  }
+  const next = nextRangeMinutes(current);
+  return next > current ? next : current * 2;
+}
+
+/** All columns start visible; the picker persists one boolean per column. */
+export function defaultColumnVisibility(): Record<string, boolean> {
+  const visibility: Record<string, boolean> = {};
+  for (const column of AUDIT_COLUMNS) visibility[column.key] = true;
+  return visibility;
+}
+
+/** Corrupt payloads, a version mismatch or a non-object `columns` use the defaults. */
+export function parsePersistedColumns(raw: string | null): Record<string, boolean> {
+  const fallback = defaultColumnVisibility();
+  if (raw === null || raw.trim() === '') return fallback;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (!isRecord(parsed) || parsed['version'] !== STORAGE_VERSION) return fallback;
+  const stored = parsed['columns'];
+  if (!isRecord(stored)) return fallback;
+
+  const visibility = { ...fallback };
+  for (const column of AUDIT_COLUMNS) {
+    const value = stored[column.key];
+    if (typeof value === 'boolean') visibility[column.key] = value;
+  }
+  return visibility;
+}
+
+export function serializeColumnVisibility(visibility: Record<string, boolean>): string {
+  const columns: Record<string, boolean> = {};
+  for (const column of AUDIT_COLUMNS) columns[column.key] = visibility[column.key] !== false;
+  return JSON.stringify({ version: STORAGE_VERSION, columns });
+}
+
+/** Fixed columns ignore the picker; secondary columns disappear on narrow viewports. */
+export function visibleAuditColumns(
+  visibility: Record<string, boolean>,
+  narrow: boolean,
+): readonly AuditColumn[] {
+  return AUDIT_COLUMNS.filter((column) => {
+    if (column.fixed !== true && visibility[column.key] === false) return false;
+    return !(narrow && column.secondary === true);
+  });
+}
+
+function isPresetRange(value: string): boolean {
+  return RANGE_OPTIONS.some((option) => option.value !== '' && option.value === value);
+}
+
+/** Accepts the browser `datetime-local` shape; a bare date would silently clear the input. */
+function isDateTimeLocal(value: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(value) &&
+    parseTime(value) !== null
+  );
+}
+
+function pickOption(value: unknown, entries: ReadonlyArray<{ value: string }>): string {
+  return typeof value === 'string' && entries.some((entry) => entry.value === value) ? value : '';
+}
+
+function pickString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function pickMinMs(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') return '';
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? value : '';
+}
+
+function readStorage(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Blocked storage must not break filtering or the column picker.
+  }
 }

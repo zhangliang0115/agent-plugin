@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -84,6 +84,8 @@ async function fixture(
   options: {
     spawn?: SpawnFn;
     extraEnv?: Record<string, string>;
+    /** Use the real `--version`/`--help` gate instead of the pass-through stub. */
+    realProbe?: boolean;
   } = {},
 ): Promise<RunnerFixture> {
   const dir = await mkdtemp(join(tmpdir(), 'repl-ai-runner-'));
@@ -94,6 +96,9 @@ async function fixture(
     dataDir: dir,
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
     ...(options.extraEnv === undefined ? {} : { extraEnv: options.extraEnv }),
+    ...(options.realProbe === true
+      ? {}
+      : { probe: async () => ({ ok: true }) as const }),
   });
   return { runner, dir };
 }
@@ -358,4 +363,134 @@ test('timeout kills the fixture process group', async (t) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(gone, true, 'fixture process must be gone after the timeout');
+});
+
+test('CLI gate probes --version/--help once per resolved path', async (t) => {
+  await chmod(FIXTURE, 0o755);
+  const probeLog = join(tmpdir(), `repl-ai-probe-${process.pid}-${Date.now()}`);
+  await rm(probeLog, { force: true });
+  t.after(async () => {
+    await rm(probeLog, { force: true });
+  });
+  const { runner } = await fixture(t, {
+    realProbe: true,
+    extraEnv: { FAKE_CLAUDE_PROBE_LOG: probeLog },
+  });
+
+  await runner.run('p', { ...CONFIG, claudeBin: FIXTURE });
+  await runner.run('p', { ...CONFIG, claudeBin: FIXTURE });
+
+  const lines = (await readFile(probeLog, 'utf8')).trim().split('\n');
+  assert.deepEqual(lines, ['version', 'help'], 'probes must be cached by resolved path');
+});
+
+test('CLI gate reports the missing flags as AI_RUNNER_UNAVAILABLE', async (t) => {
+  await chmod(FIXTURE, 0o755);
+  const { runner } = await fixture(t, {
+    realProbe: true,
+    extraEnv: { FAKE_CLAUDE_HELP_MISSING: '--safe-mode,--no-session-persistence' },
+  });
+
+  const error = await expectCode(
+    runner.run('p', { ...CONFIG, claudeBin: FIXTURE }),
+    'AI_RUNNER_UNAVAILABLE',
+  );
+  const details = error.details as { reason?: string; missing?: string[] };
+  assert.equal(error.status, 503);
+  assert.equal(details.reason, 'missing_flags');
+  assert.deepEqual(details.missing, ['--safe-mode', '--no-session-persistence']);
+});
+
+test('CLI gate reports a failing --version probe', async (t) => {
+  await chmod(FIXTURE, 0o755);
+  const { runner } = await fixture(t, {
+    realProbe: true,
+    extraEnv: { FAKE_CLAUDE_VERSION_FAIL: '1' },
+  });
+
+  const error = await expectCode(
+    runner.run('p', { ...CONFIG, claudeBin: FIXTURE }),
+    'AI_RUNNER_UNAVAILABLE',
+  );
+  assert.equal((error.details as { reason?: string }).reason, 'version_exit_3');
+});
+
+test('the run ledger records spawning then running and removes the entry', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'repl-ai-ledger-'));
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const child = new FakeChild();
+  let spawning: Record<string, unknown> | null = null;
+  let runDir = '';
+  const spawn: SpawnFn = (_command, _args, options) => {
+    runDir = String(options.cwd);
+    const file = JSON.parse(readFileSync(join(dir, 'ai-runs.json'), 'utf8')) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    spawning = file.entries[0] ?? null;
+    child.stdout.end(JSON.stringify({ is_error: false, result: '{"ok":true}' }));
+    setTimeout(() => child.emit('close', 0, null), 5);
+    return child as unknown as ChildProcess;
+  };
+
+  const runner = createAiRunner({
+    dataDir: dir,
+    spawn,
+    probe: async () => ({ ok: true }),
+  });
+  const result = await runner.run('p', CONFIG);
+  assert.deepEqual(result.payload, { ok: true });
+
+  assert.ok(spawning !== null);
+  assert.equal(spawning['state'], 'spawning');
+  assert.equal(spawning['pid'], null);
+  assert.equal(typeof spawning['runDir'], 'string');
+  assert.equal(spawning['bootId'] === '', false);
+
+  const after = JSON.parse(readFileSync(join(dir, 'ai-runs.json'), 'utf8')) as {
+    entries: unknown[];
+  };
+  assert.deepEqual(after.entries, []);
+  assert.equal(existsSync(runDir), false, 'run directory must be removed');
+});
+
+
+test('close terminates in-flight process groups and removes run directories', async (t) => {
+  let child: FakeChild | null = null;
+  let spawned: (() => void) | null = null;
+  const spawnSeen = new Promise<void>((resolve) => {
+    spawned = resolve;
+  });
+  const spawn: SpawnFn = () => {
+    child = new FakeChild();
+    spawned?.();
+    spawned = null;
+    return child as unknown as ChildProcess;
+  };
+  const { runner, dir } = await fixture(t, { spawn });
+
+  const run = runner.run('prompt', CONFIG);
+  run.catch(() => undefined);
+  await spawnSeen;
+
+  const runDirs = (await readdir(dir)).filter((name) => name.startsWith('ai-run-'));
+  assert.equal(runDirs.length, 1, 'the run directory exists before close');
+
+  await runner.close();
+  await runner.close();
+
+  const active = child as FakeChild | null;
+  assert.ok(active !== null);
+  assert.ok(
+    active.signals.includes('SIGKILL'),
+    `the process group must be killed: ${active.signals.join(',')}`,
+  );
+  assert.deepEqual(
+    (await readdir(dir)).filter((name) => name.startsWith('ai-run-')),
+    [],
+    'close removes the run directory',
+  );
+  await expectCode(runner.run('again', CONFIG), 'AI_RUNNER_UNAVAILABLE');
 });

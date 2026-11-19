@@ -78,6 +78,12 @@ export interface SettingsStore {
 
 export interface AdminSettingsDeps {
   settings: SettingsStore;
+  /**
+   * Applies a committed capacity snapshot to the running components. Called
+   * after `replace` succeeds; the write is already durable, so a failing hook
+   * is not reported as a failed PATCH.
+   */
+  onSettingsChanged?: (capacity: CapacitySettings) => void | Promise<void>;
 }
 
 const MINIMUM: Record<CapacityKey, number> = {
@@ -190,6 +196,18 @@ export function createAdminSettingsHandler(deps: AdminSettingsDeps): AdminHandle
     return adminJson(200, { settings: normalizeSettings(settings), revision });
   }
 
+  async function notifySettingsChanged(capacity: CapacitySettings): Promise<void> {
+    const hook = deps.onSettingsChanged;
+    if (hook === undefined) return;
+    try {
+      // The hook gets its own copy so a caller cannot mutate the response view.
+      await hook({ ...capacity });
+    } catch {
+      // The settings row is already committed; a runtime apply failure must not
+      // turn a successful PATCH into an error.
+    }
+  }
+
   async function patchSettings(request: AdminRequest): Promise<AdminResponse> {
     const expected = parseIfMatch(request);
     // Validate the body before the precondition so malformed input always gets 400/422.
@@ -206,7 +224,9 @@ export function createAdminSettingsHandler(deps: AdminSettingsDeps): AdminHandle
     validateRelations(next['capacity'] as CapacitySettings);
 
     const { settings, revision } = await deps.settings.replace(next, expected);
-    return adminJson(200, { settings: normalizeSettings(settings), revision });
+    const view = normalizeSettings(settings);
+    await notifySettingsChanged(view.capacity);
+    return adminJson(200, { settings: view, revision });
   }
 
   return adminHandler(async (request): Promise<AdminResponse | null> => {
