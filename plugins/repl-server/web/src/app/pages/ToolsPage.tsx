@@ -774,7 +774,7 @@ export function ToolsPage(): React.ReactElement {
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
                   description={
                     tools.length === 0
-                      ? '该 server 还没有工具行；先点“刷新工具”从上游重拉'
+                      ? '该服务端还没有工具行；先点“刷新工具”从上游重拉'
                       : '没有匹配的工具'
                   }
                 />

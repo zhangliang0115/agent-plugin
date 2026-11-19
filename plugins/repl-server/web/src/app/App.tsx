@@ -1,5 +1,5 @@
 /** Admin shell: sidebar, breadcrumb header, manage tabs, command palette, theme. */
-import { App as AntApp, ConfigProvider, Layout, Menu, Tabs, Button, Alert, Tooltip, Input } from 'antd';
+import { App as AntApp, ConfigProvider, Layout, Menu, Tabs, Button, Alert, Tooltip } from 'antd';
 import {
   AlertOutlined,
   AppstoreOutlined,
@@ -188,14 +188,16 @@ export function App(): React.ReactElement {
                         : '监控 / 报告'}
                 </b>
               </div>
-              <Input
+              <button
+                type="button"
                 className="topbar-search"
-                prefix={<SearchOutlined />}
-                placeholder="搜索页面、服务端（⌘K）"
                 aria-label="搜索页面与服务端"
-                readOnly
                 onClick={() => setPaletteOpen(true)}
-              />
+              >
+                <SearchOutlined />
+                <span className="topbar-search-text">搜索页面、服务端</span>
+                <kbd className="topbar-search-kbd">⌘K</kbd>
+              </button>
               <div className="topbar-actions">
                 <Tooltip title="刷新当前页">
                   <Button

@@ -232,12 +232,12 @@ export function AiPage(): React.ReactElement {
 
   async function generatePreview(): Promise<void> {
     if (selectedServer === null) {
-      message.error('先选择一个 server。');
+      message.error('先选择一个服务端。');
       return;
     }
     const ok = await confirm(
       '生成标注',
-      `将把 ${selectedServer} 的工具名与描述（最多 80 个，每个 400 字符）发送给模型。敏感 server 请取消。继续？`,
+      `将把 ${selectedServer} 的工具名与描述（最多 80 个，每个 400 字符）发送给模型。敏感服务端请取消。继续？`,
       '生成',
     );
     if (!ok) return;
@@ -289,7 +289,7 @@ export function AiPage(): React.ReactElement {
       const serversResponse = await api.get<ServersResponse>('/servers');
       const revision = typeof serversResponse.revision === 'number' ? serversResponse.revision : null;
       if (revision === null) {
-        message.error('没有读取到 server 配置的 revision，请刷新后重试。');
+        message.error('没有读取到服务端配置的 revision，请刷新后重试。');
         return;
       }
       const server = Array.isArray(serversResponse.servers)
@@ -667,7 +667,7 @@ function aiErrorText(error: unknown): string {
     case 'AI_RUNNER_UNAVAILABLE':
       return `找不到或无法启动 Claude CLI：${error.message}。请检查 claudeBin 配置。`;
     case 'SERVER_NOT_ANNOTATABLE':
-      return '该 server 不支持 AI 标注（builtin 或 seed server）。';
+      return '该服务端不支持 AI 标注（内置或种子服务端）。';
     case 'AI_UNKNOWN_TOOL':
       return '标注引用了不存在的工具；请重新生成预览。';
     case 'REVISION_CONFLICT':

@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an

@@ -59,6 +59,10 @@ export function migrate(db: DatabaseSync): number {
       applyV2(db);
       current = 2;
     }
+    if (current < 3) {
+      applyV3(db);
+      current = 3;
+    }
   });
   return current;
 }
@@ -88,17 +92,39 @@ function readUserVersion(db: DatabaseSync): number {
   return row ? Number(row['user_version'] ?? 0) : 0;
 }
 
+/** Seed rows get a usable label/summary/category/tag out of the box. */
+const SEED_SERVERS = [
+  {
+    id: '__official__',
+    label: 'Claude Code 官方工具',
+    summary: 'Claude Code 自带的官方工具集（Read、Write、Bash 等）。',
+    category: 'official',
+    tagsJson: '["official"]',
+    previousLabel: 'Official Claude Code tools',
+  },
+  {
+    id: '__builtin__',
+    label: '内置聚合工具',
+    summary: 'repl-server 自带的聚合工具（run_script、search_tools、describe_tools 等）。',
+    category: 'builtin',
+    tagsJson: '["builtin"]',
+    previousLabel: 'Built-in composite tools',
+  },
+] as const;
+
 function applyV1(db: DatabaseSync): void {
   createSchemaV1(db);
   const now = new Date().toISOString();
   const insertSeed = db.prepare(`
     INSERT INTO servers (
       id, label, transport, args_json, env_json, enabled, connect_mode,
-      tags_json, timeout_ms, max_concurrency, created_at, updated_at, revision
-    ) VALUES (?, ?, 'builtin', '[]', '{}', 1, 'lazy', '[]', 60000, 8, ?, ?, 0)
+      tags_json, summary, category, timeout_ms, max_concurrency,
+      created_at, updated_at, revision
+    ) VALUES (?, ?, 'builtin', '[]', '{}', 1, 'lazy', ?, ?, ?, 60000, 8, ?, ?, 0)
   `);
-  insertSeed.run('__official__', 'Official Claude Code tools', now, now);
-  insertSeed.run('__builtin__', 'Built-in composite tools', now, now);
+  for (const seed of SEED_SERVERS) {
+    insertSeed.run(seed.id, seed.label, seed.tagsJson, seed.summary, seed.category, now, now);
+  }
   db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run('schema_version', '1');
   db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run('revision', '0');
   db.exec('PRAGMA user_version = 1');
@@ -108,4 +134,27 @@ function applyV2(db: DatabaseSync): void {
   createSchemaV2(db);
   db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 2');
+}
+
+/** Backfills the seed rows the V1 defaults left bare; user edits are preserved. */
+function applyV3(db: DatabaseSync): void {
+  const now = new Date().toISOString();
+  const update = db.prepare(`
+    UPDATE servers
+    SET label = ?, summary = ?, category = ?, tags_json = ?, updated_at = ?
+    WHERE id = ? AND label = ? AND tags_json = '[]' AND category IS NULL
+  `);
+  for (const seed of SEED_SERVERS) {
+    update.run(
+      seed.label,
+      seed.summary,
+      seed.category,
+      seed.tagsJson,
+      now,
+      seed.id,
+      seed.previousLabel,
+    );
+  }
+  db.prepare("UPDATE meta SET value = '3' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 3');
 }

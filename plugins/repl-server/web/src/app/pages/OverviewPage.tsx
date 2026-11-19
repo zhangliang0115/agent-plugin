@@ -90,8 +90,8 @@ const CAPACITY_LABELS: ReadonlyArray<{ key: string; label: string; hint: string 
   { key: 'maxWorkers', label: 'worker', hint: '全进程上限' },
   { key: 'maxInFlightEvalsPerExecSession', label: '每执行会话在飞 eval', hint: '异步派发后释放锁' },
   { key: 'maxInFlightEvalsPerBinding', label: '每 binding 在飞 eval', hint: '跨执行会话总量' },
-  { key: 'maxInFlightCallsPerBindingPerServer', label: '每 binding × server 在飞调用', hint: '共享池公平性' },
-  { key: 'maxQueuedCallsPerBindingPerServer', label: '每 binding × server 排队', hint: '超出返回 MCP_QUEUE_FULL' },
+  { key: 'maxInFlightCallsPerBindingPerServer', label: '每 binding × 服务端在飞调用', hint: '共享池公平性' },
+  { key: 'maxQueuedCallsPerBindingPerServer', label: '每 binding × 服务端排队', hint: '超出返回 MCP_QUEUE_FULL' },
   { key: 'evictIdleMs', label: '容量淘汰空闲阈值', hint: '按 lastEvalAt 判定' },
 ];
 
@@ -230,7 +230,7 @@ export function OverviewPage(): React.ReactElement {
       const allServers = normalizeServers(settledValue(serversResult));
       const servers =
         allServers === null ? null : allServers.filter((server) => !isBuiltinServer(server));
-      if (servers === null) errors.push(`server 列表${settledProblem(serversResult)}`);
+      if (servers === null) errors.push(`服务端列表${settledProblem(serversResult)}`);
 
       const clientsTotal = countClients(settledValue(clientsResult));
       if (clientsTotal === null) errors.push(`客户端绑定${settledProblem(clientsResult)}`);
@@ -252,7 +252,7 @@ export function OverviewPage(): React.ReactElement {
           const counts = await Promise.all(servers.map((server) => fetchToolCount(server.id)));
           if (!aliveRef.current) return;
           const known = counts.filter((count): count is number => count !== null);
-          if (known.length < counts.length) errors.push('部分 server 的工具目录读取失败');
+          if (known.length < counts.length) errors.push('部分服务端的工具目录读取失败');
           toolCount = known.length === 0 ? null : known.reduce((sum, count) => sum + count, 0);
         }
       }
@@ -478,7 +478,7 @@ export function OverviewPage(): React.ReactElement {
               message={guidance.errors.length === 0 ? '暂无需要关注的问题' : '检查数据不完整'}
               description={
                 guidance.errors.length === 0
-                  ? 'server 状态、告警开关与问题报告均未发现异常。'
+                  ? '服务端状态、告警开关与问题报告均未发现异常。'
                   : '部分来源读取失败，刷新后重试；已读取到的来源未发现异常。'
               }
             />
@@ -669,8 +669,8 @@ function KpiSection({
           value={toolCount === null ? '—' : formatNumber(toolCount)}
           hint={
             toolCount === null
-              ? '工具目录暂不可用；接入 server 后刷新工具。'
-              : '已接入 server 的工具目录合计'
+              ? '工具目录暂不可用；接入服务端后刷新工具。'
+              : '已接入服务端的工具目录合计'
           }
           status={toolState.label}
           tone={toolState.tone}
@@ -850,7 +850,7 @@ function evaluateAttention(input: {
         id: 'servers-empty',
         tone: 'info',
         title: '还没有接入服务端',
-        detail: '先添加一个 MCP server，连接并在「Tools」刷新后才能发现工具。',
+        detail: '先添加一个 MCP 服务端，连接并在「工具」页刷新后才能发现工具。',
         actionLabel: '去接入',
         target: manageServers,
       });
@@ -862,8 +862,8 @@ function evaluateAttention(input: {
         items.push({
           id: 'servers-disabled',
           tone: 'queue',
-          title: `${formatNumber(disabled.length)} 个 server 已停用`,
-          detail: '停用的 server 不会暴露工具，也不会接新调用。',
+          title: `${formatNumber(disabled.length)} 个服务端已停用`,
+          detail: '停用的服务端不会暴露工具，也不会接新调用。',
           actionLabel: '去启用',
           target: manageServers,
         });
@@ -877,10 +877,10 @@ function evaluateAttention(input: {
         items.push({
           id: 'servers-failed',
           tone: 'error',
-          title: `${formatNumber(failed.length)} 个 server 连接失败`,
+          title: `${formatNumber(failed.length)} 个服务端连接失败`,
           detail:
             first?.lastError === undefined
-              ? '检查命令、URL 与凭据后重启 server。'
+              ? '检查命令、URL 与凭据后重启服务端。'
               : `最近的错误：${first.lastError}`,
           actionLabel: '查看并重启',
           target: manageServers,
@@ -895,7 +895,7 @@ function evaluateAttention(input: {
         items.push({
           id: 'servers-unstable',
           tone: 'queue',
-          title: `${formatNumber(unstable.length)} 个 server 连接不稳定`,
+          title: `${formatNumber(unstable.length)} 个服务端连接不稳定`,
           detail: '重连或降级期间，工具调用可能失败或变慢。',
           actionLabel: '查看状态',
           target: manageServers,
@@ -908,8 +908,8 @@ function evaluateAttention(input: {
       items.push({
         id: 'servers-disabled-summary',
         tone: 'queue',
-        title: `${formatNumber(disabled)} 个 server 已停用`,
-        detail: 'server 明细暂不可用；到管理页确认哪些 server 被停用。',
+        title: `${formatNumber(disabled)} 个服务端已停用`,
+        detail: '服务端明细暂不可用；到管理页确认哪些服务端被停用。',
         actionLabel: '去查看',
         target: manageServers,
       });
@@ -956,7 +956,7 @@ function evaluateAttention(input: {
       id: 'annotations-pending',
       tone: 'queue',
       title: `${formatNumber(input.pendingAnnotations)} 条 AI 标注待处理`,
-      detail: '新接入 server 自动生成的 summary / tags 建议等待审阅。',
+      detail: '新接入服务端自动生成的摘要与标签建议等待审阅。',
       actionLabel: '去审阅',
       target: { path: '/manage', tab: 'ai' },
     });
@@ -1005,7 +1005,7 @@ function stepMeta(id: OnboardingStepId): {
         title: '接入一个服务端',
         actionLabel: '去接入',
         target: { path: '/manage', tab: 'servers' },
-        unknownDetail: 'server 列表暂不可用，刷新后重试。',
+        unknownDetail: '服务端列表暂不可用，刷新后重试。',
       };
     case 'tools':
       return {
@@ -1027,9 +1027,9 @@ function stepMeta(id: OnboardingStepId): {
 function stepTodoDetail(id: OnboardingStepId): string {
   switch (id) {
     case 'servers':
-      return '还没有注册 server。';
+      return '还没有注册服务端。';
     case 'tools':
-      return '工具数为 0；连接 server 后点「刷新工具」。';
+      return '工具数为 0；连接服务端后点「刷新工具」。';
     case 'clients':
       return '还没有客户端绑定；创建后明文 token 只显示一次。';
   }
@@ -1039,7 +1039,7 @@ function stepDoneDetail(step: OnboardingStep): string {
   const amount = step.count === null ? '未知' : formatNumber(step.count);
   switch (step.id) {
     case 'servers':
-      return `已注册 ${amount} 个 server。`;
+      return `已注册 ${amount} 个服务端。`;
     case 'tools':
       return `工具目录里有 ${amount} 个工具。`;
     case 'clients':

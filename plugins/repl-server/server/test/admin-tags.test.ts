@@ -29,11 +29,23 @@ function memoryStore(initial: StoredSettings = {}, revision = 1): SettingsStore 
   };
 }
 
-test('GET /tags returns an empty dictionary by default', async () => {
+test('GET /tags returns the built-in dictionary until it is replaced', async () => {
   const handler = createAdminTagsHandler({ settings: memoryStore({ capacity: {} }, 3) });
   const response = await handler({ method: 'GET', path: '/tags' });
   assert.equal(response?.status, 200);
-  assert.deepEqual(response?.body, { tags: [], revision: 3 });
+  const body = response?.body as { tags: Array<{ key: string; zh: string; en: string }>; revision: number };
+  assert.equal(body.revision, 3);
+  assert.ok(body.tags.length >= 10);
+  assert.deepEqual(
+    body.tags.find((tag) => tag.key === 'official'),
+    { key: 'official', zh: '官方', en: 'Official' },
+  );
+});
+
+test('an explicitly saved empty dictionary stays empty', async () => {
+  const handler = createAdminTagsHandler({ settings: memoryStore({ tagDictionary: [] }, 2) });
+  const response = await handler({ method: 'GET', path: '/tags' });
+  assert.deepEqual(response?.body, { tags: [], revision: 2 });
 });
 
 test('PUT /tags replaces the dictionary and preserves other settings', async () => {

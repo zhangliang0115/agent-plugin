@@ -80,8 +80,8 @@ const QUOTA_KEYS: readonly ClientQuotaKey[] = [
 const QUOTA_LABELS: Record<ClientQuotaKey, string> = {
   maxExecSessionsPerBinding: '执行会话',
   maxInFlightEvalsPerBinding: '并发 eval',
-  maxInFlightCallsPerBindingPerServer: '单 server 并发调用',
-  maxQueuedCallsPerBindingPerServer: '单 server 排队调用',
+  maxInFlightCallsPerBindingPerServer: '单服务端并发调用',
+  maxQueuedCallsPerBindingPerServer: '单服务端排队调用',
 };
 
 export function ClientsPage(): React.ReactElement {
@@ -145,7 +145,7 @@ export function ClientsPage(): React.ReactElement {
         ),
       },
       {
-        title: '可见 server',
+        title: '可见服务端',
         dataIndex: 'allowedServers',
         width: 220,
         render: (value: string[] | null) =>

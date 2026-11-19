@@ -37,6 +37,25 @@ const MAX_TAGS = 200;
 const TAG_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/u;
 const LABEL_MAX_LENGTH = 40;
 
+/** Shown until the administrator saves their own dictionary; an explicit `[]` clears it. */
+export const DEFAULT_TAG_DICTIONARY: readonly TagDefinition[] = Object.freeze([
+  { key: 'official', zh: '官方', en: 'Official' },
+  { key: 'builtin', zh: '内置', en: 'Built-in' },
+  { key: 'filesystem', zh: '文件系统', en: 'Filesystem' },
+  { key: 'database', zh: '数据库', en: 'Database' },
+  { key: 'search', zh: '搜索', en: 'Search' },
+  { key: 'web', zh: '网页', en: 'Web' },
+  { key: 'browser', zh: '浏览器', en: 'Browser' },
+  { key: 'ai', zh: '人工智能', en: 'AI' },
+  { key: 'dev', zh: '开发', en: 'Development' },
+  { key: 'ops', zh: '运维', en: 'Operations' },
+  { key: 'memory', zh: '记忆', en: 'Memory' },
+  { key: 'messaging', zh: '消息', en: 'Messaging' },
+  { key: 'docs', zh: '文档', en: 'Docs' },
+  { key: 'testing', zh: '测试', en: 'Testing' },
+  { key: 'security', zh: '安全', en: 'Security' },
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -44,6 +63,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Reads the stored dictionary; malformed entries are ignored, not fatal. */
 export function readTagDictionary(settings: StoredSettings): TagDefinition[] {
   const raw = settings[SETTING_KEY];
+  if (raw === undefined) return DEFAULT_TAG_DICTIONARY.map((tag) => ({ ...tag }));
   if (!Array.isArray(raw)) return [];
   const tags: TagDefinition[] = [];
   const seen = new Set<string>();

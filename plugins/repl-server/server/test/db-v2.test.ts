@@ -89,12 +89,12 @@ const REPORT_INDEX_NAMES = [
   'reports_alert_idx',
 ];
 
-test('a fresh database runs v1 then v2 and exposes both v2 feature sets', (t) => {
+test('a fresh database runs v1 through v3 and exposes every feature set', (t) => {
   const { db } = openFixture(t);
 
-  assert.equal(SCHEMA_VERSION, 2);
-  assert.equal(readUserVersion(db), 2);
-  assert.equal(getMeta(db, 'schema_version'), '2');
+  assert.equal(SCHEMA_VERSION, 3);
+  assert.equal(readUserVersion(db), 3);
+  assert.equal(getMeta(db, 'schema_version'), '3');
   assert.equal(count(db, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"), 1);
   assert.equal(count(db, 'SELECT count(*) AS n FROM servers'), 2, 'v1 seeds survive');
 
@@ -122,9 +122,9 @@ test('an existing v1 database upgrades in place and keeps its rows', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 2);
-  assert.equal(getMeta(db, 'schema_version'), '2');
-  assert.equal(getMeta(db, 'revision'), '5', 'v2 must not reseed the catalog revision');
+  assert.equal(readUserVersion(db), 3);
+  assert.equal(getMeta(db, 'schema_version'), '3');
+  assert.equal(getMeta(db, 'revision'), '5', 'the migrations must not reseed the catalog revision');
 
   const server = getServer(db, 'legacy');
   assert.ok(server);
@@ -167,8 +167,8 @@ test('repeated migrate is idempotent on an already migrated database', (t) => {
     }
   });
 
-  assert.equal(migrate(second), 2);
-  assert.equal(readUserVersion(second), 2);
+  assert.equal(migrate(second), 3);
+  assert.equal(readUserVersion(second), 3);
   assert.equal(count(second, 'SELECT count(*) AS n FROM reports'), 1);
   assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2, 'no duplicate seed rows');
   assert.equal(count(second, 'SELECT count(*) AS n FROM meta'), 2);
@@ -177,10 +177,10 @@ test('repeated migrate is idempotent on an already migrated database', (t) => {
 test('a database newer than the supported schema is rejected', (t) => {
   const { file } = emptyFile(t);
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA user_version = 3');
+  db.exec('PRAGMA user_version = 4');
   db.close();
 
-  assert.throws(() => openStateDb(file), /newer than supported 2/);
+  assert.throws(() => openStateDb(file), /newer than supported 3/);
 });
 
 test('server discoveryJson round-trips as opaque JSON text', (t) => {

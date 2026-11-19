@@ -70,7 +70,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const first = openStateDb(file);
   try {
-    assert.equal(readUserVersion(first), 2);
+    assert.equal(readUserVersion(first), 3);
     assert.equal(count(first, 'SELECT count(*) AS n FROM servers'), 2);
     const seeds = first
       .prepare('SELECT id, transport FROM servers ORDER BY id')
@@ -100,7 +100,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const second = openStateDb(file);
   try {
-    assert.equal(readUserVersion(second), 2);
+    assert.equal(readUserVersion(second), 3);
     assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2);
     assert.equal(
       count(second, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"),
@@ -109,6 +109,43 @@ test('migration creates the current schema once and seeds the fixed servers', (t
     assert.equal(getRevision(second), 0);
   } finally {
     second.close();
+  }
+});
+
+test('V3 backfills untouched seed rows and preserves edited ones', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'repl-server-db-'));
+  const file = join(dir, 'state.db');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const v3 = openStateDb(file);
+  // Roll the seed rows back to their V1 shape and mark the database as V2.
+  v3.prepare(
+    "UPDATE servers SET label = 'Official Claude Code tools', summary = NULL, category = NULL, tags_json = '[]' WHERE id = '__official__'",
+  ).run();
+  v3.prepare(
+    "UPDATE servers SET label = 'Built-in composite tools', summary = NULL, category = NULL, tags_json = '[]' WHERE id = '__builtin__'",
+  ).run();
+  v3.prepare("UPDATE servers SET label = '自定义内置' WHERE id = '__builtin__'").run();
+  v3.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+  v3.exec('PRAGMA user_version = 2');
+  v3.close();
+
+  const upgraded = openStateDb(file);
+  try {
+    assert.equal(readUserVersion(upgraded), 3);
+    const official = upgraded
+      .prepare("SELECT label, category, tags_json FROM servers WHERE id = '__official__'")
+      .get();
+    assert.equal(official?.['label'], 'Claude Code 官方工具');
+    assert.equal(official?.['category'], 'official');
+    assert.equal(official?.['tags_json'], '["official"]');
+    const builtin = upgraded
+      .prepare("SELECT label, category FROM servers WHERE id = '__builtin__'")
+      .get();
+    assert.equal(builtin?.['label'], '自定义内置', 'an edited label is not overwritten');
+    assert.equal(builtin?.['category'], null);
+  } finally {
+    upgraded.close();
   }
 });
 

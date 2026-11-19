@@ -175,6 +175,22 @@ export function ServersPage(): React.ReactElement {
     return () => window.removeEventListener('repl:refresh', onRefresh);
   }, [load]);
 
+  // A connect/restart can outlive the operation poll. Keep refreshing while any
+  // server is transient so the tag leaves "启动中" without a manual reload.
+  useEffect(() => {
+    const transient = servers.some(
+      (server) =>
+        server.state === 'starting' ||
+        server.state === 'connecting' ||
+        server.state === 'reconnecting',
+    );
+    if (!transient) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load();
+    }, 1_500);
+    return () => window.clearInterval(timer);
+  }, [servers, load]);
+
   const selected = servers.find((server) => server.id === selectedId) ?? null;
 
   const filtered = useMemo(() => {
