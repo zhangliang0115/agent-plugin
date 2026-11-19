@@ -46,7 +46,7 @@ interactive TUI 冒烟：用 Terminal（或 kimi-cu）运行同一 `claude --mcp
 | automated（管理端标签字典） | `GET/PUT /admin/api/tags`：GET 默认空、PUT 全量替换且保留其它 settings、422 条目校验、缺 If-Match 400 / 过期 409、`readTagDictionary` 跳过坏条目 | `node --test test/admin-tags.test.ts` |
 | automated（07 发现） | 解析 P-*、应用 D-*、端点 A-*、预热 R-*、fixture E2E | `node --test test/discovery-*.test.ts` |
 | automated（08 AI） | runner argv/env/超时、proposal/annotation 校验、AI 路由与 limiter | `node --test test/ai-*.test.ts` |
-| automated（web） | SSE 重连/缺口/轮询回退，审计与管理页事件解析；新增标签选择器与报告页后测试命令不变 | `cd plugins/repl-server/web && npm test` |
+| automated（web） | SSE 重连/缺口/轮询回退（`api-stream`）、hash 路由解析（`router`）、命令面板过滤（`palette`）；3 组共 14 个用例，只测纯逻辑，不渲染 React 组件 | `cd plugins/repl-server/web && npm test` |
 | manual | 终端按 Esc 触发 tasks/cancel、TUI 任务面板、管理端视觉与 3D 资源约束 | 按上面的 interactive 冒烟步骤人工执行，结果写进交付说明 |
 | external | 真实 `claude mcp serve` 的 22 工具形状、真实第三方 MCP | `REPL_CLAUDE_BIN` 指向真实二进制；结果贴进交付说明 |
 
@@ -121,7 +121,7 @@ cd plugins/repl-server/server && node --test test/ai-*.test.ts
 
 ### Web 页面
 
-`web/test/*.test.ts` 用 `node:test`，不需要浏览器：`api-stream` 覆盖 SSE 包装的 Last-Event-ID、缺口帧、重连与轮询回退，`audit-events` 覆盖 `ai_run` 状态映射与流载荷容错，`manage-events` 覆盖 `/admin/api/events` 的聚合快照与设计形状帧。命令：
+`web/test/*.test.ts` 用 `node:test`，不需要浏览器，当前覆盖三组纯逻辑：`api-stream` 覆盖 SSE 包装的 Last-Event-ID、缺口帧、重连与轮询回退，`router` 覆盖 hash 路由解析与 `#/manage?tab=…` 归一化，`palette` 覆盖命令面板过滤。三组共 14 个用例，不渲染 React 组件；管理端页面行为仍归 manual。命令：
 
 ```bash
 cd plugins/repl-server/web && npm test

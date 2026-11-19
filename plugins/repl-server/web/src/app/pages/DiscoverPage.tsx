@@ -1,0 +1,326 @@
+/** Discovery page: scan local MCP configs, group by source, register selected servers. */
+import { App as AntApp, Button, Card, Collapse, Empty, Space, Spin, Table, Tag, Typography } from 'antd';
+import { SearchOutlined } from '@ant-design/icons';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { useApi } from '../api.tsx';
+import { PageHeader } from '../components/common.tsx';
+import { ApiError } from '../../lib/api.ts';
+
+type Confidence = 'high' | 'medium' | 'low';
+
+interface Suggestion {
+  id: string;
+  label: string;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  reason: string;
+  confidence: Confidence;
+  alreadyExists: boolean;
+  envKeys: string[];
+  headerKeys: string[];
+}
+
+const GROUP_ORDER = ['Claude Code', 'Kiro', 'Cursor', '工作区', '内置'] as const;
+
+/** Client configs arrive as `来自 <path>`; the path decides the source bucket. */
+function sourceGroup(item: Suggestion): string {
+  if (!item.reason.startsWith('来自 ')) return '内置';
+  const path = item.reason.slice('来自 '.length);
+  if (path.endsWith('/.claude.json')) return 'Claude Code';
+  // A workspace `.kiro/settings/mcp.json` also lands here; the server reports a bare path.
+  if (path.includes('/.kiro/')) return 'Kiro';
+  if (path.includes('/.cursor/')) return 'Cursor';
+  return '工作区';
+}
+
+const CONFIDENCE_COLOR: Record<Confidence, string> = {
+  high: 'success',
+  medium: 'warning',
+  low: 'default',
+};
+
+export function DiscoverPage(): React.ReactElement {
+  const api = useApi();
+  const { message } = AntApp.useApp();
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [scanning, setScanning] = useState(false);
+  const [scanned, setScanned] = useState(false);
+  const [registering, setRegistering] = useState<Set<string>>(new Set());
+  const [failures, setFailures] = useState<Record<string, string>>({});
+  const scanAbort = useRef<AbortController | null>(null);
+  const registeringGuard = useRef(false);
+
+  const scan = useCallback(async (): Promise<void> => {
+    scanAbort.current?.abort();
+    const controller = new AbortController();
+    scanAbort.current = controller;
+    setScanning(true);
+    setFailures({});
+    try {
+      const response = await api.post<{ suggestions?: Suggestion[] }>('/discover', undefined, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const items = Array.isArray(response.suggestions) ? response.suggestions : [];
+      setSuggestions(items);
+      // Start with nothing selected: bulk registration is destructive and must be explicit.
+      setSelected(new Set());
+      setScanned(true);
+      message.success(`扫描完成：${items.length} 条建议`);
+    } catch (error) {
+      if (!controller.signal.aborted) message.error(failureText(error));
+    } finally {
+      if (!controller.signal.aborted) setScanning(false);
+    }
+  }, [api, message]);
+
+  useEffect(() => {
+    void scan();
+    return () => scanAbort.current?.abort();
+  }, [scan]);
+
+  function markRegistering(id: string, active: boolean): void {
+    setRegistering((current) => {
+      const next = new Set(current);
+      if (active) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  async function registerMany(items: Suggestion[]): Promise<void> {
+    if (registeringGuard.current) return;
+    const targets = items.filter((item) => !item.alreadyExists);
+    if (targets.length === 0) return;
+    registeringGuard.current = true;
+    try {
+      for (const suggestion of targets) {
+        markRegistering(suggestion.id, true);
+        setFailures((current) => {
+          const next = { ...current };
+          delete next[suggestion.id];
+          return next;
+        });
+        try {
+          await api.post('/servers', registerBody(suggestion));
+          setSuggestions((current) =>
+            current.map((item) =>
+              item.id === suggestion.id ? { ...item, alreadyExists: true } : item,
+            ),
+          );
+          setSelected((current) => {
+            const next = new Set(current);
+            next.delete(suggestion.id);
+            return next;
+          });
+          message.success(`已注册 ${suggestion.id}`);
+        } catch (error) {
+          const reason = failureText(error);
+          setFailures((current) => ({ ...current, [suggestion.id]: reason }));
+          message.error(`${suggestion.id} 注册失败：${reason}`);
+        } finally {
+          markRegistering(suggestion.id, false);
+        }
+      }
+    } finally {
+      registeringGuard.current = false;
+    }
+  }
+
+  const pendingSelected = suggestions.filter((item) => selected.has(item.id) && !item.alreadyExists);
+  const busy = registering.size > 0;
+
+  const columns = [
+    {
+      title: '建议',
+      dataIndex: 'label',
+      width: 170,
+      render: (label: string, record: Suggestion) => (
+        <Space direction="vertical" size={0}>
+          <span>{label}</span>
+          <span className="mono muted">{record.id}</span>
+        </Space>
+      ),
+    },
+    {
+      title: '命令行 / URL',
+      key: 'command',
+      render: (_value: unknown, record: Suggestion) => (
+        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+          <span className="mono" style={{ wordBreak: 'break-all' }}>
+            {record.url ?? [record.command ?? '', ...record.args].join(' ')}
+          </span>
+          {failures[record.id] === undefined ? null : (
+            <Typography.Text type="danger">注册失败：{failures[record.id]}</Typography.Text>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: '环境 / Header 键',
+      key: 'keys',
+      width: 190,
+      render: (_value: unknown, record: Suggestion) => {
+        const keys = [
+          ...record.envKeys.map((key) => ({ key: `env-${key}`, label: `env ${key}` })),
+          ...record.headerKeys.map((key) => ({ key: `header-${key}`, label: `header ${key}` })),
+        ];
+        if (keys.length === 0) return <span className="muted">—</span>;
+        return (
+          <Space wrap size={[4, 4]}>
+            {keys.map((entry) => (
+              <Tag key={entry.key} bordered={false}>
+                {entry.label}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '置信度',
+      dataIndex: 'confidence',
+      width: 90,
+      render: (value: Confidence) => <Tag color={CONFIDENCE_COLOR[value]}>{value}</Tag>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'alreadyExists',
+      width: 92,
+      render: (value: boolean) =>
+        value ? <Tag color="success">已注册</Tag> : <Tag bordered={false}>未注册</Tag>,
+    },
+    {
+      title: '原因',
+      dataIndex: 'reason',
+      render: (value: string) => (
+        <Typography.Text type="secondary" ellipsis={{ tooltip: value }}>
+          {value}
+        </Typography.Text>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 80,
+      render: (_value: unknown, record: Suggestion) => (
+        <Button
+          size="small"
+          type="link"
+          disabled={record.alreadyExists || scanning || busy}
+          loading={registering.has(record.id)}
+          onClick={() => void registerMany([record])}
+        >
+          注册
+        </Button>
+      ),
+    },
+  ];
+
+  const buckets = new Map<string, Suggestion[]>();
+  for (const item of suggestions) {
+    const group = sourceGroup(item);
+    const bucket = buckets.get(group);
+    if (bucket === undefined) buckets.set(group, [item]);
+    else bucket.push(item);
+  }
+  const collapseItems = GROUP_ORDER.filter((group) => buckets.has(group)).map((group) => {
+    const items = buckets.get(group) ?? [];
+    return {
+      key: group,
+      label: `${group}（${items.length}）`,
+      children: (
+        <Table<Suggestion>
+          size="small"
+          rowKey="id"
+          dataSource={items}
+          columns={columns}
+          pagination={false}
+          loading={scanning}
+          scroll={{ x: 860 }}
+          rowSelection={{
+            selectedRowKeys: items.filter((item) => selected.has(item.id)).map((item) => item.id),
+            onChange: (keys) => {
+              setSelected((current) => {
+                const next = new Set(current);
+                for (const item of items) next.delete(item.id);
+                for (const key of keys) next.add(String(key));
+                return next;
+              });
+            },
+            getCheckboxProps: (item) => ({ disabled: item.alreadyExists || scanning || busy }),
+          }}
+        />
+      ),
+    };
+  });
+
+  return (
+    <div className="page">
+      <PageHeader
+        title="发现"
+        description="探测 Claude Code、Kiro、Cursor 与工作区的 MCP 配置；只读取 server 名、命令与键名，不读取密钥值。"
+        actions={
+          <Space>
+            <Button
+              icon={<SearchOutlined />}
+              loading={scanning}
+              disabled={busy}
+              onClick={() => void scan()}
+            >
+              重新扫描
+            </Button>
+            <Button
+              type="primary"
+              disabled={pendingSelected.length === 0 || scanning || busy}
+              loading={busy}
+              onClick={() => void registerMany(pendingSelected)}
+            >
+              注册所选（{pendingSelected.length}）
+            </Button>
+          </Space>
+        }
+      />
+      <Card title="扫描结果" extra={<Typography.Text type="secondary">手动勾选后再注册</Typography.Text>}>
+        {scanning && !scanned ? (
+          <div style={{ padding: 32, textAlign: 'center' }}>
+            <Spin />
+          </div>
+        ) : !scanned ? (
+          <Empty description="尚未扫描本机环境。" />
+        ) : suggestions.length === 0 ? (
+          <Empty description="没有发现可注册的 MCP server。" />
+        ) : (
+          <Collapse
+            defaultActiveKey={[...GROUP_ORDER]}
+            items={collapseItems}
+            bordered={false}
+          />
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/** Builds the `POST /servers` body; env/header values are declared by key only. */
+function registerBody(item: Suggestion): Record<string, unknown> {
+  const body: Record<string, unknown> = { id: item.id, label: item.label, tags: [] };
+  if (item.url !== null) {
+    body['transport'] = 'http';
+    body['url'] = item.url;
+  } else {
+    body['transport'] = 'stdio';
+    if (item.command !== null) body['command'] = item.command;
+    body['args'] = [...item.args];
+  }
+  if (item.envKeys.length > 0) body['envKeys'] = [...item.envKeys];
+  if (item.headerKeys.length > 0) body['headerKeys'] = [...item.headerKeys];
+  return body;
+}
+
+function failureText(error: unknown): string {
+  return error instanceof ApiError ? `${error.message}（${error.code}）` : String(error);
+}

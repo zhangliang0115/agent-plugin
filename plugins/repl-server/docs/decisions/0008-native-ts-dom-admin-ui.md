@@ -1,6 +1,6 @@
 # 0008 管理端采用原生 TypeScript + DOM + esbuild
 
-- 状态：已接受
+- 状态：已取代（见 ADR 0009）
 - 日期：2026-11-19
 - 取代：无
 - 关联：ADR 0007（新增 server 与 web 包类型）；learn-ai `claude-code/自建设计/03-MCP 管理与多客户端.md` §4.7、`05-交接与待办.md` §二

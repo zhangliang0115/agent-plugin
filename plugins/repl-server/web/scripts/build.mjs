@@ -3,12 +3,13 @@ import { cp, mkdir } from 'node:fs/promises';
 import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/main.ts'],
+  entryPoints: ['src/main.tsx'],
   outfile: 'dist/main.js',
   bundle: true,
   platform: 'browser',
   format: 'esm',
   target: 'es2022',
+  jsx: 'automatic',
   logLevel: 'info',
 });
 
