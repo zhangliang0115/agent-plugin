@@ -11,6 +11,7 @@ import { createAdminDiscoverHandler, sameCommandLine } from '../src/admin/discov
 import {
   createAdminServersHandler,
   createOperationLauncher,
+  parseCreateServer,
   AdminApiError,
   type AdminHandler,
   type AdminRequest,
@@ -671,6 +672,39 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
   );
   assert.equal(duplicate.status, 409);
   assert.equal(errorCode(duplicate), 'SERVER_EXISTS');
+});
+
+test('parseCreateServer rejects __proto__ instead of writing the prototype', () => {
+  assert.throws(
+    () => parseCreateServer({ id: 'pg', command: 'npx', envKeys: ['__proto__'] }),
+    (error: unknown) =>
+      error instanceof AdminApiError && error.status === 400 && error.code === 'INVALID_FIELD',
+  );
+
+  // JSON.parse keeps `__proto__` as an own key, so the reader is the only guard
+  // between the request body and `result[key] = ...`.
+  const rawEnv = JSON.parse('{"__proto__":{"$secret":"x"},"SAFE":"value"}') as Record<
+    string,
+    unknown
+  >;
+  assert.throws(
+    () => parseCreateServer({ id: 'pg', command: 'npx', env: rawEnv }),
+    (error: unknown) =>
+      error instanceof AdminApiError && error.status === 400 && error.code === 'INVALID_FIELD',
+  );
+  assert.equal(Object.hasOwn(Object.prototype, '$secret'), false);
+
+  const config = parseCreateServer({
+    id: 'pg',
+    command: 'npx',
+    env: { API_KEY: { $secret: 'API_KEY' } },
+    envKeys: ['TOKEN'],
+  });
+  assert.deepEqual(config.env, {
+    API_KEY: { $secret: 'API_KEY' },
+    TOKEN: { $secret: 'TOKEN' },
+  });
+  assert.equal(Object.getPrototypeOf(config.env), Object.prototype);
 });
 
 test('POST /servers defaults connectMode to eager; stored lazy rows stay lazy', async () => {
@@ -1998,6 +2032,141 @@ test('POST /discover/secrets rolls back earlier writes when a later write fails'
     const serialized = JSON.stringify(response.body);
     assert.equal(serialized.includes('first-value'), false);
     assert.equal(serialized.includes('disk is full'), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets cannot resolve prototype-chain names as env vars', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-protoenv-'));
+  try {
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          protoenv: {
+            command: 'npx',
+            env: {
+              CTOR: '${constructor}',
+              CTOR_ENV: '${env:constructor}',
+              TO_STRING: '${toString}',
+              PROTO: '${__proto__}',
+              TOKEN_COPY: '${TOKEN}',
+              MIXED: 'Bearer ${constructor}',
+            },
+            headers: { MixedToken: 'Bearer ${TOKEN}' },
+          },
+        },
+      }),
+    );
+
+    const tokenValue = ['proto', 'token', 'value'].join('-');
+    const writes: Array<{ name: string; value: string }> = [];
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      env: { PATH: '/usr/bin', TOKEN: tokenValue },
+      secrets: {
+        has: () => false,
+        set: async (name, value) => {
+          writes.push({ name, value });
+        },
+      },
+    });
+
+    const response = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'protoenv',
+          serverId: 'protoenv',
+        },
+      }),
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(bodyOf(response), {
+      env: { TOKEN_COPY: { $secret: 'disc.protoenv.env.TOKEN_COPY' } },
+      headers: { MixedToken: { $secret: 'disc.protoenv.header.MixedToken' } },
+      imported: ['disc.protoenv.env.TOKEN_COPY', 'disc.protoenv.header.MixedToken'],
+      skipped: ['CTOR', 'CTOR_ENV', 'TO_STRING', 'PROTO', 'MIXED'],
+    });
+    assert.deepEqual(writes, [
+      { name: 'disc.protoenv.env.TOKEN_COPY', value: tokenValue },
+      { name: 'disc.protoenv.header.MixedToken', value: ['Bearer', tokenValue].join(' ') },
+    ]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets rollback keeps overwritten keys and removes only new ones', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-rollback-overwrite-'));
+  try {
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          overwrite: { command: 'npx', headers: { A: 'new-a', B: 'b-value' } },
+          fresh: { command: 'npx', headers: { C: 'c-value', D: 'd-value', E: 'e-value' } },
+        },
+      }),
+    );
+
+    const store = new Map<string, string>([['disc.overwrite.header.A', 'old-a']]);
+    const deletes: string[] = [];
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      env: { PATH: '/usr/bin' },
+      secrets: {
+        has: (name) => store.has(name),
+        set: async (name, value) => {
+          if (name.endsWith('.header.B') || name.endsWith('.header.E')) {
+            throw new Error('disk is full');
+          }
+          store.set(name, value);
+        },
+        delete: async (name) => {
+          deletes.push(name);
+          store.delete(name);
+        },
+      },
+    });
+
+    const overwrite = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'overwrite',
+          serverId: 'overwrite',
+        },
+      }),
+    );
+    assert.equal(overwrite.status, 500);
+    assert.equal(errorCode(overwrite), 'DISCOVER_SECRET_WRITE_FAILED');
+    assert.equal(store.get('disc.overwrite.header.A'), 'new-a', 'the overwritten key keeps its new value');
+    assert.equal(store.has('disc.overwrite.header.B'), false);
+    assert.deepEqual(deletes, [], 'pre-existing keys are not rolled back');
+
+    const fresh = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'fresh',
+          serverId: 'fresh',
+        },
+      }),
+    );
+    assert.equal(fresh.status, 500);
+    assert.equal(errorCode(fresh), 'DISCOVER_SECRET_WRITE_FAILED');
+    assert.deepEqual(
+      [...store.keys()].filter((name) => name.startsWith('disc.fresh.')),
+      [],
+    );
+    assert.deepEqual(deletes, ['disc.fresh.header.C', 'disc.fresh.header.D']);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

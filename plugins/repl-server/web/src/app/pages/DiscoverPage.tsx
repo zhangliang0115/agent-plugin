@@ -1,12 +1,31 @@
 /** Discovery page: scan local MCP configs, group by source, register selected servers. */
-import { App as AntApp, Button, Card, Collapse, Empty, Space, Spin, Table, Tag, Typography } from 'antd';
+import {
+  App as AntApp,
+  Button,
+  Card,
+  Collapse,
+  Empty,
+  Input,
+  Modal,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
-import { rollbackImportedSecrets } from '../../lib/discover-secrets.ts';
+import {
+  displayReason,
+  filterDeclaredKeys,
+  hasPlaceholderArgs,
+  parseArgsText,
+  rollbackImportedSecrets,
+} from '../../lib/discover-secrets.ts';
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -66,8 +85,14 @@ export function DiscoverPage(): React.ReactElement {
   const [scanned, setScanned] = useState(false);
   const [registering, setRegistering] = useState<Set<string>>(new Set());
   const [failures, setFailures] = useState<Record<string, string>>({});
+  const [argEditor, setArgEditor] = useState<{
+    id: string;
+    text: string;
+    error: string | null;
+  } | null>(null);
   const scanAbort = useRef<AbortController | null>(null);
   const registeringGuard = useRef(false);
+  const argEditorResolve = useRef<((args: string[] | null) => void) | null>(null);
 
   const scan = useCallback(async (): Promise<void> => {
     scanAbort.current?.abort();
@@ -107,6 +132,31 @@ export function DiscoverPage(): React.ReactElement {
     });
   }
 
+  /** Built-in args such as `<workspace>` are not runnable; edit them before registering. */
+  function promptArgs(suggestion: Suggestion): Promise<string[] | null> {
+    return new Promise((resolve) => {
+      argEditorResolve.current = resolve;
+      setArgEditor({ id: suggestion.id, text: suggestion.args.join('\n'), error: null });
+    });
+  }
+
+  function closeArgEditor(args: string[] | null): void {
+    const resolve = argEditorResolve.current;
+    argEditorResolve.current = null;
+    setArgEditor(null);
+    resolve?.(args);
+  }
+
+  function confirmArgEditor(): void {
+    if (argEditor === null) return;
+    const args = parseArgsText(argEditor.text);
+    if (hasPlaceholderArgs(args)) {
+      setArgEditor({ ...argEditor, error: '仍有 <...> 占位符，请全部替换后再继续' });
+      return;
+    }
+    closeArgEditor(args);
+  }
+
   async function registerMany(items: Suggestion[]): Promise<void> {
     if (registeringGuard.current) return;
     const targets = items.filter((item) => !item.alreadyExists);
@@ -114,14 +164,23 @@ export function DiscoverPage(): React.ReactElement {
     registeringGuard.current = true;
     let warnedAboutImport = false;
     try {
-      for (const suggestion of targets) {
-        markRegistering(suggestion.id, true);
+      for (const target of targets) {
+        let suggestion = target;
+        markRegistering(target.id, true);
         setFailures((current) => {
           const next = { ...current };
-          delete next[suggestion.id];
+          delete next[target.id];
           return next;
         });
         try {
+          if (hasPlaceholderArgs(suggestion.args)) {
+            const edited = await promptArgs(suggestion);
+            if (edited === null) {
+              message.info(`已取消注册 ${suggestion.id}`);
+              continue;
+            }
+            suggestion = { ...suggestion, args: edited };
+          }
           // Literal or env-resolved values from the scanned config are copied into
           // the secret store first; the response only carries `$secret` references.
           let imported: ImportedSecrets | undefined;
@@ -142,9 +201,9 @@ export function DiscoverPage(): React.ReactElement {
           try {
             await api.post('/servers', registerBody(suggestion, imported));
           } catch (registrationError) {
-            // The import already wrote secrets; drop them so a failed registration
-            // leaves nothing behind. Rollback errors stay silent and keep this one.
-            await rollbackImportedSecrets(api, imported?.imported, registrationError);
+            // The import already wrote secrets; drop them only when the server is
+            // confirmed absent, otherwise the new server may already reference them.
+            await rollbackImportedSecrets(api, suggestion.id, imported?.imported, registrationError);
             throw registrationError;
           }
           // First tools/list feeds the AI auto-annotation preview; a failed refresh
@@ -242,9 +301,9 @@ export function DiscoverPage(): React.ReactElement {
     {
       title: '原因',
       dataIndex: 'reason',
-      render: (value: string) => (
-        <Typography.Text type="secondary" ellipsis={{ tooltip: value }}>
-          {value}
+      render: (value: string, record: Suggestion) => (
+        <Typography.Text type="secondary" ellipsis={{ tooltip: displayReason(value, record.args) }}>
+          {displayReason(value, record.args)}
         </Typography.Text>
       ),
     },
@@ -347,6 +406,31 @@ export function DiscoverPage(): React.ReactElement {
           />
         )}
       </Card>
+      <Modal
+        title={`编辑参数：${argEditor?.id ?? ''}`}
+        open={argEditor !== null}
+        okText="继续注册"
+        cancelText="取消"
+        onOk={confirmArgEditor}
+        onCancel={() => closeArgEditor(null)}
+      >
+        <Typography.Paragraph type="secondary">
+          每行一个参数。请替换所有 &lt;...&gt; 占位符，否则注册出的 server 无法启动。
+        </Typography.Paragraph>
+        <Input.TextArea
+          className="mono"
+          autoSize={{ minRows: 4, maxRows: 12 }}
+          value={argEditor?.text ?? ''}
+          onChange={(event) => {
+            if (argEditor !== null) {
+              setArgEditor({ ...argEditor, text: event.target.value, error: null });
+            }
+          }}
+        />
+        {argEditor?.error === null || argEditor?.error === undefined ? null : (
+          <Typography.Text type="danger">{argEditor.error}</Typography.Text>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -370,14 +454,16 @@ function registerBody(item: Suggestion, imported?: ImportedSecrets): Record<stri
 
   // Keys the server could not import stay as declared key names for manual entry.
   const skipped = new Set(imported?.skipped ?? []);
-  const envKeys =
+  const envKeys = filterDeclaredKeys(
     imported === undefined
       ? item.envKeys
-      : item.envKeys.filter((key) => skipped.has(key) && env[key] === undefined);
-  const headerKeys =
+      : item.envKeys.filter((key) => skipped.has(key) && env[key] === undefined),
+  );
+  const headerKeys = filterDeclaredKeys(
     imported === undefined
       ? item.headerKeys
-      : item.headerKeys.filter((key) => skipped.has(key) && headers[key] === undefined);
+      : item.headerKeys.filter((key) => skipped.has(key) && headers[key] === undefined),
+  );
   if (envKeys.length > 0) body['envKeys'] = envKeys;
   if (headerKeys.length > 0) body['headerKeys'] = headerKeys;
   return body;

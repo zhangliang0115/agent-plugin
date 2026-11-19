@@ -310,6 +310,29 @@ function serverToCreateBody(server: ProposalServer): Record<string, unknown> {
 }
 
 /**
+ * URL for the prompt (08 §4.1): query and fragment values can carry credentials
+ * (e.g. `?token=…`), so only origin, path and parameter names are kept. A URL
+ * that cannot be parsed is hidden outright.
+ */
+function redactUrlForPrompt(value: string | null): string | null {
+  if (value === null) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return '<redacted-url>';
+  }
+  // Only http(s) is a valid transport url; anything else may hide a token in its path.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '<redacted-url>';
+  const query = [...url.searchParams.keys()]
+    .map((name) => `${encodeURIComponent(name)}=<redacted>`)
+    .join('&');
+  const search = query === '' ? '' : `?${query}`;
+  const hash = url.hash === '' ? '' : '#<redacted>';
+  return `${url.origin}${url.pathname}${search}${hash}`;
+}
+
+/**
  * Prompt view of a server (08 §4.1): keys only. Every literal arg is replaced by
  * `<literal>` so tokens without a known prefix never reach the model; `$secret`
  * refs keep only the name. `argCount` preserves the argument shape.
@@ -324,7 +347,7 @@ function serverPromptView(record: ServerRecord, toolCount: number): Record<strin
       typeof arg === 'string' ? '<literal>' : `<secret:${arg.$secret}>`,
     ),
     argCount: record.args.length,
-    url: record.url,
+    url: redactUrlForPrompt(record.url),
     cwd: record.cwd,
     envKeys: Object.keys(record.env).sort(),
     headerKeys: Object.keys(record.headers).sort(),
@@ -390,6 +413,8 @@ export function createAiService(deps: AiServiceDeps): AiService {
   const annotations = createAnnotationStore({ clock });
   const createdThisProcess = new Set<string>();
   const lastAutoAt = new Map<string, number>();
+  /** `(serverId, toolsHash)` keys with a preview between precheck and model run. */
+  const autoInFlight = new Set<string>();
   let closePromise: Promise<void> | null = null;
 
   function ensureEnabled(): AiSettings {
@@ -706,9 +731,15 @@ export function createAiService(deps: AiServiceDeps): AiService {
     return { record, tools: await deps.tools.listByServer(serverId) };
   }
 
+  /**
+   * Builds the annotate prompt and runs the model. `onPrecheckPassed` fires once
+   * the size cap passed and right before the model call; auto previews use it to
+   * claim the `(serverId, toolsHash)` attempt without burning it on a 422.
+   */
   async function buildAnnotationPreview(
     serverId: string,
     trigger: 'manual' | 'auto',
+    onPrecheckPassed?: () => void,
   ): Promise<AnnotationPreviewResponse & { toolsHash: string }> {
     const ai = ensureEnabled();
     const { record, tools } = await loadAnnotatable(serverId);
@@ -729,6 +760,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         actualBytes,
       });
     }
+    onPrecheckPassed?.();
     const { run, audit } = await callModel({
       kind: 'annotate',
       trigger,
@@ -904,14 +936,19 @@ export function createAiService(deps: AiServiceDeps): AiService {
     if (annotations.get(serverId) !== null) return;
 
     const key = `${serverId}\u0000${hash}`;
-    if (annotations.hasAttempt(key)) return;
+    if (annotations.hasAttempt(key) || autoInFlight.has(key)) return;
     const last = lastAutoAt.get(serverId);
     if (last !== undefined && clock.now() - last < AI_AUTO_MIN_INTERVAL_MS) return;
 
-    annotations.markAttempt(key);
+    // `markAttempt` is the cross-run budget, so it is claimed only after the
+    // precheck passes; `autoInFlight` is the concurrency lock that keeps two
+    // simultaneous `tools/list` calls from both reaching the model.
+    autoInFlight.add(key);
     lastAutoAt.set(serverId, clock.now());
     try {
-      const preview = await buildAnnotationPreview(serverId, 'auto');
+      const preview = await buildAnnotationPreview(serverId, 'auto', () =>
+        annotations.markAttempt(key),
+      );
       annotations.put({
         serverId,
         proposed: preview.proposed,
@@ -922,8 +959,11 @@ export function createAiService(deps: AiServiceDeps): AiService {
         meta: preview.meta,
       });
     } catch (error) {
-      // Failures are logged and audited by `callModel`; never retried automatically.
+      // Precheck failures leave no attempt behind; model failures are audited by
+      // `callModel`. Neither is retried automatically.
       log(`ai annotate auto code=${errorCode(error)} server=${serverId}`);
+    } finally {
+      autoInFlight.delete(key);
     }
   }
 

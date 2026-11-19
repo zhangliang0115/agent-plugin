@@ -671,7 +671,8 @@ function readSecretRecord(
 
   const result: Record<string, SecretValue> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (key === '' || key.length > 256 || !pattern.test(key)) {
+    // `key === '__proto__'` would hit the prototype setter instead of creating an own key.
+    if (key === '' || key === '__proto__' || key.length > 256 || !pattern.test(key)) {
       throw invalidField(field, `contains an invalid key ${JSON.stringify(key)}`);
     }
     result[key] = readSecretValue(entry, `${field}.${key}`);
@@ -704,7 +705,8 @@ function readKeyList(value: unknown, field: string, pattern: RegExp): string[] {
   const keys: string[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const key = value[index];
-    if (typeof key !== 'string' || !pattern.test(key)) {
+    // Reject `__proto__`: `applySecretKeys` assigns each key and would set the prototype.
+    if (typeof key !== 'string' || key === '__proto__' || !pattern.test(key)) {
       throw invalidField(`${field}[${index}]`, 'is not a valid key name');
     }
     if (!keys.includes(key)) keys.push(key);

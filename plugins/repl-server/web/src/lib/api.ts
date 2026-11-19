@@ -137,6 +137,27 @@ export interface StreamGap {
   oldestEventId: string | null;
 }
 
+/**
+ * Payload of `GET /audit/frames`. `truncated` means the scan stopped at its row
+ * ceiling, so older frames in the window were never inspected.
+ */
+export interface FramesResponse<Frame = unknown> {
+  detail: string;
+  frames: Frame[];
+  hasMore?: boolean;
+  droppedFrames?: number;
+  truncated?: boolean;
+}
+
+/** Frame-drawer warning when the backend scan stopped early; `null` when complete. */
+export function framesTruncatedNotice(
+  response: Pick<FramesResponse, 'truncated'> | null | undefined,
+): string | null {
+  return response?.truncated === true
+    ? '扫描已截断（仅覆盖最早 100k 行），请缩小时间范围'
+    : null;
+}
+
 export interface EventStreamOptions {
   /** Event names to listen for; defaults to `['message']`. */
   eventTypes?: readonly string[];

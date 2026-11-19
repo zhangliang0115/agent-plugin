@@ -20,7 +20,7 @@ import { normalizeAnnotation, restrictAnnotationToDictionary } from '../src/ai/v
 import { DbServerStore, DbSettingsStore, DbToolStore } from '../src/assembly-stores.ts';
 import { openStateDb } from '../src/db/migrate.ts';
 import { getRevision, listSettings } from '../src/db/meta.ts';
-import { createServer, getServer } from '../src/db/servers.ts';
+import { createServer, getServer, updateServer } from '../src/db/servers.ts';
 import { deleteTool, getTool, upsertTool } from '../src/db/tools.ts';
 import type { Clock } from '../src/ports.ts';
 
@@ -238,6 +238,67 @@ test('annotate prompt hides literal args and keeps secret names', async (t) => {
   assert.ok(prompt.includes('"<literal>"'));
   assert.ok(prompt.includes('"<secret:DATABASE_URL>"'));
   assert.match(prompt, /"argCount": 4/);
+});
+
+test('annotate prompt redacts URL query and fragment values', async (t) => {
+  const prompts: string[] = [];
+  const runner: AiRunner = {
+    async run(prompt) {
+      prompts.push(prompt);
+      return {
+        payload: {
+          summary: APPLY.summary,
+          category: 'database',
+          tags: ['postgresql'],
+          toolOverrides: [],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  createServer(fixture.db, {
+    id: 'pg',
+    label: 'Remote MCP',
+    transport: 'http',
+    url: 'https://mcp.example.com/mcp?token=sk-secret&lang=zh#access_token=sk-fragment-token',
+    headers: { Authorization: { $secret: 'MCP_TOKEN' } },
+  });
+  seedTool(fixture.db);
+  createServer(fixture.db, {
+    id: 'broken',
+    label: 'Broken URL',
+    transport: 'http',
+    url: 'not a url',
+  });
+  createServer(fixture.db, {
+    id: 'fileurl',
+    label: 'Non-http URL',
+    transport: 'http',
+    url: 'file:///tmp/sk-file-token',
+  });
+
+  await fixture.service.annotatePreview('pg');
+  await fixture.service.annotatePreview('broken');
+  await fixture.service.annotatePreview('fileurl');
+  assert.equal(prompts.length, 3);
+
+  const prompt = prompts[0] ?? '';
+  assert.ok(!prompt.includes('sk-secret'));
+  assert.ok(!prompt.includes('sk-fragment-token'));
+  assert.ok(
+    prompt.includes(
+      '"url": "https://mcp.example.com/mcp?token=<redacted>&lang=<redacted>#<redacted>"',
+    ),
+  );
+  assert.ok((prompts[1] ?? '').includes('"url": "<redacted-url>"'));
+  assert.ok(!(prompts[2] ?? '').includes('sk-file-token'));
+  assert.ok((prompts[2] ?? '').includes('"url": "<redacted-url>"'));
 });
 
 test('preview rejects a prompt over 64 KiB without echoing the server view', async (t) => {
@@ -1039,4 +1100,88 @@ test('pending previews expire and are dropped on mutation', async (t) => {
   assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
   fixture.clock.advance(31 * 60_000);
   assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+});
+
+test('an oversized auto preview does not consume the attempt budget', async (t) => {
+  let calls = 0;
+  const runner: AiRunner = {
+    async run() {
+      calls += 1;
+      return {
+        payload: {
+          summary: APPLY.summary,
+          category: 'database',
+          tags: ['postgresql'],
+          toolOverrides: [],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  const env: Record<string, { $secret: string }> = {};
+  for (let index = 0; index < 1200; index += 1) {
+    env[`${'K'.repeat(40)}_${String(index).padStart(4, '0')}`] = { $secret: 'S' };
+  }
+  createServer(fixture.db, {
+    id: 'pg',
+    label: 'PostgreSQL',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y'],
+    env,
+  });
+  seedTool(fixture.db);
+
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+  assert.equal(calls, 0);
+  assert.deepEqual(fixture.audits, []);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+
+  // Shrinking the config makes the same (serverId, toolsHash) prompt fit again.
+  updateServer(fixture.db, 'pg', { env: {} });
+  fixture.clock.advance(61_000);
+  await fixture.service.onToolsIndexed('pg', { explicit: true });
+  assert.equal(calls, 1);
+  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
+});
+
+test('concurrent tools/list runs only one auto preview', async (t) => {
+  let calls = 0;
+  const runner: AiRunner = {
+    async run() {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        payload: {
+          summary: APPLY.summary,
+          category: 'database',
+          tags: ['postgresql'],
+          toolOverrides: [],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  await seedNewServer(fixture);
+  fixture.service.onServerCreated('pg');
+
+  await Promise.all([
+    fixture.service.onToolsIndexed('pg'),
+    fixture.service.onToolsIndexed('pg'),
+  ]);
+  assert.equal(calls, 1);
+  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
 });

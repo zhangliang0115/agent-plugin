@@ -29,7 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
-import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
+import { ApiError, framesTruncatedNotice, type EventStream, type FramesResponse, type StreamState } from '../../lib/api.ts';
 import {
   formatBytes,
   formatDuration,
@@ -77,13 +77,6 @@ interface ProtocolFramePair {
   response: AuditEvent | null;
   durMs?: number;
   ok?: boolean;
-}
-
-interface FramesResponse {
-  detail: string;
-  frames: ProtocolFramePair[];
-  hasMore?: boolean;
-  droppedFrames?: number;
 }
 
 interface AuditFilters {
@@ -158,7 +151,7 @@ export function AuditPage(): React.ReactElement {
   const [statsError, setStatsError] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>('closed');
   const [selected, setSelected] = useState<AuditEvent | null>(null);
-  const [frames, setFrames] = useState<FramesResponse | null>(null);
+  const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
   const [framesLoading, setFramesLoading] = useState(false);
   const [framesError, setFramesError] = useState<string | null>(null);
 
@@ -563,8 +556,8 @@ export function AuditPage(): React.ReactElement {
     filters: AuditFilters,
     mcp: string | null,
     id: string | number | undefined,
-  ): Promise<FramesResponse> {
-    return api.get<FramesResponse>('/audit/frames', {
+  ): Promise<FramesResponse<ProtocolFramePair>> {
+    return api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
       query: {
         detail: 'full',
         from: toIso(filters.from),
@@ -674,6 +667,7 @@ export function AuditPage(): React.ReactElement {
   );
 
   const rows = useMemo(() => [...events].reverse(), [events]);
+  const framesNotice = framesTruncatedNotice(frames);
   const badge = liveBadge(applied, streamState);
   const summary = hasMore
     ? `已加载 ${formatNumber(events.length)} 条（上限 ${formatNumber(MAX_EVENTS)}，还有更多）`
@@ -1060,6 +1054,14 @@ export function AuditPage(): React.ReactElement {
                   </Space>
                 }
               >
+                {framesNotice === null ? null : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 10 }}
+                    message={framesNotice}
+                  />
+                )}
                 {frames.frames.length === 0 ? (
                   <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
                 ) : (

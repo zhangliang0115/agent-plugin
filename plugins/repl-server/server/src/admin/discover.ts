@@ -140,8 +140,9 @@ const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /**
  * Resolves `${NAME}` / `${env:NAME}` placeholders against the server environment.
  * Returns the final value, or `null` when the value is not a string, has an
- * unresolved/empty placeholder, or resolves to an empty string. Callers must not
- * echo the result.
+ * unresolved/empty placeholder, or resolves to an empty string. Only own string
+ * properties of `env` resolve, so names such as `constructor` or `__proto__` cannot
+ * pick up prototype members. Callers must not echo the result.
  */
 function resolveImportableValue(
   value: unknown,
@@ -156,8 +157,9 @@ function resolveImportableValue(
   let missing = false;
   const resolved = value.replace(PLACEHOLDER_PATTERN, (_match, raw: string) => {
     const name = raw.startsWith('env:') ? raw.slice('env:'.length) : raw;
-    const substitute = ENV_NAME_PATTERN.test(name) ? env[name] : undefined;
-    if (substitute === undefined || substitute === '') {
+    const substitute =
+      ENV_NAME_PATTERN.test(name) && Object.hasOwn(env, name) ? env[name] : undefined;
+    if (typeof substitute !== 'string' || substitute === '') {
       missing = true;
       return '';
     }
@@ -549,8 +551,9 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
    * never echoed, logged or put into an error message.
    */
   async function importSecrets(request: AdminRequest): Promise<AdminResponse> {
-    const write = deps.secrets?.set;
-    if (write === undefined) {
+    const store = deps.secrets;
+    const write = store?.set;
+    if (store === undefined || write === undefined) {
       throw new AdminApiError(
         503,
         'DISCOVER_SECRETS_UNAVAILABLE',
@@ -642,6 +645,8 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
     const envRefs: Record<string, { $secret: string }> = {};
     const headerRefs: Record<string, { $secret: string }> = {};
     const imported: string[] = [];
+    /** Names that did not exist before this request; only these are rolled back. */
+    const created: string[] = [];
     const skipped: string[] = [];
     const groups = [
       { field: entry['env'], kind: 'env', pattern: ENV_KEY_PATTERN, target: envRefs },
@@ -671,17 +676,20 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
             skipped.push(key);
             continue;
           }
+          const existed = await store.has(name);
           await write(name, resolved);
+          if (!existed) created.push(name);
           defineRef(group.target, key, name);
           imported.push(name);
         }
       }
     } catch {
-      // Best effort: undo only what this request already wrote. The error message
+      // Best effort: undo only secrets this request created. Overwritten keys keep
+      // their new value, so a pre-existing secret is never deleted. The error message
       // is fixed so a store error can never echo a secret value.
-      const remove = deps.secrets?.delete;
+      const remove = store.delete;
       if (remove !== undefined) {
-        for (const name of imported) {
+        for (const name of created) {
           try {
             await remove(name);
           } catch {
