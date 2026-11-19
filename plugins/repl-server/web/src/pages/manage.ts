@@ -498,7 +498,7 @@ const TAB_INTROS: Readonly<Record<Tab, { title: string; description: string; hin
   servers: {
     title: '服务端',
     description:
-      '注册与运维 MCP server（连接、重启、超时与并发）。刚接入新工具或连接不稳定时使用；密钥值到“密钥”分区填写。',
+      '注册与运维 MCP server（连接、重启、超时与并发），也可用 AI 一句话生成配置。刚接入新工具或连接不稳定时使用；密钥值到“密钥”分区填写。',
     hint: '新增 stdio server 等于允许执行任意命令；env/header 只声明键名，值不会随配置保存。',
   },
   tools: {
@@ -528,7 +528,7 @@ const TAB_INTROS: Readonly<Record<Tab, { title: string; description: string; hin
   ai: {
     title: 'AI 配置',
     description:
-      '配置本地 Claude CLI，用一句话生成 MCP 配置，或为 server 生成 summary/tags 标注建议。起草配置或补全元数据时使用。',
+      '配置本地 Claude CLI，并为 server 生成 summary/tags 标注建议、审阅待应用的建议。调整 AI 行为或补全元数据时使用；一句话生成 MCP 配置已放到“服务端”。',
     hint: '调用会把工具名与描述发送给模型；结果要先预览，应用前人工核对。',
   },
   config: {
@@ -960,6 +960,7 @@ export function createManagePage(context: PageContext): PageHandle {
     aiProposeBusy: false,
     aiProposalApplyBusy: false,
     aiAnnotationBusy: false,
+    aiProposeOpen: false,
   };
 
   const drawer = createDrawer();
@@ -1302,6 +1303,14 @@ export function createManagePage(context: PageContext): PageHandle {
     const refresh = button('刷新', () => {
       void refreshServers().catch((error: unknown) => setStatus(failureText(error), 'error'));
     }, { variant: 'secondary', icon: 'refresh' });
+    const aiGenerate = button(
+      state.aiProposeOpen ? '收起 AI 生成' : 'AI 生成配置',
+      () => {
+        state.aiProposeOpen = !state.aiProposeOpen;
+        renderTab();
+      },
+      { variant: 'secondary', icon: 'activity' },
+    );
     const create = button('新增 server', () => openServerEditor(null), {
       variant: 'primary',
       icon: 'plus',
@@ -1312,7 +1321,7 @@ export function createManagePage(context: PageContext): PageHandle {
       subtitle: `共 ${formatNumber(state.servers.length)} 个 server · 写操作按 revision 校验`,
       icon: 'server',
       flush: true,
-      actions: [search, refresh, create],
+      actions: [search, refresh, aiGenerate, create],
     });
 
     const tableBody = el('tbody');
@@ -1335,6 +1344,7 @@ export function createManagePage(context: PageContext): PageHandle {
       if (tableBody.isConnected) fillServerRows(tableBody);
     });
 
+    if (state.aiProposeOpen) fragment.append(buildAiProposeCard());
     if (state.serverDraft !== null) fragment.append(buildServerEditor(state.serverDraft));
     fragment.append(listCard.element);
     return fragment;
@@ -4577,7 +4587,7 @@ export function createManagePage(context: PageContext): PageHandle {
   function buildAiTab(): HTMLElement {
     const fragment = el('div');
     setStyle(fragment, { display: 'flex', flexDirection: 'column', gap: '20px' });
-    fragment.append(buildAiConfigCard(), buildAiProposeCard(), buildAiPendingCard());
+    fragment.append(buildAiConfigCard(), buildAiPendingCard());
     return fragment;
   }
 
