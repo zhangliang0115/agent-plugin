@@ -97,7 +97,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 返回 5 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`。每个工具带：
 
-- `description`：`run_script` ≤2KB；其余一句话（`report_problem` ≤500 字符）
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节，超出从列表尾部截断；其余一句话（`report_problem` ≤500 字符）
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
@@ -263,7 +263,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ## 5. `instructions`
 
-`instructions` 放完整提示词（02 §4.2 的模板），`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
+`instructions` 放完整提示词（02 §4.2 的模板），其中 MCP 段按当前请求可见的 server 列表替换；`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
 
 ## 6. 任务方法
 
