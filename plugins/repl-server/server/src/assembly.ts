@@ -9,6 +9,7 @@ import { createAdminClientsHandler, type McpSessionRecord, type SessionRegistry 
 import { createAdminDiscoverHandler } from './admin/discover.ts';
 import { createAdminServersHandler, createOperationLauncher, type AdminOperation, type OperationLauncher } from './admin/servers.ts';
 import { createAdminSettingsHandler, type SettingsStore } from './admin/settings.ts';
+import { createAdminTagsHandler } from './admin/tags.ts';
 import { createAdminToolsHandler } from './admin/tools.ts';
 import { createAdminConfigRoutes, operationStarterFromLauncher } from './admin/config-routes.ts';
 import { createAdminReportsHandler } from './admin/reports.ts';
@@ -576,6 +577,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       settings: settingsWithHooks,
       onSettingsChanged: (capacity) => applyCapacitySettings(capacity),
     }),
+    createAdminTagsHandler({ settings: settingsWithHooks }),
     createAdminDiscoverHandler({ servers: adminServerStore }),
     createAdminConfigRoutes({
       secrets,

@@ -148,6 +148,7 @@ export type IconName =
   | 'activity'
   | 'layers'
   | 'shield'
+  | 'tag'
   | 'dot';
 
 /** 24×24 stroke glyphs; unknown names fall back to a dot so callers never render nothing. */
@@ -199,6 +200,7 @@ const ICON_PATHS: Readonly<Record<string, string>> = {
   activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
   layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
   shield: '<path d="M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6z"/>',
+  tag: '<path d="M3 11.5V5a2 2 0 0 1 2-2h6.5L21 12.5 12.5 21z"/><circle cx="8" cy="8" r="1.1"/>',
   dot: '<circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
 };
 
@@ -1045,6 +1047,13 @@ export function describeError(error: unknown): string {
   return String(error);
 }
 
+/** Error text plus the shared next-step hint from {@link errorActionHint}. */
+export function failureText(error: unknown): string {
+  const text = describeError(error);
+  const hint = error instanceof ApiError ? errorActionHint(error.code, '') : '';
+  return hint === '' ? text : `${text}；${hint}`;
+}
+
 export type NoticeTone = 'info' | 'ok' | 'error' | 'queue';
 
 /** Inline banner with a semantic icon and background. It is not auto-dismissed. */
@@ -1064,6 +1073,174 @@ export function emptyState(message: string, hint?: string): HTMLElement {
   if (hint !== undefined) add(body, el('p', 'empty-hint', hint));
   add(box, body);
   return box;
+}
+
+/** Empty state for a card body; {@link emptyState} owns the page-level card styling. */
+export function emptyBlock(title: string, hint?: string): HTMLElement {
+  const box = el('div', 'empty-state');
+  add(box, icon('inbox', 26));
+  const body = el('div', 'empty-body');
+  add(body, el('p', 'empty-title', title));
+  if (hint !== undefined) add(body, el('p', 'empty-hint', hint));
+  add(box, body);
+  return box;
+}
+
+/** Scroll container for data tables with sticky headers. */
+export function tablePanel(table: HTMLTableElement): HTMLElement {
+  const wrap = el('div', 'table-wrap');
+  setStyle(wrap, {
+    border: '0',
+    borderRadius: '0',
+    maxHeight: 'min(720px, calc(100vh - 280px))',
+  });
+  add(wrap, table);
+  return wrap;
+}
+
+export function td(content: Node | string): HTMLTableCellElement {
+  const cell = el('td');
+  add(cell, content);
+  return cell;
+}
+
+/** Single-line table cell clipped to `maxWidth`; the full text stays in `title`. */
+export function clippedCell(text: string, maxWidth: number): HTMLTableCellElement {
+  const cell = el('td', 'muted');
+  if (text === '') {
+    cell.textContent = '—';
+    return cell;
+  }
+  const span = el('span', 'truncate', text);
+  setStyle(span, { display: 'inline-block', maxWidth: `${maxWidth}px` });
+  span.title = text;
+  add(cell, span);
+  return cell;
+}
+
+/** One dictionary entry for the tag picker; `key` is what `tags_json` stores. */
+export interface TagDefinition {
+  key: string;
+  zh: string;
+  en: string;
+}
+
+export interface TagPickerOptions {
+  dictionary: readonly TagDefinition[];
+  value: readonly string[];
+  onChange: (tags: string[]) => void;
+  /** Replaces the default "no tags yet" hint inside the dropdown. */
+  emptyHint?: string;
+}
+
+export interface TagPickerHandle {
+  element: HTMLElement;
+  getValue(): string[];
+}
+
+/**
+ * Multi-select chip picker fed by the tag dictionary. Selected keys that are not in the
+ * dictionary stay visible (and removable) so editing existing records never drops data.
+ */
+export function tagPicker(options: TagPickerOptions): TagPickerHandle {
+  const selected = new Set(options.value);
+  const byKey = new Map(options.dictionary.map((tag) => [tag.key, tag]));
+  const wrapper = el('div', 'tag-picker');
+  const chips = el('div', 'tag-picker-chips');
+  const details = el('details', 'tag-picker-menu');
+  const summary = el('summary', 'tag-picker-trigger');
+  add(summary, icon('plus', 13), el('span', '', '选择标签'));
+  const panel = el('div', 'tag-picker-panel');
+  details.append(summary, panel);
+  if (options.dictionary.length === 0 && selected.size === 0) {
+    panel.appendChild(
+      el('p', 'field-hint', options.emptyHint ?? '标签字典为空，先到“配置 › 标签”登记。'),
+    );
+  }
+
+  const boxes = new Map<string, HTMLInputElement>();
+
+  function emit(): void {
+    options.onChange([...selected]);
+  }
+
+  function renderChips(): void {
+    chips.replaceChildren();
+    for (const key of selected) {
+      const definition = byKey.get(key);
+      const chip = el('span', `tag-chip${definition === undefined ? ' tag-chip-unknown' : ''}`);
+      chip.title =
+        definition === undefined
+          ? `${key}（未登记）`
+          : `${definition.key} · ${definition.en}`;
+      add(
+        chip,
+        el('span', 'tag-chip-label', definition === undefined ? `${key}（未登记）` : definition.zh),
+      );
+      const remove = el('button', 'tag-chip-remove');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `移除标签 ${key}`);
+      remove.innerHTML = iconMarkup('close', 11);
+      remove.addEventListener('click', () => {
+        selected.delete(key);
+        const box = boxes.get(key);
+        if (box !== undefined) box.checked = false;
+        renderChips();
+        emit();
+      });
+      chip.appendChild(remove);
+      chips.appendChild(chip);
+    }
+    if (selected.size === 0) {
+      chips.appendChild(el('span', 'field-hint', '未选择标签'));
+    }
+  }
+
+  for (const definition of options.dictionary) {
+    const row = el('label', 'tag-picker-option');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = selected.has(definition.key);
+    box.addEventListener('change', () => {
+      if (box.checked) selected.add(definition.key);
+      else selected.delete(definition.key);
+      renderChips();
+      emit();
+    });
+    boxes.set(definition.key, box);
+    add(
+      row,
+      box,
+      el('span', 'tag-picker-name', definition.zh),
+      el('span', 'tag-picker-alt', `${definition.en} · ${definition.key}`),
+    );
+    panel.appendChild(row);
+  }
+
+  for (const key of selected) {
+    if (byKey.has(key)) continue;
+    const row = el('label', 'tag-picker-option tag-picker-unknown');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = true;
+    box.addEventListener('change', () => {
+      if (box.checked) selected.add(key);
+      else selected.delete(key);
+      renderChips();
+      emit();
+    });
+    boxes.set(key, box);
+    add(row, box, el('span', 'tag-picker-name', `${key}（未登记）`), el('span', 'tag-picker-alt', ''));
+    panel.appendChild(row);
+  }
+
+  renderChips();
+  wrapper.append(chips, details);
+
+  return {
+    element: wrapper,
+    getValue: () => [...selected],
+  };
 }
 
 export function loading(message = '正在加载…'): HTMLElement {

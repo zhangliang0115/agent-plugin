@@ -2648,3 +2648,138 @@ dl.definition-list {
     transform: none;
   }
 }
+
+/* Tag dictionary picker */
+.tag-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tag-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-inset);
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tag-chip-unknown {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.tag-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.tag-chip-remove:hover {
+  background: var(--surface-hover);
+}
+
+.tag-picker-menu {
+  position: relative;
+  align-self: flex-start;
+}
+
+.tag-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tag-picker-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.tag-picker-panel {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max(240px, 100%);
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+.tag-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tag-picker-option:hover {
+  background: var(--surface-hover);
+}
+
+.tag-picker-name {
+  white-space: nowrap;
+}
+
+.tag-picker-alt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.tag-picker-unknown .tag-picker-name {
+  color: var(--text-muted);
+}
+
+/* Card header actions should size to content; global selects/inputs are 100% wide. */
+.card-actions select,
+.card-actions .select,
+.card-actions input,
+.card-actions .field {
+  width: auto;
+}
+
+.card-actions select {
+  min-width: 132px;
+}

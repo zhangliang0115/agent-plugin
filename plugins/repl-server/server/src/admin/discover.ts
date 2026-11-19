@@ -1,9 +1,9 @@
 /** Admin API for local environment discovery (`POST /discover`).
  *
- * Probes only the fixed list from 03 §9.1: MCP config files, `npx`/`gh`/`psql`
- * availability and credential-file presence. It never reads secret values: config files
- * are parsed only for server names, credential files are only checked for existence, and
- * secrets are checked through an injected name-only probe.
+ * Probes the fixed config list from 03 §9.1 (Claude Code, Kiro, Cursor, workspace
+ * `.mcp.json`), then appends built-in suggestions. It never reads secret values: client
+ * configs are parsed for server names, commands and env/header key names only; credential
+ * files are only checked for existence; secrets go through an injected name-only probe.
  *
  * `alreadyExists` compares the candidate `command + args` against registered servers
  * after whitespace normalization; `<workspace>` / `<url>` / `<path>` placeholders match
@@ -30,15 +30,19 @@ import {
 export type DiscoverConfidence = 'high' | 'medium' | 'low';
 
 export interface DiscoverSuggestion {
-  /** Fixed id from 03 §9.1. */
-  id: 'cursor-config' | 'filesystem' | 'github' | 'postgres' | 'sqlite' | 'fetch';
+  /** Slug derived from the MCP server name (or a fixed id for built-ins). */
+  id: string;
   label: string;
   command: string | null;
   args: string[];
+  /** HTTP endpoint for streamable servers discovered in client configs. */
+  url: string | null;
   reason: string;
   confidence: DiscoverConfidence;
   alreadyExists: boolean;
-  requiredSecrets: string[];
+  /** Declared env/header keys only; values are never read. */
+  envKeys: string[];
+  headerKeys: string[];
 }
 
 /** The subset of a registered server that `alreadyExists` needs. */
@@ -47,6 +51,7 @@ export interface DiscoverServerConfig {
   transport: string;
   command: string | null;
   args: readonly unknown[];
+  url?: string | null;
 }
 
 export interface DiscoverServerLookup {
@@ -163,12 +168,22 @@ export function sameCommandLine(
   return true;
 }
 
-interface ConfigProbeResult {
-  path: string;
-  serverNames: string[];
+interface ConfigServerEntry {
+  name: string;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  envKeys: string[];
+  headerKeys: string[];
 }
 
-function readServerNames(text: string): string[] | null {
+interface ConfigProbeResult {
+  path: string;
+  entries: ConfigServerEntry[];
+}
+
+/** Parses one client config; env/header values are discarded, only key names are kept. */
+function readConfigEntries(text: string): ConfigServerEntry[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -179,28 +194,67 @@ function readServerNames(text: string): string[] | null {
 
   const servers = parsed['mcpServers'];
   if (!isPlainObject(servers)) return [];
-  // Only names are kept; env/header values in the file are discarded here.
-  return Object.keys(servers);
+
+  const entries: ConfigServerEntry[] = [];
+  for (const [name, raw] of Object.entries(servers)) {
+    if (!isPlainObject(raw)) continue;
+    const command =
+      typeof raw['command'] === 'string' && raw['command'].trim() !== ''
+        ? raw['command'].trim()
+        : null;
+    const url = typeof raw['url'] === 'string' && raw['url'].trim() !== '' ? raw['url'].trim() : null;
+    if (command === null && url === null) continue;
+    const args = (Array.isArray(raw['args']) ? raw['args'] : [])
+      .map(normalizeCommandToken)
+      .filter((token): token is string => token !== null);
+    const envKeys = isPlainObject(raw['env']) ? Object.keys(raw['env']) : [];
+    const headerKeys = isPlainObject(raw['headers']) ? Object.keys(raw['headers']) : [];
+    entries.push({ name, command, args, url, envKeys, headerKeys });
+  }
+  return entries;
+}
+
+/** Builds a server id from a client-config server name, avoiding collisions. */
+function slugServerId(name: string, used: Set<string>): string {
+  const base =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/gu, '-')
+      .replace(/^[-._]+|[-._]+$/gu, '')
+      .slice(0, 48) || 'server';
+  const start = /^[A-Za-z0-9]/u.test(base) ? base : `s-${base}`;
+  let id = start;
+  let suffix = 2;
+  while (used.has(id)) {
+    id = `${start}-${suffix}`.slice(0, 64);
+    suffix += 1;
+  }
+  used.add(id);
+  return id;
 }
 
 function suggestion(
-  id: DiscoverSuggestion['id'],
+  id: string,
   label: string,
   command: string | null,
   args: string[],
+  url: string | null,
   reason: string,
   confidence: DiscoverConfidence,
-  requiredSecrets: string[] = [],
+  envKeys: string[] = [],
+  headerKeys: string[] = [],
 ): DiscoverSuggestion {
   return {
     id,
     label,
     command,
     args,
+    url,
     reason,
     confidence,
     alreadyExists: false,
-    requiredSecrets,
+    envKeys,
+    headerKeys,
   };
 }
 
@@ -248,9 +302,16 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
   }
 
   async function run(): Promise<DiscoverSuggestion[]> {
-    const configPaths = [join(home, '.cursor', 'mcp.json')];
+    const configPaths = [
+      join(home, '.claude.json'),
+      join(home, '.kiro', 'settings', 'mcp.json'),
+      join(home, '.cursor', 'mcp.json'),
+    ];
     if (deps.workspace !== undefined && deps.workspace !== '') {
-      configPaths.push(join(deps.workspace, '.mcp.json'));
+      configPaths.push(
+        join(deps.workspace, '.mcp.json'),
+        join(deps.workspace, '.kiro', 'settings', 'mcp.json'),
+      );
     }
 
     const [configs, gh, psql, npx, pgpass, githubToken, databaseUrl, existingServers] =
@@ -260,9 +321,9 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
           for (const path of configPaths) {
             const text = await io.readText(path);
             if (text === null) continue;
-            const serverNames = readServerNames(text);
-            if (serverNames === null) continue;
-            found.push({ path, serverNames });
+            const entries = readConfigEntries(text);
+            if (entries === null || entries.length === 0) continue;
+            found.push({ path, entries });
           }
           return found;
         })(),
@@ -276,22 +337,38 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
       ]);
 
     const suggestions: DiscoverSuggestion[] = [];
+    const usedIds = new Set([
+      'filesystem',
+      'github',
+      'postgres',
+      'sqlite',
+      'fetch',
+      ...existingServers.map((server) => server.id),
+    ]);
+    const seen = new Set<string>();
 
-    if (configs.length > 0) {
-      const names = [...new Set(configs.flatMap((config) => config.serverNames))];
-      const where = configs.map((config) => config.path).join(', ');
-      suggestions.push(
-        suggestion(
-          'cursor-config',
-          '从 Cursor 导入',
-          null,
-          [],
-          names.length > 0
-            ? `在 ${where} 发现 ${names.length} 个已有 server：${names.join(', ')}`
-            : `发现 ${where}，但其中没有 mcpServers 条目`,
-          names.length > 0 ? 'high' : 'low',
-        ),
-      );
+    for (const config of configs) {
+      for (const entry of config.entries) {
+        const key =
+          entry.url !== null
+            ? `url:${entry.url}`
+            : `cmd:${entry.command ?? ''}\u0000${entry.args.join('\u0000')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        suggestions.push(
+          suggestion(
+            slugServerId(entry.name, usedIds),
+            entry.name,
+            entry.command,
+            entry.args,
+            entry.url,
+            `来自 ${config.path}`,
+            'high',
+            entry.envKeys,
+            entry.headerKeys,
+          ),
+        );
+      }
     }
 
     suggestions.push(
@@ -300,6 +377,7 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
         '文件系统',
         'npx',
         ['-y', '@modelcontextprotocol/server-filesystem', '<workspace>'],
+        null,
         deps.workspace === undefined
           ? npx
             ? 'npx 可用；注册时把 <workspace> 换成要暴露的绝对路径'
@@ -317,6 +395,7 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
         'GitHub',
         'npx',
         ['-y', '@modelcontextprotocol/server-github'],
+        null,
         githubToken
           ? '已检测到 GITHUB_TOKEN'
           : gh
@@ -333,6 +412,7 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
         'PostgreSQL',
         'npx',
         ['-y', '@modelcontextprotocol/server-postgres', '<url>'],
+        null,
         databaseUrl
           ? '已检测到 DATABASE_URL'
           : pgpass
@@ -351,6 +431,7 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
         'SQLite',
         'npx',
         ['-y', '@modelcontextprotocol/server-sqlite', '<path>'],
+        null,
         npx
           ? 'npx 可用；注册时把 <path> 换成本地数据库路径'
           : '未检测到 npx；注册后可能无法启动',
@@ -364,18 +445,20 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
         'Fetch',
         'npx',
         ['-y', '@modelcontextprotocol/server-fetch'],
+        null,
         npx ? 'npx 可用' : '未检测到 npx；注册后可能无法启动',
         npx ? 'medium' : 'low',
       ),
     );
 
     for (const item of suggestions) {
-      if (item.id === 'cursor-config') continue;
       item.alreadyExists = existingServers.some((server) =>
-        sameCommandLine(
-          { command: item.command, args: item.args },
-          { command: server.command, args: server.args },
-        ),
+        item.url !== null
+          ? server.url === item.url
+          : sameCommandLine(
+              { command: item.command, args: item.args },
+              { command: server.command, args: server.args },
+            ),
       );
     }
 

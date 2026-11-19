@@ -17,9 +17,10 @@ import { escapeHtml } from './lib/format.ts';
 import { createAuditPage } from './pages/audit.ts';
 import { createManagePage, manageGroupForTab } from './pages/manage.ts';
 import { createOverviewPage } from './pages/overview.ts';
+import { createReportsPage } from './pages/reports.ts';
 import { iconMarkup, type PageHandle } from './pages/shared.ts';
 
-const ROUTES = ['/overview', '/audit', '/manage'] as const;
+const ROUTES = ['/overview', '/audit', '/reports', '/manage'] as const;
 const TOKEN_QUERY_PARAM = 'token';
 const THEME_STORAGE_KEY = 'repl-server.admin.theme';
 const THEME_COLOR_DARK = '#0a0b10';
@@ -43,9 +44,13 @@ const PAGES: Readonly<Record<string, PageMeta>> = {
     title: '审计',
     summary: '调用列表、eval 轨迹与协议帧；先选范围再下钻。',
   },
+  '/reports': {
+    title: '报告',
+    summary: '问题报告、告警投递状态与手动新建。',
+  },
   '/manage': {
     title: '管理',
-    summary: '服务端、工具、客户端、密钥、告警、AI 配置、导入导出与发现；八个分区按连接 / 配置 / 迁移分组。',
+    summary: '服务端、工具、客户端、密钥、标签、告警、AI 配置、导入导出与发现；九个分区按连接 / 配置 / 迁移分组。',
   },
 };
 
@@ -70,6 +75,7 @@ const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       { route: '/overview', label: '概览', icon: 'overview' },
       { route: '/audit', label: '审计', icon: 'audit' },
+      { route: '/reports', label: '报告', icon: 'alert' },
     ],
   },
   {
@@ -458,6 +464,7 @@ function createRoutePage(location: RouteLocation): PageHandle {
     navigate: router.navigate,
   };
   if (location.route === '/audit') return createAuditPage(context);
+  if (location.route === '/reports') return createReportsPage(context);
   if (location.route === '/manage') return createManagePage(context);
   return createOverviewPage(context);
 }

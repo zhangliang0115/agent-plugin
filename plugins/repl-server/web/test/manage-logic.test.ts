@@ -4,7 +4,6 @@ import test from 'node:test';
 
 import { ApiError } from '../src/lib/api.ts';
 import {
-  failureText,
   filterTools,
   isConflictError,
   isServerDraftDirty,
@@ -14,6 +13,7 @@ import {
   serverStatusSummary,
   validateServerForm,
 } from '../src/pages/manage.ts';
+import { failureText } from '../src/pages/shared.ts';
 
 const VALID_STDIO = {
   id: 'pg',

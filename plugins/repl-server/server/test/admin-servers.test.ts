@@ -1498,7 +1498,28 @@ test('POST /discover returns the fixed list, marks existing commands and never l
   const workspace = join(home, 'workspace');
   try {
     await mkdir(join(home, '.cursor'), { recursive: true });
+    await mkdir(join(home, '.kiro', 'settings'), { recursive: true });
     await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          claude_http: {
+            type: 'http',
+            url: 'https://example.test/mcp',
+            headers: { Authorization: 'Bearer secret-header' },
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(home, '.kiro', 'settings', 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          kiro_fs: { command: 'npx', args: ['-y', 'pkg'], env: { API_KEY: 'secret-env' } },
+        },
+      }),
+    );
     await writeFile(
       join(home, '.cursor', 'mcp.json'),
       JSON.stringify({
@@ -1529,6 +1550,13 @@ test('POST /discover returns the fixed list, marks existing commands and never l
           command: 'docker',
           args: [],
         },
+        {
+          id: 'remote',
+          transport: 'http',
+          command: null,
+          args: [],
+          url: 'https://example.test/mcp',
+        },
       ],
     };
     const exec = new Map([
@@ -1554,16 +1582,28 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     const suggestions = body['suggestions'] as Record<string, unknown>[];
     assert.deepEqual(
       suggestions.map((item) => item['id']),
-      ['cursor-config', 'filesystem', 'github', 'postgres', 'sqlite', 'fetch'],
+      ['claude_http', 'kiro_fs', 'fs-2', 'filesystem', 'github', 'postgres', 'sqlite', 'fetch'],
     );
 
     const byId = new Map(suggestions.map((item) => [String(item['id']), item]));
-    const cursor = byId.get('cursor-config')!;
-    assert.match(String(cursor['reason']), /fs/);
+    const remote = byId.get('claude_http')!;
+    assert.equal(remote['url'], 'https://example.test/mcp');
+    assert.deepEqual(remote['headerKeys'], ['Authorization']);
+    assert.equal(remote['alreadyExists'], true);
+
+    const kiro = byId.get('kiro_fs')!;
+    assert.match(String(kiro['reason']), /\.kiro/);
+    assert.deepEqual(kiro['args'], ['-y', 'pkg']);
+    assert.deepEqual(kiro['envKeys'], ['API_KEY']);
+
+    // The id `fs` is already used by a different registered command, so the slug avoids it.
+    const cursor = byId.get('fs-2')!;
+    assert.match(String(cursor['reason']), /\.cursor/);
+    assert.deepEqual(cursor['envKeys'], ['TOKEN']);
     assert.equal(cursor['alreadyExists'], false);
 
     assert.equal(byId.get('github')!['alreadyExists'], true);
-    assert.deepEqual(byId.get('github')!['requiredSecrets'], ['GITHUB_TOKEN']);
+    assert.deepEqual(byId.get('github')!['envKeys'], ['GITHUB_TOKEN']);
     assert.equal(byId.get('github')!['confidence'], 'high');
 
     assert.equal(byId.get('filesystem')!['alreadyExists'], true);
@@ -1580,6 +1620,8 @@ test('POST /discover returns the fixed list, marks existing commands and never l
 
     const serialized = JSON.stringify(body);
     assert.equal(serialized.includes('super-secret-value'), false);
+    assert.equal(serialized.includes('secret-env'), false);
+    assert.equal(serialized.includes('secret-header'), false);
     assert.equal(serialized.includes('password'), false);
   } finally {
     await rm(home, { recursive: true, force: true });

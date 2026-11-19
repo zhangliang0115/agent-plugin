@@ -33,14 +33,17 @@ import {
   badge,
   button,
   cardSection,
+  clippedCell,
   confirmAction,
   copyButton,
   createDrawer,
   definitionList,
   describeError,
   el,
+  emptyBlock,
   emptyState,
   errorActionHint,
+  failureText,
   field,
   formError,
   icon,
@@ -56,8 +59,11 @@ import {
   startPolling,
   statusDetail,
   switchControl,
+  tablePanel,
   tabIntro,
   tabs,
+  tagPicker,
+  td,
   templateCard,
   textarea,
   textInput,
@@ -67,7 +73,7 @@ import {
   type NoticeTone,
   type PageContext,
   type PageHandle,
-  type Polling,
+  type TagDefinition,
   type TabOption,
 } from './shared.ts';
 
@@ -194,10 +200,12 @@ interface DiscoverSuggestion {
   label: string;
   command: string | null;
   args: string[];
+  url: string | null;
   reason: string;
   confidence: 'high' | 'medium' | 'low';
   alreadyExists: boolean;
-  requiredSecrets: string[];
+  envKeys: string[];
+  headerKeys: string[];
 }
 
 interface Operation {
@@ -211,36 +219,6 @@ interface Operation {
 }
 
 type Severity = 'low' | 'medium' | 'high' | 'critical';
-type ReportStatus = 'open' | 'ack' | 'closed';
-type ReportSource = 'mcp' | 'admin';
-type AlertState = 'pending' | 'sending' | 'sent' | 'failed' | 'skipped' | 'no_webhook';
-
-interface ReportView {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  source: ReportSource;
-  binding: string | null;
-  client: string | null;
-  mcp: string | null;
-  exec: string | null;
-  evalId: string | null;
-  severity: Severity;
-  title: string;
-  status: ReportStatus;
-  alertState: AlertState;
-  alertError: string | null;
-  alertAttempts: number;
-  alertUpdatedAt: string | null;
-  alertedAt: string | null;
-  detail?: string;
-  context?: unknown;
-}
-
-interface ReportsResponse {
-  items: ReportView[];
-  nextCursor: string | null;
-}
 
 interface AlertConfigView {
   enabled: boolean;
@@ -439,6 +417,7 @@ export type Tab =
   | 'tools'
   | 'clients'
   | 'secrets'
+  | 'tags'
   | 'alerts'
   | 'ai'
   | 'config'
@@ -450,6 +429,7 @@ const TABS: ReadonlyArray<TabOption> = [
   { id: 'tools', label: '工具', icon: 'tool' },
   { id: 'clients', label: '客户端', icon: 'users' },
   { id: 'secrets', label: '密钥', icon: 'key' },
+  { id: 'tags', label: '标签', icon: 'tag' },
   { id: 'alerts', label: '告警', icon: 'alert' },
   { id: 'ai', label: 'AI 配置', icon: 'activity' },
   { id: 'config', label: '导入导出', icon: 'download' },
@@ -473,6 +453,7 @@ export const MANAGE_NAV_GROUPS: ReadonlyArray<{
     label: '配置',
     items: [
       { tab: 'secrets', label: '密钥' },
+      { tab: 'tags', label: '标签' },
       { tab: 'alerts', label: '告警' },
       { tab: 'ai', label: 'AI 配置' },
     ],
@@ -519,10 +500,16 @@ const TAB_INTROS: Readonly<Record<Tab, { title: string; description: string; hin
       '写入 env/header 引用的密钥值，只写不读。刚注册 server 或轮换凭据时使用；键名先在“服务端”的认证与密钥分组声明。',
     hint: 'GET /secrets 只返回键名与是否已设置；写入后无法回读，只能轮换。',
   },
+  tags: {
+    title: '标签',
+    description:
+      '维护标签字典：存储用的 key 与中文、English 对照。服务端、工具、客户端的标签在这里登记后，表单改为多选，不再随手输入。',
+    hint: 'key 只允许小写字母、数字与 . _ -，保存后会写入 servers / tools 的 tags。删除字典项不会清掉已有数据。',
+  },
   alerts: {
     title: '告警',
     description:
-      '配置企业微信 webhook 与最低严重级，查看问题报告并跟踪投递状态。需要把失败告警出去或复盘报告时使用。',
+      '配置企业微信 webhook 与最低严重级，预览内容并发送测试消息。需要把失败告警出去时使用；报告数据在“报告”页查看。',
     hint: 'webhook 也是只写不读；启用前可用“预览”和“发送测试”确认内容与连通性。',
   },
   ai: {
@@ -761,13 +748,6 @@ export function isConflictError(error: unknown): boolean {
   return error.status === 409 && !NON_CONFLICT_409.has(code);
 }
 
-/** Error text plus the shared next-step hint from {@link errorActionHint}. */
-export function failureText(error: unknown): string {
-  const text = describeError(error);
-  const hint = error instanceof ApiError ? errorActionHint(error.code, '') : '';
-  return hint === '' ? text : `${text}；${hint}`;
-}
-
 /** Tool-row filter used by the tools tab; matches name, displayName, description, tags and category. */
 export function filterTools(tools: readonly ToolRecord[], query: string): ToolRecord[] {
   const needle = query.trim().toLowerCase();
@@ -778,6 +758,7 @@ export function filterTools(tools: readonly ToolRecord[], query: string): ToolRe
       (tool.displayName ?? '').toLowerCase().includes(needle) ||
       (tool.description ?? '').toLowerCase().includes(needle) ||
       (tool.category ?? '').toLowerCase().includes(needle) ||
+    (tool.type ?? '').toLowerCase().includes(needle) ||
       tool.tags.some((tag) => tag.toLowerCase().includes(needle)),
   );
 }
@@ -873,18 +854,6 @@ const SEVERITY_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'critical', label: 'critical' },
 ];
 
-const REPORT_STATUS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: '', label: '全部状态' },
-  { value: 'open', label: 'open' },
-  { value: 'ack', label: 'ack' },
-  { value: 'closed', label: 'closed' },
-];
-
-const REPORT_SEVERITY_FILTER_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: '', label: '全部严重级' },
-  ...SEVERITY_OPTIONS,
-];
-
 const AI_INPUT_MAX_BYTES = 16_384;
 
 const QUOTA_KEYS = [
@@ -897,7 +866,7 @@ const QUOTA_KEYS = [
 export function createManagePage(context: PageContext): PageHandle {
   const { section, body } = pageFrame(
     '管理',
-    '服务端、工具、客户端、密钥、告警、AI 配置、导入导出与发现；按连接 / 配置 / 迁移分组，深链 #/manage?tab=<id> 可直接打开。',
+    '服务端、工具、客户端、密钥、标签、告警配置、AI 配置、导入导出与发现；九个分区按连接 / 配置 / 迁移分组，深链 #/manage?tab=<id> 可直接打开。',
   );
 
   const initialTab = parseTabParam(
@@ -934,6 +903,10 @@ export function createManagePage(context: PageContext): PageHandle {
     tokenReveal: null as { label: string; token: string } | null,
     secrets: [] as SecretStatus[],
     secretsLoaded: false,
+    tagDictionary: [] as TagDefinition[],
+    tagsRevision: 0,
+    tagsLoaded: false,
+    tagDraft: null as TagDefinition[] | null,
     configText: '',
     configLoaded: false,
     importText: '',
@@ -942,11 +915,6 @@ export function createManagePage(context: PageContext): PageHandle {
     discoverLoaded: false,
     alertsConfig: null as AlertConfigView | null,
     alertsConfigLoaded: false,
-    reports: [] as ReportView[],
-    reportsCursor: null as string | null,
-    reportsLoaded: false,
-    reportStatus: '' as '' | ReportStatus,
-    reportSeverity: '' as '' | Severity,
     discoveryDraft: null as DiscoveryDraft | null,
     discoveryPreview: null as DiscoveryPreview | null,
     discoverySelected: new Set<string>(),
@@ -964,8 +932,6 @@ export function createManagePage(context: PageContext): PageHandle {
   };
 
   const drawer = createDrawer();
-  let reportHost: HTMLElement | null = null;
-  let reportsPolling: Polling | null = null;
   let eventsStream: EventStream | null = null;
   let refreshQueued = false;
   const operationWaiters = new Map<string, Set<() => void>>();
@@ -1135,11 +1101,6 @@ export function createManagePage(context: PageContext): PageHandle {
   };
   if (typeof window !== 'undefined') window.addEventListener('beforeunload', beforeUnload);
 
-  function stopReportsPolling(): void {
-    reportsPolling?.stop();
-    reportsPolling = null;
-  }
-
   function setTab(tab: Tab): void {
     if (state.tab === tab) return;
     if (
@@ -1151,10 +1112,6 @@ export function createManagePage(context: PageContext): PageHandle {
     }
     clearDraftsFor(state.tab);
     if (state.tab === 'clients' && tab !== 'clients') state.tokenReveal = null;
-    if (state.tab === 'alerts' && tab !== 'alerts') {
-      stopReportsPolling();
-      reportHost = null;
-    }
     if (state.tab === 'tools' && tab !== 'tools') {
       state.discoveryDraft = null;
       state.discoveryPreview = null;
@@ -1173,24 +1130,31 @@ export function createManagePage(context: PageContext): PageHandle {
       switch (state.tab) {
         case 'servers':
           await ensureServers();
+          await ensureTagDictionaryQuietly();
           await refreshAiPendingQuietly();
           break;
         case 'tools':
           await ensureServers();
           ensureSelectedServer();
           await ensureTools();
+          await ensureTagDictionaryQuietly();
           break;
         case 'clients':
           await loadClients();
+          await ensureTagDictionaryQuietly();
           break;
         case 'secrets':
           await loadSecrets();
           break;
+        case 'tags':
+          await loadTagDraft();
+          break;
         case 'alerts':
-          await Promise.all([ensureAlertsConfig(), loadReports(true)]);
+          await ensureAlertsConfig();
           break;
         case 'ai':
           await Promise.all([ensureServers(), ensureAiConfig(), loadAiPending()]);
+          await ensureTagDictionaryQuietly();
           break;
         case 'config':
           await loadConfig();
@@ -1232,6 +1196,9 @@ export function createManagePage(context: PageContext): PageHandle {
         break;
       case 'secrets':
         content.replaceChildren(intro, buildSecretsTab());
+        break;
+      case 'tags':
+        content.replaceChildren(intro, buildTagsTab());
         break;
       case 'alerts':
         content.replaceChildren(intro, buildAlertsTab());
@@ -1719,7 +1686,13 @@ export function createManagePage(context: PageContext): PageHandle {
     });
     const summaryInput = input({ value: draft.summary, placeholder: '用于检索的 server 摘要' });
     const categoryInput = input({ value: draft.category, placeholder: 'database' });
-    const tagsInput = input({ value: draft.tags, placeholder: 'db, sql' });
+    const tagsPicker = tagPicker({
+      dictionary: state.tagDictionary,
+      value: splitList(draft.tags),
+      onChange: (tags) => {
+        draft.tags = tags.join(', ');
+      },
+    });
     const timeoutInput = input({
       type: 'number',
       value: draft.timeoutMs,
@@ -1846,9 +1819,6 @@ export function createManagePage(context: PageContext): PageHandle {
     bind('category', categoryInput, () => {
       draft.category = categoryInput.value;
     });
-    bind('tags', tagsInput, () => {
-      draft.tags = tagsInput.value;
-    });
     bind('timeoutMs', timeoutInput, () => {
       draft.timeoutMs = timeoutInput.value;
     });
@@ -1927,7 +1897,7 @@ export function createManagePage(context: PageContext): PageHandle {
           makeField('category', 'category', categoryInput, '分组，例如 database。'),
         ),
         pair(
-          makeField('tags', 'tags', tagsInput, '逗号或换行分隔，例如 db, sql。'),
+          makeField('tags', 'tags', tagsPicker.element, '从标签字典多选；未登记标签显示为虚线，可在“配置 › 标签”登记。'),
           makeField('timeoutMs', 'timeoutMs', timeoutInput, '单次调用上限（毫秒），例如 60000。'),
         ),
         makeField('maxConcurrency', 'maxConcurrency', concurrencyInput, '并发上限，例如 8（最大 64）。'),
@@ -2089,7 +2059,7 @@ export function createManagePage(context: PageContext): PageHandle {
         connectMode: connectSelect.value === 'eager' ? 'eager' : 'lazy',
         summary: summaryInput.value,
         category: categoryInput.value,
-        tags: tagsInput.value,
+        tags: draft.tags,
         timeoutMs: values.timeoutMs,
         maxConcurrency: values.maxConcurrency,
       }).catch((error: unknown) => {
@@ -2579,7 +2549,7 @@ export function createManagePage(context: PageContext): PageHandle {
     const table = el('table');
     const thead = el('thead');
     const head = el('tr');
-    for (const label of ['工具', '来源', '启用', '并发', '生效标签', '暴露', '描述', '操作']) {
+    for (const label of ['工具', '来源', '启用', '并发', '类型', '生效标签', '暴露', '描述', '操作']) {
       add(head, el('th', '', label));
     }
     thead.appendChild(head);
@@ -2608,6 +2578,7 @@ export function createManagePage(context: PageContext): PageHandle {
         td(sourceBadge(tool.discoveredVia)),
         td(badge(tool.enabled ? '启用' : '停用', tool.enabled ? 'ok' : 'neutral')),
         td(badge(tool.concurrency, concurrencyTone(tool.concurrency))),
+        td(tool.type ?? '—'),
         tagCell(effective?.tags ?? tool.tags),
         td(
           effective === undefined
@@ -2640,7 +2611,13 @@ export function createManagePage(context: PageContext): PageHandle {
       value: tool.concurrency,
       ariaLabel: 'concurrency',
     });
-    const tags = input({ value: tool.tags.join(', '), placeholder: 'db, read' });
+    const tagsPicker = tagPicker({
+      dictionary: state.tagDictionary,
+      value: tool.tags,
+      onChange: () => {
+        state.toolDraftDirty = true;
+      },
+    });
     const type = input({ value: tool.type ?? '', placeholder: 'query' });
     const category = input({ value: tool.category ?? '', placeholder: '继承 server' });
     const staleSwitch = switchControl({
@@ -2657,10 +2634,10 @@ export function createManagePage(context: PageContext): PageHandle {
         field('concurrency', concurrency),
         staleSwitch,
       ]),
-      groupCard('元数据', 'tags 支持逗号或换行分隔；category 留空继承 server。', [
-        field('tags', tags),
-        field('type', type),
-        field('category', category),
+      groupCard('元数据', 'type 是工具形态（如 query/action）；tags 是可多选的分类标签，来自“配置 › 标签”；category 留空继承 server。', [
+        field('tags（标签）', tagsPicker.element),
+        field('type（类型）', type),
+        field('category（分类）', category),
       ]),
     );
 
@@ -2696,7 +2673,7 @@ export function createManagePage(context: PageContext): PageHandle {
         description: description.value.trim() === '' ? null : description.value,
         enabled: enabledSwitch.input.checked,
         concurrency: concurrency.value,
-        tags: splitList(tags.value),
+        tags: tagsPicker.getValue(),
         type: nullIfEmpty(type.value),
         category: nullIfEmpty(category.value),
         staleOverride: staleSwitch.input.checked,
@@ -3504,10 +3481,13 @@ export function createManagePage(context: PageContext): PageHandle {
       rows: 3,
       placeholder: '每行一个 server id；留空表示全部',
     });
-    const tags = textarea({
-      value: draft.allowedTags,
-      rows: 3,
-      placeholder: '每行一个 tag；留空表示全部',
+    const tagsPicker = tagPicker({
+      dictionary: state.tagDictionary,
+      value: splitList(draft.allowedTags),
+      onChange: (values) => {
+        draft.allowedTags = values.join('\n');
+        state.clientDraftDirty = true;
+      },
     });
     const quotaInputs = new Map<string, HTMLInputElement>();
     const quotaGrid = el('div', 'grid grid-2');
@@ -3531,7 +3511,7 @@ export function createManagePage(context: PageContext): PageHandle {
       groupCard('基本信息', null, [field('label', label), field('defaultWorkspace', workspace)]),
       groupCard('可见范围', '列表留空表示不限制。', [
         field('allowedServers', servers),
-        field('allowedTags', tags),
+        field('allowedTags', tagsPicker.element),
       ]),
       quotaCard,
     );
@@ -3581,7 +3561,7 @@ export function createManagePage(context: PageContext): PageHandle {
         label: label.value.trim(),
         defaultWorkspace: nullIfEmpty(workspace.value),
         allowedServers: nullableList(servers.value),
-        allowedTags: nullableList(tags.value),
+        allowedTags: tagsPicker.getValue().length === 0 ? null : tagsPicker.getValue(),
         quota: Object.keys(quota).length === 0 ? null : quota,
       };
       if (body['label'] === '') {
@@ -3929,7 +3909,143 @@ export function createManagePage(context: PageContext): PageHandle {
   }
 
   // -------------------------------------------------------------------------
-  // Alerts and problem reports (design 06 §6)
+  // Tag dictionary (03 §9.2)
+  // -------------------------------------------------------------------------
+
+  interface TagsResponse {
+    tags: TagDefinition[];
+    revision: number;
+  }
+
+  async function ensureTagDictionary(force = false): Promise<void> {
+    if (state.tagsLoaded && !force) return;
+    const response = await context.api.get<TagsResponse>('/tags', { signal: controller.signal });
+    if (destroyed) return;
+    state.tagDictionary = Array.isArray(response.tags) ? response.tags : [];
+    state.tagsRevision = numberOr(response.revision, state.tagsRevision);
+    state.tagsLoaded = true;
+  }
+
+  /** Editors still work when the dictionary is unavailable: unknown tags stay removable. */
+  async function ensureTagDictionaryQuietly(): Promise<void> {
+    try {
+      await ensureTagDictionary();
+    } catch {
+      // The picker degrades to the tags already on the record.
+    }
+  }
+
+  async function loadTagDraft(): Promise<void> {
+    await ensureTagDictionary(true);
+    if (!destroyed) state.tagDraft = state.tagDictionary.map((tag) => ({ ...tag }));
+  }
+
+  function buildTagsTab(): HTMLElement {
+    const fragment = el('div');
+    setStyle(fragment, { display: 'flex', flexDirection: 'column', gap: '20px' });
+    const draft = state.tagDraft;
+    if (draft === null) {
+      const retryBox = el('div');
+      add(
+        retryBox,
+        emptyBlock('没有读取到标签字典。', '检查服务端 /tags 端点。'),
+        button('重试', () => {
+          void loadTagDraft()
+            .then(() => renderTab())
+            .catch((error: unknown) => setStatus(failureText(error), 'error'));
+        }, { variant: 'secondary', icon: 'refresh' }),
+      );
+      fragment.appendChild(retryBox);
+      return fragment;
+    }
+
+    const handle = cardSection({
+      title: '标签字典',
+      subtitle: 'key 用于存储，中文与 English 用于展示；保存为全量替换，删除字典项不会清掉已有数据。',
+      icon: 'tag',
+      flush: true,
+      actions: [
+        button('新增一行', () => {
+          draft.push({ key: '', zh: '', en: '' });
+          renderTab();
+        }, { variant: 'secondary', icon: 'plus' }),
+      ],
+    });
+
+    if (draft.length === 0) {
+      handle.body.appendChild(
+        emptyBlock('还没有登记标签。', '新增一行，填写 key、中文与 English，然后保存。'),
+      );
+    } else {
+      const table = el('table');
+      const thead = el('thead');
+      const head = el('tr');
+      for (const label of ['key（存储）', '中文', 'English', '操作']) {
+        add(head, el('th', '', label));
+      }
+      thead.appendChild(head);
+      const tbody = el('tbody');
+      draft.forEach((tag, index) => {
+        const keyInput = input({ value: tag.key, placeholder: 'db' });
+        keyInput.maxLength = 32;
+        keyInput.addEventListener('input', () => {
+          tag.key = keyInput.value.trim();
+        });
+        const zhInput = input({ value: tag.zh, placeholder: '数据库' });
+        zhInput.maxLength = 40;
+        zhInput.addEventListener('input', () => {
+          tag.zh = zhInput.value;
+        });
+        const enInput = input({ value: tag.en, placeholder: 'Database' });
+        enInput.maxLength = 40;
+        enInput.addEventListener('input', () => {
+          tag.en = enInput.value;
+        });
+        const remove = button('删除', () => {
+          draft.splice(index, 1);
+          renderTab();
+        }, { variant: 'ghost', size: 'sm', icon: 'trash' });
+        const row = el('tr');
+        add(row, td(keyInput), td(zhInput), td(enInput), td(rowActions(remove)));
+        tbody.appendChild(row);
+      });
+      add(table, thead, tbody);
+      handle.body.appendChild(tablePanel(table));
+    }
+
+    const save = button('保存', () => {
+      save.disabled = true;
+      save.textContent = '保存中…';
+      void context.api
+        .put<TagsResponse>('/tags', { tags: draft }, {
+          signal: controller.signal,
+          headers: { 'If-Match': String(state.tagsRevision) },
+        })
+        .then((response) => {
+          if (destroyed) return;
+          state.tagDictionary = response.tags;
+          state.tagsRevision = numberOr(response.revision, state.tagsRevision);
+          state.tagDraft = response.tags.map((tag) => ({ ...tag }));
+          toast('标签字典已保存。', 'ok');
+          renderTab();
+        })
+        .catch((error: unknown) => {
+          setStatus(failureText(error), 'error');
+          save.disabled = false;
+          save.textContent = '保存';
+        });
+    }, { variant: 'primary', icon: 'check' });
+    const footer = el('div', 'toolbar');
+    setStyle(footer, { padding: '12px 16px' });
+    add(footer, save);
+    handle.element.appendChild(footer);
+
+    fragment.appendChild(handle.element);
+    return fragment;
+  }
+
+  // -------------------------------------------------------------------------
+  // Alert configuration (design 06 §6); report data lives in the 报告 page
   // -------------------------------------------------------------------------
 
   async function ensureAlertsConfig(force = false): Promise<void> {
@@ -3942,81 +4058,11 @@ export function createManagePage(context: PageContext): PageHandle {
     state.alertsConfigLoaded = true;
   }
 
-  async function loadReports(reset: boolean): Promise<void> {
-    if (!reset && state.reportsCursor === null) return;
-    const query: Record<string, string | number> = { limit: 50 };
-    if (state.reportStatus !== '') query['status'] = state.reportStatus;
-    if (state.reportSeverity !== '') query['severity'] = state.reportSeverity;
-    if (!reset && state.reportsCursor !== null) query['cursor'] = state.reportsCursor;
-    const response = await context.api.get<ReportsResponse>('/reports', {
-      query,
-      signal: controller.signal,
-    });
-    if (destroyed) return;
-    const items = Array.isArray(response.items) ? response.items : [];
-    state.reports = reset ? items : [...state.reports, ...items];
-    state.reportsCursor = typeof response.nextCursor === 'string' ? response.nextCursor : null;
-    state.reportsLoaded = true;
-  }
-
-  function startReportsPolling(): void {
-    if (reportsPolling !== null) return;
-    reportsPolling = startPolling(async () => {
-      if (state.tab !== 'alerts' || destroyed) return;
-      await loadReports(true);
-      if (!destroyed && state.tab === 'alerts' && reportHost !== null && reportHost.isConnected) {
-        renderReportsInto(reportHost);
-      }
-    }, 30_000);
-  }
-
   function buildAlertsTab(): HTMLElement {
     const fragment = el('div');
     setStyle(fragment, { display: 'flex', flexDirection: 'column', gap: '20px' });
-
-    fragment.append(buildAlertConfigCard(), buildReportCreateCard());
-
-    const statusFilter = selectControl(REPORT_STATUS_OPTIONS, {
-      value: state.reportStatus,
-      ariaLabel: '报告状态过滤',
-      onChange: (value) => {
-        state.reportStatus = value as '' | ReportStatus;
-        void reloadReports();
-      },
-    });
-    const severityFilter = selectControl(REPORT_SEVERITY_FILTER_OPTIONS, {
-      value: state.reportSeverity,
-      ariaLabel: '报告严重级过滤',
-      onChange: (value) => {
-        state.reportSeverity = value as '' | Severity;
-        void reloadReports();
-      },
-    });
-    const refresh = button('刷新', () => {
-      void reloadReports();
-    }, { variant: 'secondary', icon: 'refresh' });
-    const listCard = cardSection({
-      title: '问题报告',
-      subtitle: `${formatNumber(state.reports.length)} 条 · 每 30 秒刷新（页面隐藏时暂停）`,
-      icon: 'alert',
-      flush: true,
-      actions: [statusFilter, severityFilter, refresh],
-    });
-    reportHost = el('div');
-    listCard.body.appendChild(reportHost);
-    renderReportsInto(reportHost);
-    fragment.append(listCard.element);
-    startReportsPolling();
+    fragment.append(buildAlertConfigCard());
     return fragment;
-  }
-
-  async function reloadReports(): Promise<void> {
-    try {
-      await loadReports(true);
-      if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
-    } catch (error) {
-      if (!destroyed) setStatus(failureText(error), 'error');
-    }
   }
 
   function buildAlertConfigCard(): HTMLElement {
@@ -4227,326 +4273,6 @@ export function createManagePage(context: PageContext): PageHandle {
     add(controls, save, clear, preview, test);
     add(handle.body, statusLine, enabledSwitch, field('最低严重级', severitySelect), webhookHost, controls, errorLine, resultHost);
     return handle.element;
-  }
-
-  function buildReportCreateCard(): HTMLElement {
-    const handle = cardSection({
-      title: '新建问题报告',
-      subtitle: '提交后写入数据库并进入告警队列；列表不会自动展开详情。',
-      icon: 'plus',
-    });
-    const formBody = el('div');
-    setStyle(formBody, { display: 'flex', flexDirection: 'column', gap: '12px' });
-    formBody.hidden = true;
-    const toggle = button('展开表单', () => {
-      formBody.hidden = !formBody.hidden;
-      toggle.textContent = formBody.hidden ? '展开表单' : '收起表单';
-    }, { variant: 'secondary', icon: 'chevron-down' });
-    handle.actions.appendChild(toggle);
-
-    const title = input({ placeholder: 'Bash 执行 npm test 时挂起' });
-    title.maxLength = 200;
-    const detail = textarea({ rows: 6, placeholder: '现象、期望与实际、复现步骤；不要粘贴密钥。' });
-    detail.maxLength = 20_000;
-    const severity = selectControl(SEVERITY_OPTIONS, { value: 'high', ariaLabel: 'severity' });
-    const contextArea = textarea({
-      rows: 4,
-      placeholder: '可选 JSON 对象，≤ 8192 字节；例如 {"tool":"Bash"}',
-    });
-    const errorLine = formError();
-    const submit = button('提交报告', () => undefined, { type: 'submit', variant: 'primary' });
-    const form = el('form');
-    form.noValidate = true;
-    setStyle(form, { display: 'flex', flexDirection: 'column', gap: '12px' });
-    add(
-      form,
-      notice('报告中不要粘贴密钥；详情与 context 不会进入告警消息和审计日志。', 'queue'),
-      field('标题', title),
-      field('详情', detail),
-      field('严重级', severity),
-      field('context（JSON）', contextArea),
-      errorLine,
-      submit,
-    );
-    formBody.appendChild(form);
-    handle.body.appendChild(formBody);
-
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
-      setFormError(errorLine, null);
-      const titleText = title.value.trim();
-      const detailText = detail.value.trim();
-      if (titleText === '') {
-        setFormError(errorLine, '标题不能为空。');
-        return;
-      }
-      if (detailText === '') {
-        setFormError(errorLine, '详情不能为空。');
-        return;
-      }
-      let parsedContext: unknown;
-      if (contextArea.value.trim() !== '') {
-        try {
-          parsedContext = JSON.parse(contextArea.value);
-        } catch (error) {
-          setFormError(errorLine, `context JSON 解析失败：${describeError(error)}`);
-          return;
-        }
-        if (
-          typeof parsedContext !== 'object' ||
-          parsedContext === null ||
-          Array.isArray(parsedContext)
-        ) {
-          setFormError(errorLine, 'context 必须是 JSON 对象。');
-          return;
-        }
-      }
-      const body: Record<string, unknown> = {
-        title: titleText,
-        detail: detailText,
-        severity: severity.value,
-      };
-      if (parsedContext !== undefined) body['context'] = parsedContext;
-      submit.disabled = true;
-      submit.textContent = '提交中…';
-      void context.api
-        .post<{ report: ReportView }>('/reports', body, { signal: controller.signal })
-        .then(async (response) => {
-          if (destroyed) return;
-          succeeded(`已创建报告 ${response.report.id}；状态 ${response.report.status}。`);
-          title.value = '';
-          detail.value = '';
-          contextArea.value = '';
-          try {
-            await loadReports(true);
-            if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
-          } catch (refreshError) {
-            if (!destroyed) {
-              setStatus(`报告已创建，但刷新列表失败：${failureText(refreshError)}`, 'queue');
-            }
-          }
-        })
-        .catch((error: unknown) => {
-          if (!destroyed) setFormError(errorLine, saveErrorText(error));
-        })
-        .finally(() => {
-          if (submit.isConnected) {
-            submit.disabled = false;
-            submit.textContent = '提交报告';
-          }
-        });
-    });
-    return handle.element;
-  }
-
-  function renderReportsInto(host: HTMLElement): void {
-    host.replaceChildren();
-    if (state.reports.length === 0) {
-      host.appendChild(
-        emptyBlock('还没有问题报告。', '可以在上方新建报告，或让 MCP 客户端调用 report_problem。'),
-      );
-      return;
-    }
-    const table = el('table');
-    const thead = el('thead');
-    const head = el('tr');
-    for (const label of ['时间', '严重级', '标题', '来源', '状态', '告警状态']) {
-      add(head, el('th', '', label));
-    }
-    thead.appendChild(head);
-    const tbody = el('tbody');
-    for (const report of state.reports) {
-      const row = el('tr');
-      row.style.cursor = 'pointer';
-      row.addEventListener('click', () => openReportDetail(report.id));
-      const time = el('span', '', formatTimestamp(report.createdAt));
-      time.title = report.createdAt;
-      add(
-        row,
-        td(time),
-        td(badge(report.severity, severityTone(report.severity))),
-        clippedCell(report.title, 380),
-        td(badge(report.source, report.source === 'mcp' ? 'info' : 'neutral')),
-        td(badge(report.status, reportStatusTone(report.status))),
-        td(alertStateBadge(report.alertState)),
-      );
-      tbody.appendChild(row);
-    }
-    add(table, thead, tbody);
-    host.appendChild(tablePanel(table));
-    if (state.reportsCursor !== null) {
-      const footer = el('div', 'toolbar');
-      add(
-        footer,
-        button('加载更多', () => {
-          void loadReports(false)
-            .then(() => {
-              if (!destroyed && reportHost !== null) renderReportsInto(reportHost);
-            })
-            .catch((error: unknown) => {
-              if (error instanceof ApiError && error.code === 'INVALID_CURSOR') {
-                state.reportsCursor = null;
-                void reloadReports();
-                setStatus('分页游标失效，已从头加载。', 'queue');
-                return;
-              }
-              if (!destroyed) setStatus(failureText(error), 'error');
-            });
-        }, { variant: 'secondary' }),
-      );
-      setStyle(footer, { padding: '12px 16px' });
-      host.appendChild(footer);
-    }
-  }
-
-  function openReportDetail(reportId: string): void {
-    drawer.open(`报告 ${formatId(reportId, 20)}`, loading('正在加载报告详情…'));
-    void context.api
-      .get<{ report: ReportView }>(`/reports/${encodeURIComponent(reportId)}`, {
-        signal: controller.signal,
-      })
-      .then((response) => {
-        if (destroyed) return;
-        drawer.open(`报告 ${formatId(reportId, 20)}`, buildReportDetail(response.report));
-      })
-      .catch((error: unknown) => {
-        if (destroyed) return;
-        const box = el('div');
-        add(box, notice(failureText(error), 'error'));
-        drawer.open(`报告 ${formatId(reportId, 20)}`, box);
-      });
-  }
-
-  function buildReportDetail(report: ReportView): HTMLElement {
-    const wrapper = el('div');
-    setStyle(wrapper, { display: 'flex', flexDirection: 'column', gap: '16px' });
-    const head = el('div', 'toolbar');
-    add(
-      head,
-      badge(report.severity, severityTone(report.severity)),
-      badge(report.status, reportStatusTone(report.status)),
-      alertStateBadge(report.alertState),
-      badge(report.source, report.source === 'mcp' ? 'info' : 'neutral'),
-    );
-    add(wrapper, head);
-    add(
-      wrapper,
-      definitionList([
-        { label: 'id', value: report.id, mono: true },
-        { label: '创建', value: formatTimestamp(report.createdAt) },
-        { label: '更新', value: formatTimestamp(report.updatedAt) },
-        { label: '来源', value: report.source },
-        { label: 'binding', value: report.binding ?? '—', mono: true },
-        { label: 'client', value: report.client ?? '—', mono: true },
-        { label: 'mcp', value: report.mcp ?? '—', mono: true },
-        { label: 'exec', value: report.exec ?? '—', mono: true },
-        { label: 'evalId', value: report.evalId ?? '—', mono: true },
-        { label: '告警尝试', value: formatNumber(report.alertAttempts) },
-        { label: '告警错误', value: report.alertError ?? '—', mono: true },
-        { label: '告警更新', value: formatTimestamp(report.alertUpdatedAt) },
-        { label: '送达时间', value: formatTimestamp(report.alertedAt) },
-      ]),
-    );
-
-    add(wrapper, el('h3', '', report.title));
-    const detail = el('pre', '', report.detail ?? '');
-    setStyle(detail, {
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-word',
-      margin: '0',
-      fontFamily: 'inherit',
-      fontSize: '13px',
-    });
-    add(wrapper, detail);
-
-    if (report.context !== undefined && report.context !== null) {
-      add(wrapper, el('h3', '', 'context'));
-      const context = el('pre', '', formatJson(report.context, 2));
-      setStyle(context, {
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-        margin: '0',
-        padding: '12px',
-        border: '1px solid var(--border)',
-        borderRadius: '8px',
-      });
-      add(wrapper, context);
-    }
-
-    if (report.alertError !== null) add(wrapper, notice(report.alertError, 'error'));
-
-    const actions = el('div', 'toolbar');
-    if (report.status === 'open') {
-      actions.appendChild(
-        button('确认', () => void changeReportStatus(report.id, 'ack'), {
-          variant: 'secondary',
-          size: 'sm',
-        }),
-      );
-    }
-    if (report.status !== 'open') {
-      actions.appendChild(
-        button('重新打开', () => void changeReportStatus(report.id, 'open'), {
-          variant: 'secondary',
-          size: 'sm',
-        }),
-      );
-    }
-    if (report.status !== 'closed') {
-      actions.appendChild(
-        button('关闭', () => void changeReportStatus(report.id, 'closed'), {
-          variant: 'primary',
-          size: 'sm',
-        }),
-      );
-    }
-    if (
-      report.alertState === 'failed' ||
-      report.alertState === 'skipped' ||
-      report.alertState === 'no_webhook'
-    ) {
-      actions.appendChild(
-        button('重发告警', () => void retryReportAlert(report.id), {
-          variant: 'secondary',
-          size: 'sm',
-        }),
-      );
-    }
-    actions.appendChild(button('关闭详情', () => drawer.close(), { variant: 'ghost', size: 'sm' }));
-    add(wrapper, actions);
-    return wrapper;
-  }
-
-  async function changeReportStatus(reportId: string, status: ReportStatus): Promise<void> {
-    try {
-      await context.api.patch<{ report: ReportView }>(
-        `/reports/${encodeURIComponent(reportId)}`,
-        { status },
-        { signal: controller.signal },
-      );
-      if (destroyed) return;
-      succeeded(`报告状态已更新为 ${status}。`);
-      await reloadReports();
-      openReportDetail(reportId);
-    } catch (error) {
-      if (!destroyed) setStatus(failureText(error), 'error');
-    }
-  }
-
-  async function retryReportAlert(reportId: string): Promise<void> {
-    try {
-      await context.api.post<{ report: ReportView }>(
-        `/reports/${encodeURIComponent(reportId)}/retry-alert`,
-        undefined,
-        { signal: controller.signal },
-      );
-      if (destroyed) return;
-      succeeded('告警已重新排队。');
-      await reloadReports();
-      openReportDetail(reportId);
-    } catch (error) {
-      if (!destroyed) setStatus(failureText(error), 'error');
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -4814,7 +4540,11 @@ export function createManagePage(context: PageContext): PageHandle {
       ariaLabel: 'connectMode',
     });
     const categoryInput = input({ value: server.category ?? '', placeholder: 'devtools' });
-    const tagsInput = input({ value: server.tags.join(', '), placeholder: 'git, github' });
+    const tagsPicker = tagPicker({
+      dictionary: state.tagDictionary,
+      value: server.tags,
+      onChange: () => undefined,
+    });
     const summaryInput = input({ value: server.summary ?? '', placeholder: '用于检索的摘要与英文关键词' });
 
     const stdioFields = el('div');
@@ -4848,7 +4578,7 @@ export function createManagePage(context: PageContext): PageHandle {
       groupCard('元数据', 'summary 与 tags 用于检索。', [
         field('summary', summaryInput),
         field('category', categoryInput),
-        field('tags', tagsInput),
+        field('tags', tagsPicker.element),
         enabledSwitch,
       ]),
     );
@@ -4910,7 +4640,7 @@ export function createManagePage(context: PageContext): PageHandle {
           enabled: enabledSwitch.input.checked,
           connectMode: connectSelect.value === 'eager' ? 'eager' : 'lazy',
           category: nullIfEmpty(categoryInput.value),
-          tags: splitList(tagsInput.value),
+          tags: tagsPicker.getValue(),
           summary: nullIfEmpty(summaryInput.value),
         },
       };
@@ -5184,7 +4914,11 @@ export function createManagePage(context: PageContext): PageHandle {
     tagsBox.checked = draft.proposed.tags.length > 0;
     tagsBox.disabled = draft.proposed.tags.length === 0;
     const mergedTags = [...new Set([...draft.current.tags, ...draft.proposed.tags])];
-    const tagsInput = input({ value: mergedTags.join(', '), placeholder: 'db, sql' });
+    const tagsPicker = tagPicker({
+      dictionary: state.tagDictionary,
+      value: mergedTags,
+      onChange: () => undefined,
+    });
 
     const summaryCurrent = el('span', 'muted', draft.current.summary ?? '—');
     const summaryProposed = el('pre', '', draft.proposed.summary ?? '—');
@@ -5211,7 +4945,7 @@ export function createManagePage(context: PageContext): PageHandle {
       tagsBox,
       el('span', '', '应用 tags（当前 ∪ 建议）'),
       badge(`当前 ${draft.current.tags.join(', ') || '—'}`, 'neutral'),
-      tagsInput,
+      tagsPicker.element,
     );
     add(wrapper, summaryLine, categoryLine, tagsLine);
 
@@ -5279,7 +5013,7 @@ export function createManagePage(context: PageContext): PageHandle {
         applyBody['category'] = draft.proposed.category;
       }
       if (tagsBox.checked) {
-        const tags = splitList(tagsInput.value);
+        const tags = tagsPicker.getValue();
         if (tags.length > 0) applyBody['tags'] = tags;
       }
       const overrides: Array<Record<string, unknown>> = [];
@@ -5652,7 +5386,7 @@ export function createManagePage(context: PageContext): PageHandle {
       add(
         row,
         suggestionIdentity(suggestion),
-        el('td', 'mono', [suggestion.command ?? '', ...suggestion.args].join(' ')),
+        el('td', 'mono', suggestion.url ?? [suggestion.command ?? '', ...suggestion.args].join(' ')),
         td(badge(suggestion.confidence, confidenceTone(suggestion.confidence))),
         clippedCell(suggestion.reason, 380),
         td(badge(suggestion.alreadyExists ? '是' : '否', suggestion.alreadyExists ? 'queue' : 'neutral')),
@@ -5663,13 +5397,13 @@ export function createManagePage(context: PageContext): PageHandle {
                 mode: 'create',
                 id: suggestion.id,
                 label: suggestion.label,
-                transport: 'stdio',
+                transport: suggestion.url === null ? 'stdio' : 'http',
                 command: suggestion.command ?? '',
                 args: suggestion.args.join('\n'),
                 cwd: '',
-                url: '',
-                envKeys: suggestion.requiredSecrets.join('\n'),
-                headerKeys: '',
+                url: suggestion.url ?? '',
+                envKeys: suggestion.envKeys.join('\n'),
+                headerKeys: suggestion.headerKeys.join('\n'),
                 enabled: true,
                 connectMode: 'lazy',
                 summary: suggestion.reason,
@@ -5825,7 +5559,6 @@ export function createManagePage(context: PageContext): PageHandle {
       destroyed = true;
       controller.abort();
       if (typeof window !== 'undefined') window.removeEventListener('beforeunload', beforeUnload);
-      stopReportsPolling();
       stopEventsStream();
       for (const waiters of operationWaiters.values()) {
         for (const wake of [...waiters]) wake();
@@ -5915,28 +5648,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 /** Bordered list surface; flush cards do not need a second border inside their body. */
-function tablePanel(table: HTMLTableElement): HTMLElement {
-  const wrap = el('div', 'table-wrap');
-  setStyle(wrap, {
-    border: '0',
-    borderRadius: '0',
-    maxHeight: 'min(720px, calc(100vh - 280px))',
-  });
-  add(wrap, table);
-  return wrap;
-}
-
-/** Empty state for a card body; `emptyState` owns the page-level card styling. */
-function emptyBlock(title: string, hint?: string): HTMLElement {
-  const box = el('div', 'empty-state');
-  add(box, icon('inbox', 26));
-  const body = el('div', 'empty-body');
-  add(body, el('p', 'empty-title', title));
-  if (hint !== undefined) add(body, el('p', 'empty-hint', hint));
-  add(box, body);
-  return box;
-}
-
 /** Two-column form layout on desktop; the 420px track collapses to one column on narrow screens. */
 function formGrid(): HTMLElement {
   const grid = el('div', 'grid grid-2');
@@ -5966,12 +5677,6 @@ function rowActions(...children: Node[]): HTMLElement {
   setStyle(actions, { gap: '4px', flexWrap: 'nowrap' });
   add(actions, ...children);
   return actions;
-}
-
-function td(content: Node | string): HTMLTableCellElement {
-  const cell = el('td');
-  add(cell, content);
-  return cell;
 }
 
 function serverIdentity(server: ServerView, extra?: Node): HTMLTableCellElement {
@@ -6038,19 +5743,6 @@ function updatedCell(value: string | undefined): HTMLTableCellElement {
   return cell;
 }
 
-function clippedCell(text: string, maxWidth: number): HTMLTableCellElement {
-  const cell = el('td', 'muted');
-  if (text === '') {
-    cell.textContent = '—';
-    return cell;
-  }
-  const span = el('span', 'truncate', text);
-  setStyle(span, { display: 'inline-block', maxWidth: `${maxWidth}px` });
-  span.title = text;
-  add(cell, span);
-  return cell;
-}
-
 function descriptionCell(text: string): HTMLTableCellElement {
   return clippedCell(text, 360);
 }
@@ -6092,33 +5784,6 @@ function retryAfterText(details: Record<string, unknown> | null): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? `${formatDuration(value)} 后重试`
     : '稍后重试';
-}
-
-function severityTone(severity: Severity): 'error' | 'queue' | 'info' | 'neutral' {
-  if (severity === 'critical') return 'error';
-  if (severity === 'high') return 'queue';
-  if (severity === 'medium') return 'info';
-  return 'neutral';
-}
-
-function reportStatusTone(status: ReportStatus): 'ok' | 'queue' | 'info' {
-  if (status === 'closed') return 'ok';
-  if (status === 'ack') return 'queue';
-  return 'info';
-}
-
-function alertStateBadge(state: AlertState): HTMLSpanElement {
-  const tone =
-    state === 'sent'
-      ? 'ok'
-      : state === 'failed' || state === 'no_webhook'
-        ? 'error'
-        : state === 'skipped'
-          ? 'queue'
-          : state === 'pending' || state === 'sending'
-            ? 'info'
-            : 'neutral';
-  return badge(state, tone);
 }
 
 function tabLabel(tab: Tab): string {
