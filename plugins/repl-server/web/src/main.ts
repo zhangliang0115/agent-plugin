@@ -15,7 +15,7 @@ import { createApiClient } from './lib/api.ts';
 import { createHashRouter, type RouteLocation } from './lib/router.ts';
 import { escapeHtml } from './lib/format.ts';
 import { createAuditPage } from './pages/audit.ts';
-import { createManagePage } from './pages/manage.ts';
+import { createManagePage, MANAGE_NAV_GROUPS } from './pages/manage.ts';
 import { createOverviewPage } from './pages/overview.ts';
 import { iconMarkup, type PageHandle } from './pages/shared.ts';
 
@@ -115,6 +115,21 @@ function currentTheme(): Theme {
   return document.documentElement.dataset['theme'] === 'light' ? 'light' : 'dark';
 }
 
+function manageSubMarkup(): string {
+  return `<div class="sidebar-sub" data-manage-sub hidden>
+    ${MANAGE_NAV_GROUPS.map(
+      (group) => `
+      <p class="sidebar-sub-label">${escapeHtml(group.label)}</p>
+      ${group.items
+        .map(
+          (item) => `
+        <a class="sidebar-sublink" href="#/manage${item.tab === 'servers' ? '' : `?tab=${item.tab}`}" data-route="/manage" data-manage-tab="${item.tab}">${escapeHtml(item.label)}</a>`,
+        )
+        .join('')}`,
+    ).join('')}
+  </div>`;
+}
+
 function navMarkup(): string {
   return NAV_GROUPS.map(
     (group) => `
@@ -126,7 +141,7 @@ function navMarkup(): string {
           <a class="sidebar-link" href="#${item.route}" data-route="${item.route}">
             ${iconMarkup(item.icon, 16)}
             <span>${escapeHtml(item.label)}</span>
-          </a>`,
+          </a>${item.route === '/manage' ? manageSubMarkup() : ''}`,
           )
           .join('')}
       </div>`,
@@ -211,6 +226,10 @@ function showShell(): void {
   // Registered before `router.start()` so a cancelled browser back/forward can restore
   // the previous hash before the router sees the change.
   window.addEventListener('hashchange', guardHashNavigation);
+  window.addEventListener('repl:manage-tab', (event) => {
+    const tab = (event as CustomEvent<unknown>).detail;
+    if (typeof tab === 'string') setManageTabActive(tab);
+  });
   router.start();
   startHealthChecks();
   void hydrateCsrfToken();
@@ -254,7 +273,7 @@ function bindShellActions(): void {
       if (!(target instanceof Element)) return;
       const link = target.closest<HTMLAnchorElement>('a[data-route]');
       if (link === null) return;
-      if (link.dataset['route'] === router.current().route) return;
+      if (link.getAttribute('href') === `#${router.current().hash}`) return;
       if (!canLeavePage()) event.preventDefault();
     });
 }
@@ -396,6 +415,13 @@ function setText(selector: string, text: string): void {
   if (node !== null) node.textContent = text;
 }
 
+function setManageTabActive(tab: string | null): void {
+  for (const link of appRoot.querySelectorAll<HTMLAnchorElement>('a[data-manage-tab]')) {
+    if (tab !== null && link.dataset['manageTab'] === tab) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+}
+
 function renderRoute(location: RouteLocation): void {
   const meta = PAGES[location.route] ?? { title: location.route, summary: '' };
   document.title = `${meta.title} · repl-server`;
@@ -404,9 +430,15 @@ function renderRoute(location: RouteLocation): void {
   setText('[data-page-summary]', meta.summary);
 
   for (const link of appRoot.querySelectorAll<HTMLAnchorElement>('a[data-route]')) {
+    if (link.dataset['manageTab'] !== undefined) continue;
     if (link.dataset['route'] === location.route) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  const manageSub = appRoot.querySelector<HTMLElement>('[data-manage-sub]');
+  if (manageSub !== null) manageSub.hidden = location.route !== '/manage';
+  setManageTabActive(
+    location.route === '/manage' ? location.query.get('tab') ?? 'servers' : null,
+  );
 
   resetDrawer();
   activePage?.destroy();

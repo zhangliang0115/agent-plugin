@@ -456,11 +456,34 @@ const TABS: ReadonlyArray<TabOption> = [
   { id: 'discover', label: '发现', icon: 'search' },
 ];
 
-/** Information architecture: connect (runtime) / configure (policy) / migrate (data). */
-const TAB_GROUPS: ReadonlyArray<{ label: string; tabs: readonly Tab[] }> = [
-  { label: '连接', tabs: ['servers', 'tools', 'clients'] },
-  { label: '配置', tabs: ['secrets', 'alerts', 'ai'] },
-  { label: '迁移', tabs: ['config', 'discover'] },
+/** Sidebar navigation for the manage section; labels mirror TABS. */
+export const MANAGE_NAV_GROUPS: ReadonlyArray<{
+  label: string;
+  items: ReadonlyArray<{ tab: Tab; label: string }>;
+}> = [
+  {
+    label: '连接',
+    items: [
+      { tab: 'servers', label: '服务端' },
+      { tab: 'tools', label: '工具' },
+      { tab: 'clients', label: '客户端' },
+    ],
+  },
+  {
+    label: '配置',
+    items: [
+      { tab: 'secrets', label: '密钥' },
+      { tab: 'alerts', label: '告警' },
+      { tab: 'ai', label: 'AI 配置' },
+    ],
+  },
+  {
+    label: '迁移',
+    items: [
+      { tab: 'config', label: '导入导出' },
+      { tab: 'discover', label: '发现' },
+    ],
+  },
 ];
 
 const TAB_INTROS: Readonly<Record<Tab, { title: string; description: string; hint?: string }>> = {
@@ -969,58 +992,9 @@ export function createManagePage(context: PageContext): PageHandle {
 
   /** Rebuilds the underline tabs so programmatic switches and clicks share one truth. */
   function renderTabs(): void {
-    const nav = tabs(TABS, state.tab, (id) => setTab(id as Tab), { ariaLabel: '管理分区' });
-    const controls = new Map<string, HTMLButtonElement>();
-    for (const control of Array.from(nav.querySelectorAll<HTMLButtonElement>('[data-tab]'))) {
-      const id = control.dataset['tab'];
-      if (id !== undefined) controls.set(id, control);
-    }
-    const ordered: Node[] = [];
-    TAB_GROUPS.forEach((group, index) => {
-      if (index > 0) ordered.push(tabGroupDivider());
-      ordered.push(tabGroupLabel(group.label));
-      for (const id of group.tabs) {
-        const control = controls.get(id);
-        if (control !== undefined) ordered.push(control);
-      }
-    });
-    nav.replaceChildren(...ordered);
-    tabHost.replaceChildren(nav);
-  }
-
-  /** Non-interactive group label inside the tab strip; keeps the strip scrollable on narrow screens. */
-  function tabGroupLabel(label: string): HTMLElement {
-    const node = el('span', 'tab-group-label', label);
-    node.setAttribute('aria-hidden', 'true');
-    node.setAttribute('role', 'presentation');
-    setStyle(node, {
-      display: 'inline-flex',
-      alignItems: 'center',
-      flex: '0 0 auto',
-      height: '36px',
-      padding: '0 2px 0 12px',
-      color: 'var(--text-faint)',
-      fontSize: '10.5px',
-      fontWeight: '600',
-      letterSpacing: '0.08em',
-      whiteSpace: 'nowrap',
-      userSelect: 'none',
-    });
-    return node;
-  }
-
-  function tabGroupDivider(): HTMLElement {
-    const node = el('span', 'tab-group-divider');
-    node.setAttribute('aria-hidden', 'true');
-    node.setAttribute('role', 'presentation');
-    setStyle(node, {
-      flex: '0 0 auto',
-      width: '1px',
-      height: '14px',
-      margin: '0 6px',
-      background: 'var(--border)',
-    });
-    return node;
+    tabHost.replaceChildren(
+      tabs(TABS, state.tab, (id) => setTab(id as Tab), { ariaLabel: '管理分区' }),
+    );
   }
 
   function later(callback: () => void, ms: number): void {
@@ -1034,6 +1008,7 @@ export function createManagePage(context: PageContext): PageHandle {
   /** Keeps `#/manage?tab=<id>` in sync without adding history entries. */
   function syncTabHash(tab: Tab): void {
     if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('repl:manage-tab', { detail: tab }));
     const next = manageHashForTab(tab);
     if (window.location.hash === next) return;
     try {
