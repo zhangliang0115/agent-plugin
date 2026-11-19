@@ -90,7 +90,8 @@ interface AuditFilters {
   from: string;
   to: string;
   event: string;
-  client: string;
+  clientName: string;
+  clientVersion: string;
   binding: string;
   tool: string;
   server: string;
@@ -825,12 +826,21 @@ export function AuditPage(): React.ReactElement {
             </Field>
           </Space>
           <Space wrap size={[12, 10]}>
-            <Field label="客户端（client）">
+            <Field label="客户端名称">
               <Input
-                value={draft.client}
-                placeholder="claude-code/2.1.327"
-                style={{ width: 170 }}
-                onChange={(event) => setDraft({ ...draft, client: event.target.value })}
+                value={draft.clientName}
+                placeholder="claude-code"
+                style={{ width: 150 }}
+                onChange={(event) => setDraft({ ...draft, clientName: event.target.value })}
+                onPressEnter={applyDraft}
+              />
+            </Field>
+            <Field label="客户端版本">
+              <Input
+                value={draft.clientVersion}
+                placeholder="2.1.327"
+                style={{ width: 130 }}
+                onChange={(event) => setDraft({ ...draft, clientVersion: event.target.value })}
                 onPressEnter={applyDraft}
               />
             </Field>
@@ -972,8 +982,11 @@ export function AuditPage(): React.ReactElement {
                 <Descriptions.Item label="事件">
                   <span className="mono">{selected.event ?? '—'}</span>
                 </Descriptions.Item>
-                <Descriptions.Item label="client">
-                  {eventText(selected, 'client') ?? '—'}
+                <Descriptions.Item label="客户端名称">
+                  {eventClientParts(selected).name || '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="客户端版本">
+                  {eventClientParts(selected).version || '—'}
                 </Descriptions.Item>
                 <Descriptions.Item label="binding">
                   <span className="mono">{eventText(selected, 'binding') ?? 'unbound'}</span>
@@ -1223,7 +1236,8 @@ function defaultAuditFilters(now: number = Date.now()): AuditFilters {
     from: toDateTimeLocal(now - Number(DEFAULT_RANGE) * 60_000),
     to: '',
     event: '',
-    client: '',
+    clientName: '',
+    clientVersion: '',
     binding: '',
     tool: '',
     server: '',
@@ -1263,11 +1277,15 @@ function readFiltersFromHash(): AuditFilters {
     rangeValue = '';
   }
 
+  const legacyClient = params.get('client');
+  const legacyParts = legacyClient === null ? { name: '', version: '' } : splitClientFilter(legacyClient);
+
   return {
     from,
     to,
     event: pickOption(params.get('event'), EVENT_OPTIONS),
-    client: params.get('client') ?? '',
+    clientName: params.get('clientName') ?? legacyParts.name,
+    clientVersion: params.get('clientVersion') ?? legacyParts.version,
     binding: params.get('binding') ?? '',
     tool: params.get('tool') ?? '',
     server: params.get('server') ?? '',
@@ -1285,7 +1303,8 @@ function writeFiltersToHash(filters: AuditFilters): void {
   if (filters.from !== '') params.set('from', filters.from);
   if (filters.to !== '') params.set('to', filters.to);
   if (filters.event !== '') params.set('event', filters.event);
-  if (filters.client !== '') params.set('client', filters.client);
+  if (filters.clientName !== '') params.set('clientName', filters.clientName);
+  if (filters.clientVersion !== '') params.set('clientVersion', filters.clientVersion);
   if (filters.binding !== '') params.set('binding', filters.binding);
   if (filters.tool !== '') params.set('tool', filters.tool);
   if (filters.server !== '') params.set('server', filters.server);
@@ -1345,7 +1364,8 @@ function filterQuery(filters: AuditFilters): Record<string, string | number | un
     from: toIso(filters.from),
     to: toIso(filters.to),
     event: emptyToUndefined(filters.event),
-    client: emptyToUndefined(filters.client),
+    clientName: emptyToUndefined(filters.clientName),
+    clientVersion: emptyToUndefined(filters.clientVersion),
     binding: emptyToUndefined(filters.binding),
     tool: emptyToUndefined(filters.tool),
     server: emptyToUndefined(filters.server),
@@ -1386,6 +1406,22 @@ function eventText(event: AuditEvent | undefined, key: string): string | null {
   if (typeof value === 'string' && value !== '') return value;
   if (typeof value === 'number') return String(value);
   return null;
+}
+
+/** Explicit `clientName`/`clientVersion`, falling back to the legacy `client` label. */
+function eventClientParts(event: AuditEvent): { name: string; version: string } {
+  const name = eventText(event, 'clientName');
+  const version = eventText(event, 'clientVersion');
+  if (name !== null || version !== null) return { name: name ?? '', version: version ?? '' };
+  const legacy = eventText(event, 'client');
+  return legacy === null ? { name: '', version: '' } : splitClientFilter(legacy);
+}
+
+/** Splits the legacy `name/version` filter at the first `/`. */
+function splitClientFilter(label: string): { name: string; version: string } {
+  const slash = label.indexOf('/');
+  if (slash <= 0) return { name: label, version: '' };
+  return { name: label.slice(0, slash), version: label.slice(slash + 1) };
 }
 
 /** Tool for calls; `kind` for `ai_run`; the event name as the last resort. */
@@ -1494,8 +1530,10 @@ function matchesFilters(event: AuditEvent, filters: AuditFilters): boolean {
   const to = parseTime(filters.to);
   if (from !== null && (time === null || time < from)) return false;
   if (to !== null && (time === null || time > to)) return false;
-  const client = filters.client.trim();
-  if (client !== '' && eventText(event, 'client') !== client) return false;
+  const clientName = filters.clientName.trim();
+  if (clientName !== '' && eventClientParts(event).name !== clientName) return false;
+  const clientVersion = filters.clientVersion.trim();
+  if (clientVersion !== '' && eventClientParts(event).version !== clientVersion) return false;
   const binding = filters.binding.trim();
   if (binding !== '' && eventText(event, 'binding') !== binding) return false;
   const tool = filters.tool.trim();

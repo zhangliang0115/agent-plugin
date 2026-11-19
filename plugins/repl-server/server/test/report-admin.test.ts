@@ -89,6 +89,8 @@ test('POST /reports stores an admin-identity report and returns the detail view'
   assert.equal(report['source'], 'admin');
   assert.equal(report['binding'], null);
   assert.equal(report['client'], 'admin');
+  assert.equal(report['clientName'], 'admin');
+  assert.equal(report['clientVersion'], '');
   assert.equal(report['mcp'], 'admin');
   assert.equal(report['exec'], null);
   assert.equal(report['evalId'], null);

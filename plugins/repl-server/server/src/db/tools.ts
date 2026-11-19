@@ -168,6 +168,67 @@ export function upsertTool(
   });
 }
 
+export type SeedToolOutcome = 'inserted' | 'filled' | 'unchanged';
+
+/**
+ * Inserts a fixed tool row on first sight. On later runs it only fills
+ * upstream columns that are still empty (`description`, an empty
+ * `schema_json`); admin state (`enabled`, `concurrency`, `tags`, `type`,
+ * `category`, `description_override`, `composite_code`, `stale*`) is never
+ * touched. Runs in the caller's transaction and does not bump the revision.
+ */
+export function seedTool(
+  db: DatabaseSync,
+  serverId: string,
+  input: { name: string; description?: string | null; inputSchema: unknown },
+): SeedToolOutcome {
+  const name = requireToolName(input.name);
+  const schemaJson = jsonText(input.inputSchema ?? {});
+  const schemaHash = hashToolSchema(input.inputSchema);
+  const now = isoNow();
+  assertServerExists(db, serverId);
+  const existing = getTool(db, serverId, name);
+  if (existing === null) {
+    db.prepare(`
+      INSERT INTO tools (
+        server_id, name, display_name, description, description_override,
+        enabled, concurrency, type, tags_json,
+        index_description, index_summary, index_tags_json,
+        schema_json, schema_hash, category, composite_code,
+        discovered_via, stale, stale_override, first_seen_at, last_seen_at
+      ) VALUES (
+        ?, ?, NULL, ?, NULL,
+        1, 'parallel', NULL, '[]',
+        '', '', '[]',
+        ?, ?, NULL, NULL,
+        'static', 0, 0, ?, ?
+      )
+    `).run(serverId, name, input.description ?? null, schemaJson, schemaHash, now, now);
+    return 'inserted';
+  }
+
+  const fillDescription = (existing.description ?? '').trim() === '';
+  const fillSchema = isEmptyJsonObject(existing.inputSchema);
+  if (!fillDescription && !fillSchema) {
+    db.prepare('UPDATE tools SET last_seen_at = ? WHERE server_id = ? AND name = ?')
+      .run(now, serverId, name);
+    return 'unchanged';
+  }
+  db.prepare(`
+    UPDATE tools
+    SET description = ?, schema_json = ?, schema_hash = ?, last_seen_at = ?
+    WHERE server_id = ? AND name = ?
+  `).run(
+    fillDescription ? input.description ?? null : existing.description,
+    fillSchema ? schemaJson : jsonText(existing.inputSchema),
+    fillSchema ? schemaHash : existing.schemaHash,
+    now,
+    serverId,
+    name,
+  );
+  return 'filled';
+}
+
 export function patchTool(
   db: DatabaseSync,
   serverId: string,
@@ -363,4 +424,14 @@ function unionTags(serverTags: string[], toolTags: string[]): string[] {
     if (!out.includes(tag)) out.push(tag);
   }
   return out;
+}
+
+/** `true` for the `{}` that a tool row gets when it was stored without a schema. */
+function isEmptyJsonObject(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
 }

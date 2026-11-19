@@ -7,7 +7,9 @@ import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 
 import { assemble, type AssemblyOptions } from '../src/assembly.ts';
+import { createClientBinding } from '../src/db/clients.ts';
 import { getRevision } from '../src/db/meta.ts';
+import { createServer } from '../src/db/servers.ts';
 import { upsertTool } from '../src/db/tools.ts';
 
 const ADMIN_TOKEN = 'test-admin-token';
@@ -260,6 +262,87 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
   assert.ok(Array.isArray(JSON.parse(searched.result.content[0]?.text ?? 'null')));
 });
 
+test('run_script description and instructions follow the client binding visibility', async (t) => {
+  const app = await start();
+  t.after(app.close);
+  const db = app.assembly.db;
+
+  createServer(db, {
+    id: 'alpha',
+    label: 'Alpha',
+    transport: 'stdio',
+    command: 'node',
+    summary: 'Alpha database tools',
+    category: 'database',
+    tags: ['db'],
+  });
+  createServer(db, {
+    id: 'beta',
+    label: 'Beta',
+    transport: 'stdio',
+    command: 'node',
+    summary: 'Beta repository tools',
+    category: 'vcs',
+    tags: ['git'],
+  });
+  upsertTool(db, 'alpha', { name: 'query', inputSchema: { type: 'object' } });
+  upsertTool(db, 'beta', { name: 'issues', inputSchema: { type: 'object' } });
+  app.assembly.catalog.refreshServer('alpha');
+  app.assembly.catalog.refreshServer('beta');
+
+  const alphaClient = createClientBinding(db, {
+    label: 'alpha only',
+    allowedServers: ['alpha'],
+  });
+  const gitClient = createClientBinding(db, {
+    label: 'git tags only',
+    allowedTags: ['git'],
+  });
+
+  async function look(token?: string): Promise<{ description: string; instructions: string }> {
+    const headers: Record<string, string> =
+      token === undefined ? {} : { authorization: `Bearer ${token}` };
+    const list = await rpc(
+      app.base,
+      { jsonrpc: '2.0', id: 11, method: 'tools/list' },
+      undefined,
+      headers,
+    );
+    const listed = (await list.json()) as {
+      result: { tools: Array<{ name: string; description: string }> };
+    };
+    const description = listed.result.tools.find((tool) => tool.name === 'run_script')?.description ?? '';
+
+    const discover = await rpc(
+      app.base,
+      { jsonrpc: '2.0', id: 12, method: 'server/discover' },
+      undefined,
+      headers,
+    );
+    const discovered = (await discover.json()) as { result: { instructions: string } };
+    return { description, instructions: discovered.result.instructions };
+  }
+
+  const alpha = await look(alphaClient.token);
+  assert.ok(alpha.description.includes('alpha  database — Alpha database tools (1 tool)'));
+  assert.ok(!alpha.description.includes('beta'));
+  assert.ok(!alpha.description.includes('issues'));
+  assert.ok(alpha.instructions.includes('MCP servers visible to this client: alpha.'));
+  assert.ok(!alpha.instructions.includes('beta'));
+
+  const git = await look(gitClient.token);
+  assert.ok(git.description.includes('beta  vcs — Beta repository tools (1 tool)'));
+  assert.ok(!git.description.includes('alpha'));
+  assert.ok(git.instructions.includes('MCP servers visible to this client: beta.'));
+  assert.ok(!git.instructions.includes('alpha'));
+
+  const unrestricted = await look();
+  assert.ok(unrestricted.description.includes('alpha  database'));
+  assert.ok(unrestricted.description.includes('beta  vcs'));
+  assert.ok(unrestricted.instructions.includes('MCP servers visible to this client: alpha, beta.'));
+  assert.ok(Buffer.byteLength(unrestricted.description, 'utf8') <= 2048);
+});
+
 test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {
   await withEnv(
     {
@@ -367,7 +450,13 @@ test('GET /clients reports live sessions and PUT destroys the binding sessions',
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
-        params: { name: 'run_script', arguments: { code: 'return 1' } },
+        params: {
+          name: 'run_script',
+          arguments: { code: 'return 1' },
+          _meta: {
+            'io.modelcontextprotocol/clientInfo': { name: 'claude-code', version: '2.1.327' },
+          },
+        },
       },
       session,
       clientAuth,
@@ -381,12 +470,18 @@ test('GET /clients reports live sessions and PUT destroys the binding sessions',
       sessions: Array<{
         mcpSessionId: string;
         bindingId: string | null;
+        client: string;
+        clientName: string;
+        clientVersion: string;
         execSessionIds?: string[];
       }>;
     };
     assert.equal(listedBody.clients[0]?.activeSessions, 1, 'activeSessions is no longer always 0');
     const listedSession = listedBody.sessions.find((entry) => entry.mcpSessionId === session);
     assert.equal(listedSession?.bindingId, createdBody.client.id);
+    assert.equal(listedSession?.client, 'claude-code/2.1.327');
+    assert.equal(listedSession?.clientName, 'claude-code');
+    assert.equal(listedSession?.clientVersion, '2.1.327');
     assert.equal(listedSession?.execSessionIds?.length, 1);
 
     // hook-allow: localhost-only test fetch, no external egress

@@ -1,6 +1,6 @@
 /** The frozen v1 MCP method table. @module */
 
-import { createDiscoverHandler, createInitializeHandler } from './discover.ts';
+import { createDiscoverHandler, createInitializeHandler, type DiscoverOptions } from './discover.ts';
 import { JsonRpcError, JSON_RPC_INTERNAL_ERROR } from './errors.ts';
 import { JsonRpcDispatcher, type JsonRpcHandler } from './jsonrpc.ts';
 
@@ -25,7 +25,8 @@ export type MethodName = (typeof METHOD_TABLE)[number];
  * mistaken for an unknown one (`-32601`).
  */
 export interface MethodTableOptions<Context = undefined> {
-  instructions?: string;
+  /** Static prompt, or a per-request provider for session-specific instructions. */
+  instructions?: DiscoverOptions<Context>['instructions'];
   toolsList?: JsonRpcHandler<Context>;
   toolsCall?: JsonRpcHandler<Context>;
   tasksGet?: JsonRpcHandler<Context>;
@@ -42,7 +43,7 @@ function notWired<Context>(method: MethodName): JsonRpcHandler<Context> {
 export function createMethodTable<Context = undefined>(
   options: MethodTableOptions<Context> = {},
 ): JsonRpcDispatcher<Context> {
-  const discoverOptions = { instructions: options.instructions };
+  const discoverOptions: DiscoverOptions<Context> = { instructions: options.instructions };
   const dispatcher = new JsonRpcDispatcher<Context>();
 
   dispatcher.register('server/discover', createDiscoverHandler<Context>(discoverOptions));

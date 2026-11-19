@@ -67,6 +67,8 @@ function input(overrides: Partial<ReportInput> = {}): ReportInput {
     severity: 'high',
     binding: 'cb_1',
     client: 'claude-code/2.1.327',
+    clientName: 'claude-code',
+    clientVersion: '2.1.327',
     mcp: 'mcp_1',
     exec: null,
     evalId: null,
@@ -96,6 +98,8 @@ test('create maps identity fields, trims text and audits metadata only', async (
   assert.equal(report.source, 'mcp');
   assert.equal(report.binding, 'cb_1');
   assert.equal(report.client, 'claude-code/2.1.327');
+  assert.equal(report.clientName, 'claude-code');
+  assert.equal(report.clientVersion, '2.1.327');
   assert.equal(report.mcp, 'mcp_1');
   assert.equal(report.exec, null);
   assert.equal(report.evalId, null);
@@ -116,6 +120,17 @@ test('create maps identity fields, trims text and audits metadata only', async (
   assert.equal(event['severity'], 'high');
   const serialized = JSON.stringify(event);
   assert.doesNotMatch(serialized, /Bash hangs|run_script|tool/);
+});
+
+test('clientName/clientVersion default to empty when a caller omits them', async (t) => {
+  const h = harness(t);
+  const legacy = input();
+  delete legacy.clientName;
+  delete legacy.clientVersion;
+  const report = (await h.service.create(legacy)).report;
+  assert.equal(report.client, 'claude-code/2.1.327');
+  assert.equal(report.clientName, '');
+  assert.equal(report.clientVersion, '');
 });
 
 test('MCP dedupe is per owner and includes severity in the fingerprint', async (t) => {

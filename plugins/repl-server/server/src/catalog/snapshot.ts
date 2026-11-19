@@ -2,6 +2,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { bumpRevision, getRevision } from '../db/meta.ts';
+import { BUILTIN_SERVER_ID } from '../db/servers.ts';
 import type { CatalogSnapshot, CatalogTool } from '../ports.ts';
 
 const CONCURRENCY_VALUES = new Set<CatalogTool['concurrency']>([
@@ -28,6 +29,7 @@ SELECT
 FROM tools t
 JOIN servers s ON s.id = t.server_id
 WHERE NOT (t.stale = 1 AND t.stale_override = 0)
+  AND s.id <> ?
 ORDER BY t.server_id, t.name`;
 
 /** Reads a text column from a `node:sqlite` row. @module */
@@ -127,14 +129,17 @@ export function bumpCatalogRevision(db: DatabaseSync): number {
  *
  * Builtin servers (`transport = 'builtin'`) are exposed under their bare tool
  * name, matching `tools.Read` in scripts; MCP tools use `<server>.<tool>`.
- * Stale rows that the administrator did not explicitly keep are excluded.
+ * `__builtin__` is the exception: it holds admin-visible definitions only until
+ * composite tools get a script executor, so its rows stay out of the execution
+ * surface. Stale rows that the administrator did not explicitly keep are
+ * excluded.
  * @module
  */
 export function buildCatalogSnapshot(
   db: DatabaseSync,
   revision: number = readCatalogRevision(db),
 ): CatalogSnapshot {
-  const rows = db.prepare(SELECT_CATALOG_ROWS).all();
+  const rows = db.prepare(SELECT_CATALOG_ROWS).all(BUILTIN_SERVER_ID);
   const tools: CatalogTool[] = [];
 
   for (const rawRow of rows) {

@@ -85,6 +85,10 @@ export interface McpSessionRecord {
   mcpSessionId: string;
   bindingId: string | null;
   client: string;
+  /** Parsed `clientInfo.name`; empty when the client reported none. */
+  clientName: string;
+  /** Parsed `clientInfo.version`; empty when the client reported none. */
+  clientVersion: string;
   connectedAt?: string;
   lastRequestAt?: string;
   execSessionIds?: string[];
@@ -216,6 +220,8 @@ function publicSession(session: McpSessionRecord): McpSessionRecord {
     mcpSessionId: session.mcpSessionId,
     bindingId: session.bindingId,
     client: session.client,
+    clientName: session.clientName,
+    clientVersion: session.clientVersion,
   };
   if (session.connectedAt !== undefined) view.connectedAt = session.connectedAt;
   if (session.lastRequestAt !== undefined) view.lastRequestAt = session.lastRequestAt;

@@ -54,6 +54,8 @@ export function rowToReport(row: DbRow): StoredReport {
     source: (readText(row, 'source') ?? 'admin') as ReportSource,
     binding: nullableText(row, 'binding'),
     client: readText(row, 'client') ?? '',
+    clientName: readText(row, 'client_name') ?? '',
+    clientVersion: readText(row, 'client_version') ?? '',
     mcp: readText(row, 'mcp') ?? '',
     exec: nullableText(row, 'exec'),
     evalId: nullableNumber(row, 'eval_id'),
@@ -102,9 +104,10 @@ export function decodeReportCursor(raw: string): ReportCursor | null {
 export function createDbReportStore(db: DatabaseSync): ReportStore {
   const insertStatement = db.prepare(`
     INSERT INTO reports (
-      id, created_at, updated_at, source, binding, client, mcp, exec, eval_id,
-      owner_key, severity, title, detail, context_json, fingerprint, status, alert_state
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending')
+      id, created_at, updated_at, source, binding, client, client_name, client_version,
+      mcp, exec, eval_id, owner_key, severity, title, detail, context_json, fingerprint,
+      status, alert_state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending')
   `);
 
   function get(id: string): StoredReport | null {
@@ -120,6 +123,8 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
       row.source,
       row.binding,
       row.client,
+      row.clientName ?? '',
+      row.clientVersion ?? '',
       row.mcp,
       row.exec,
       row.evalId,

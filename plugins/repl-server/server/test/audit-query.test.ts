@@ -18,6 +18,7 @@ import {
   matchesFilter,
   normalizeFilter,
   eventStatus,
+  parseAuditQueryParams,
   queryAudit,
   readEvalTrace,
   type StatsWorkerData,
@@ -28,6 +29,8 @@ const IDENTITY: RequestIdentity = {
   identity: 'bound',
   binding: 'cb_1',
   client: 'claude-code/2.1.327',
+  clientName: 'claude-code',
+  clientVersion: '2.1.327',
   mcp: 'mcp_1',
 };
 
@@ -404,11 +407,92 @@ test('listExecSessions aggregates starts, ends and tool activity', async (t) => 
   assert.equal(sessions[0]?.toolCalls, 2);
   assert.equal(sessions[0]?.toolErrors, 1);
   assert.equal(sessions[0]?.endReason, 'shutdown');
+  assert.equal(sessions[0]?.client, 'claude-code/2.1.327');
+  assert.equal(sessions[0]?.clientName, 'claude-code');
+  assert.equal(sessions[0]?.clientVersion, '2.1.327');
   assert.equal(sessions[1]?.exec, 'es_2');
   assert.equal(sessions[1]?.workspace, '/repo/b');
   assert.equal(sessions[1]?.toolCalls, 1);
   assert.equal(sessions[1]?.toolErrors, 0);
   assert.equal(sessions[1]?.endReason, 'idle_recycle');
+});
+
+test('client name and version filter independently and the legacy client filter still works', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'repl-audit-client-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const at = (offset: number): string => new Date(DAY_18 + offset).toISOString();
+  const events: AuditEvent[] = [
+    {
+      v: 1,
+      ts: at(0),
+      event: 'tool_result',
+      client: 'claude-code/2.1.327',
+      clientName: 'claude-code',
+      clientVersion: '2.1.327',
+      ok: true,
+    },
+    {
+      v: 1,
+      ts: at(10),
+      event: 'tool_result',
+      client: 'claude-code/2.1.328',
+      clientName: 'claude-code',
+      clientVersion: '2.1.328',
+      ok: true,
+    },
+    {
+      v: 1,
+      ts: at(20),
+      event: 'tool_result',
+      client: 'probe/1.0',
+      clientName: 'probe',
+      clientVersion: '1.0',
+      ok: true,
+    },
+    // Pre-v4 audit lines carry only the combined label.
+    { v: 1, ts: at(30), event: 'tool_result', client: 'legacy-only', ok: true },
+  ];
+  await writeFile(
+    join(dir, 'audit-2026-11-18.jsonl'),
+    `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    'utf8',
+  );
+
+  const byName = await queryAudit(dir, normalizeFilter({ clientName: 'claude-code' }), {
+    limit: 100,
+  });
+  assert.equal(byName.events.length, 2);
+
+  const byVersion = await queryAudit(dir, normalizeFilter({ clientVersion: '2.1.327' }), {
+    limit: 100,
+  });
+  assert.equal(byVersion.events.length, 1);
+
+  const combined = await queryAudit(
+    dir,
+    normalizeFilter({ clientName: 'claude-code', clientVersion: '2.1.328' }),
+    { limit: 100 },
+  );
+  assert.equal(combined.events.length, 1);
+  assert.equal(combined.events[0]?.client, 'claude-code/2.1.328');
+
+  const legacy = await queryAudit(dir, normalizeFilter({ client: 'claude-code/2.1.327' }), {
+    limit: 100,
+  });
+  assert.equal(legacy.events.length, 1);
+
+  const parsed = parseAuditQueryParams(
+    new URLSearchParams({ clientName: 'probe', clientVersion: '1.0', client: 'probe/1.0' }),
+  );
+  assert.equal(parsed.clientName, 'probe');
+  assert.equal(parsed.clientVersion, '1.0');
+  assert.equal(parsed.client, 'probe/1.0');
+
+  assert.equal(
+    matchesFilter(events[3] as AuditEvent, normalizeFilter({ clientName: 'legacy-only' })),
+    false,
+    'a pre-v4 line has no clientName to match',
+  );
 });
 
 test('countAudit and exportAuditJsonl stream every matching event', async (t) => {

@@ -221,7 +221,12 @@ test('identity: toRequestIdentity projects the binding id and session ids', asyn
   store.rows.push({ id: 'cb_1', tokenHash: sha256Hex(CLIENT_TOKEN) });
   const allowed = assertAllowed(
     await resolveIdentity(
-      { authorization: `Bearer ${CLIENT_TOKEN}`, client: 'claude-code/2.1.327' },
+      {
+        authorization: `Bearer ${CLIENT_TOKEN}`,
+        client: 'claude-code/2.1.327',
+        clientName: 'claude-code',
+        clientVersion: '2.1.327',
+      },
       { mode: 'strict', bindings: store.lookup },
     ),
   );
@@ -230,15 +235,32 @@ test('identity: toRequestIdentity projects the binding id and session ids', asyn
     identity: 'bound',
     binding: 'cb_1',
     client: 'claude-code/2.1.327',
+    clientName: 'claude-code',
+    clientVersion: '2.1.327',
     mcp: 'mcp_1',
     exec: 'es_1',
   });
 
   const unbound = toRequestIdentity(
-    { ok: true, identity: 'unbound', binding: null, reason: 'no_token', client: '' },
+    {
+      ok: true,
+      identity: 'unbound',
+      binding: null,
+      reason: 'no_token',
+      client: '',
+      clientName: '',
+      clientVersion: '',
+    },
     { mcp: 'mcp_2' },
   );
-  assert.deepEqual(unbound, { identity: 'unbound', binding: null, client: '', mcp: 'mcp_2' });
+  assert.deepEqual(unbound, {
+    identity: 'unbound',
+    binding: null,
+    client: '',
+    clientName: '',
+    clientVersion: '',
+    mcp: 'mcp_2',
+  });
 });
 
 // --- admin gate -------------------------------------------------------------

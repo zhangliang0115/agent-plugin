@@ -57,6 +57,8 @@ export async function reportProblemCall(
     severity: args.severity,
     binding: identity.binding,
     client: identity.client,
+    clientName: identity.clientName ?? '',
+    clientVersion: identity.clientVersion ?? '',
     mcp: identity.mcp,
     exec: null,
     evalId: null,

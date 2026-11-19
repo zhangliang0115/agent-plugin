@@ -18,6 +18,8 @@ const BOUND: RequestIdentity = {
   identity: 'bound',
   binding: 'cb_1',
   client: 'claude-code/2.1.327',
+  clientName: 'claude-code',
+  clientVersion: '2.1.327',
   mcp: 'mcp_1',
 };
 
@@ -25,6 +27,8 @@ const UNBOUND: RequestIdentity = {
   identity: 'unbound',
   binding: null,
   client: 'probe/1.0',
+  clientName: 'probe',
+  clientVersion: '1.0',
   mcp: 'mcp_2',
 };
 
@@ -36,6 +40,8 @@ function stored(overrides: Partial<StoredReport> = {}): StoredReport {
     source: 'mcp',
     binding: 'cb_1',
     client: 'claude-code/2.1.327',
+    clientName: 'claude-code',
+    clientVersion: '2.1.327',
     mcp: 'mcp_1',
     exec: null,
     evalId: null,
@@ -198,6 +204,8 @@ test('report_problem maps the request identity and returns reportId', async () =
   assert.equal(sent.source, 'mcp');
   assert.equal(sent.binding, 'cb_1');
   assert.equal(sent.client, 'claude-code/2.1.327');
+  assert.equal(sent.clientName, 'claude-code');
+  assert.equal(sent.clientVersion, '2.1.327');
   assert.equal(sent.mcp, 'mcp_1');
   assert.equal(sent.ownerKey, 'cb_1');
   assert.equal(sent.exec, null);

@@ -16,40 +16,50 @@ export type ManageTab =
 export interface RouteState {
   path: '/overview' | '/audit' | '/reports' | '/manage';
   tab: ManageTab;
+  /** Server filter for the tools tab, from `?server=…`. */
+  server: string | null;
 }
 
-export const MANAGE_TABS: ReadonlyArray<{ id: ManageTab; label: string; group: '连接' | '配置' | '迁移' }> = [
-  { id: 'servers', label: '服务端', group: '连接' },
-  { id: 'tools', label: '工具', group: '连接' },
-  { id: 'clients', label: '客户端', group: '连接' },
-  { id: 'secrets', label: '密钥', group: '配置' },
-  { id: 'tags', label: '标签', group: '配置' },
-  { id: 'categories', label: '分类', group: '配置' },
-  { id: 'alerts', label: '告警', group: '配置' },
-  { id: 'ai', label: 'AI 配置', group: '配置' },
-  { id: 'config', label: '导入导出', group: '迁移' },
-  { id: 'discover', label: '发现', group: '迁移' },
+export const MANAGE_TABS: ReadonlyArray<{ id: ManageTab; label: string }> = [
+  { id: 'servers', label: '服务端' },
+  { id: 'tools', label: '工具' },
+  { id: 'clients', label: '客户端' },
+  { id: 'secrets', label: '密钥' },
+  { id: 'tags', label: '标签' },
+  { id: 'categories', label: '分类' },
+  { id: 'alerts', label: '告警' },
+  { id: 'ai', label: 'AI 配置' },
+  { id: 'config', label: '导入导出' },
+  { id: 'discover', label: '发现' },
 ];
 
 export function parseRoute(hash: string): RouteState {
   const raw = hash.replace(/^#/, '');
   const [pathPart = '', queryPart = ''] = raw.split('?');
   const path = pathPart === '' ? '/overview' : pathPart.replace(/\/+$/u, '');
-  const tab = new URLSearchParams(queryPart).get('tab');
+  const params = new URLSearchParams(queryPart);
+  const tab = params.get('tab');
   const valid = MANAGE_TABS.some((entry) => entry.id === tab);
+  const resolved = (valid ? tab : 'servers') as ManageTab;
+  const server = params.get('server');
   return {
     path: (path === '/audit' || path === '/reports' || path === '/manage' ? path : '/overview') as RouteState['path'],
-    tab: (valid ? tab : 'servers') as ManageTab,
+    tab: resolved,
+    server: resolved === 'tools' && server !== null && server !== '' ? server : null,
   };
 }
 
-export function routeHash(path: RouteState['path'], tab: ManageTab = 'servers'): string {
+export function routeHash(path: RouteState['path'], tab: ManageTab = 'servers', server?: string | null): string {
   if (path !== '/manage') return `#${path}`;
-  return tab === 'servers' ? '#/manage' : `#/manage?tab=${tab}`;
+  const params = new URLSearchParams();
+  if (tab !== 'servers') params.set('tab', tab);
+  if (tab === 'tools' && server !== undefined && server !== null && server !== '') params.set('server', server);
+  const query = params.toString();
+  return query === '' ? '#/manage' : `#/manage?${query}`;
 }
 
-export function navigate(path: RouteState['path'], tab: ManageTab = 'servers'): void {
-  const next = routeHash(path, tab);
+export function navigate(path: RouteState['path'], tab: ManageTab = 'servers', server?: string | null): void {
+  const next = routeHash(path, tab, server);
   if (window.location.hash === next) return;
   window.location.hash = next;
 }

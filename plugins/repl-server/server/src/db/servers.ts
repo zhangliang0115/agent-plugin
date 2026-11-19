@@ -19,7 +19,9 @@ import {
 import type { DbRow } from './schema.ts';
 import { demoteDiscoveredTools, refreshServerIndex } from './tools.ts';
 
-export const SEED_SERVER_IDS = ['__official__', '__builtin__'] as const;
+export const OFFICIAL_SERVER_ID = '__official__';
+export const BUILTIN_SERVER_ID = '__builtin__';
+export const SEED_SERVER_IDS = [OFFICIAL_SERVER_ID, BUILTIN_SERVER_ID] as const;
 
 export type ServerTransport = 'stdio' | 'http' | 'builtin';
 export type ConnectMode = 'lazy' | 'eager';

@@ -768,6 +768,8 @@ export class ExecGateway implements ExecutionGateway {
       identityKind: request.identity.identity,
       binding: request.identity.binding,
       client: request.identity.client,
+      clientName: request.identity.clientName ?? '',
+      clientVersion: request.identity.clientVersion ?? '',
       mcp: request.identity.mcp,
     };
   }

@@ -26,7 +26,8 @@ import {
   DiscoveryConfigError,
   type ToolDiscoveryConfig,
 } from '../discovery/types.ts';
-import { systemClock, type Clock } from '../ports.ts';
+import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID } from '../db/servers.ts';
+import { systemClock, type Clock, type OfficialToolsSync } from '../ports.ts';
 
 // ---------------------------------------------------------------------------
 // Shared admin HTTP primitives
@@ -439,8 +440,7 @@ export type CommandArg = string | { $secret: string };
 export type ServerTransport = 'stdio' | 'http' | 'builtin';
 export type ConnectMode = 'lazy' | 'eager';
 
-export const OFFICIAL_SERVER_ID = '__official__';
-export const BUILTIN_SERVER_ID = '__builtin__';
+export { OFFICIAL_SERVER_ID, BUILTIN_SERVER_ID };
 
 /** API-facing server configuration. Secrets stay as `$secret` references. */
 export interface ServerConfig {
@@ -561,6 +561,12 @@ export interface AdminServersDeps {
   clock?: Clock;
   /** `POST /servers/:id/test` budget; docs freeze 10s. */
   testTimeoutMs?: number;
+  /**
+   * Lazy `__official__` tool sync. When present,
+   * `POST /servers/__official__/tools/refresh` lists official tools from
+   * `claude mcp serve` instead of rejecting the builtin server.
+   */
+  official?: OfficialToolsSync;
   /**
    * Called after `POST /servers/:id/tools/refresh` and `/restart` complete, so
    * assembly can discard the server's pending AI annotation and re-run the
@@ -1344,6 +1350,23 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
       throw new AdminApiError(404, 'SERVER_NOT_FOUND', `server ${id} does not exist`, {
         serverId: id,
       });
+    }
+    // `__official__` is a builtin transport row with no pool connection, but its
+    // tool list can be re-read from `claude mcp serve`. `__builtin__` stays
+    // static and is rejected below by assertConnectable.
+    if (id === OFFICIAL_SERVER_ID && deps.official !== undefined) {
+      if (!server.enabled) {
+        throw new AdminApiError(409, 'SERVER_DISABLED', `server ${id} is disabled`, { serverId: id });
+      }
+      const official = deps.official;
+      const operation = operations.launch('tools_refresh', id, async () => {
+        const result = await official.ensure({ force: true });
+        if (result.status !== 'synced') {
+          // The operation carries the readable reason; the GET path stays a 200.
+          throw new Error(result.notice ?? `official tools sync ${result.status}`);
+        }
+      });
+      return adminJson(202, { ...operation });
     }
     assertConnectable(server);
     if (!server.enabled) {

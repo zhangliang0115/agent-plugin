@@ -23,6 +23,7 @@ import { createAuditRuntime } from './audit/runtime.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
 import { createAiService } from './ai/index.ts';
+import { splitClientLabel } from './client-info.ts';
 import { createDbReportStore } from './reports/store.ts';
 import { createReportService } from './reports/service.ts';
 import { createDiscoveryService } from './discovery/service.ts';
@@ -39,24 +40,33 @@ import {
   DbToolStore,
 } from './assembly-stores.ts';
 import { openStateDb, migrate } from './db/migrate.ts';
-import { findBindingByToken } from './db/clients.ts';
+import { findBindingByToken, getClientBinding } from './db/clients.ts';
+import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
 import { upsertTool } from './db/tools.ts';
+import { seedBuiltinTools } from './tools/builtin-seed.ts';
 import { ExecGateway, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
 import { PoolGates } from './pool/gates.ts';
 import { createPoolRuntime } from './pool/runtime.ts';
 import { mcpClientFactory, mcpTransportFactory } from './pool/adapters/client.ts';
 import { createServeRuntime } from './serve/runtime.ts';
+import { createOfficialToolsSync } from './serve/official-sync.ts';
 import { createServeCallTool } from './serve/adapter.ts';
 import { loadLocalTokens, stateDbPath } from './local-tokens.ts';
 import { createMethodTable } from './mcp/methods.ts';
+import { buildInstructions, INSTRUCTIONS } from './mcp/discover.ts';
+import {
+  buildRunScriptDescription,
+  collectVisibleMcpServers,
+  type McpServerOverview,
+} from './mcp/overview.ts';
 import { JSON_RPC_INVALID_PARAMS, JsonRpcError } from './mcp/errors.ts';
-import type { AuditEvent } from './ports.ts';
+import type { AuditEvent, RequestIdentity } from './ports.ts';
 import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
 import { callTool, type ToolCallResponse } from './tools/call.ts';
-import { listTools } from './tools/registry.ts';
+import { listTools, RUN_SCRIPT_DESCRIPTION } from './tools/registry.ts';
 
 export interface AssemblyOptions {
   root?: string;
@@ -141,6 +151,21 @@ function closeServer(
   });
 }
 
+/** Seeds the protocol tool rows the admin page shows under `__builtin__`. */
+function applyBuiltinSeed(db: ReturnType<typeof openStateDb>, log: (line: string) => void): void {
+  try {
+    const seeded = seedBuiltinTools(db);
+    if (seeded.inserted > 0 || seeded.filled > 0) {
+      log(
+        `repl-server: __builtin__ tools seeded (inserted ${seeded.inserted}, filled ${seeded.filled})`,
+      );
+    }
+  } catch (error) {
+    // The protocol surface does not depend on these rows; keep booting.
+    log(`repl-server: __builtin__ tool seed failed: ${(error as Error).message}`);
+  }
+}
+
 /** Wires SQLite, catalog, gateway, MCP methods, admin routes and the HTTP app. */
 export async function assemble(options: AssemblyOptions = {}): Promise<Assembly> {
   const log = options.log ?? ((line: string) => console.error(line));
@@ -151,6 +176,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const tokens = await loadLocalTokens(dataDir);
   const db = openStateDb(stateDbPath(dataDir));
   migrate(db);
+  applyBuiltinSeed(db, log);
 
   const eventsHub = createEventHub();
   const auditHub = createEventHub();
@@ -392,6 +418,18 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     now: () => clock.now(),
     log,
   });
+  // Lazily fills `__official__` from `claude mcp serve`; releases the dedicated
+  // serve pair right after listing (see official-sync.ts).
+  const officialSync = createOfficialToolsSync({
+    db,
+    runtime: serveRuntime,
+    workspace: join(dataDir, 'official-workspace'),
+    ...(process.env['REPL_CLAUDE_BIN'] === undefined ? {} : { bin: process.env['REPL_CLAUDE_BIN'] }),
+    onSynced: () => {
+      catalog.refreshServer(OFFICIAL_SERVER_ID);
+    },
+    log,
+  });
   const tasks = new McpTaskStore({ clock });
   const sessions = new TransportSessionRegistry({
     clock,
@@ -406,6 +444,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       execSessionId: event['exec'],
       binding: event['binding'] ?? null,
       client: event['client'] ?? '',
+      clientName: event['clientName'] ?? '',
+      clientVersion: event['clientVersion'] ?? '',
       workspace: event['workspace'],
     };
     if (typeof event['evalId'] === 'number') frame['evalId'] = event['evalId'];
@@ -476,7 +516,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   });
 
   /** Latest resolved identity per transport session, for the admin client view. */
-  const sessionActivity = new Map<string, { binding: string | null; client: string }>();
+  const sessionActivity = new Map<
+    string,
+    { binding: string | null; client: string; clientName: string; clientVersion: string }
+  >();
   const sessionRegistry: SessionRegistry = {
     async list(): Promise<McpSessionRecord[]> {
       const live = sessions.list();
@@ -492,6 +535,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           mcpSessionId: session.id,
           bindingId: seen?.binding ?? null,
           client: seen?.client ?? '',
+          clientName: seen?.clientName ?? '',
+          clientVersion: seen?.clientVersion ?? '',
           connectedAt: new Date(session.createdAt).toISOString(),
           lastRequestAt: new Date(session.lastRequestAt).toISOString(),
         });
@@ -501,16 +546,24 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       for (const exec of gateway.sessions.list()) {
         let record = records.get(exec.mcpSessionId);
         if (record === undefined) {
+          const parts = splitClientLabel(exec.clientLabel);
           record = {
             mcpSessionId: exec.mcpSessionId,
             bindingId: exec.binding,
             client: exec.clientLabel,
+            clientName: parts.name,
+            clientVersion: parts.version,
             lastRequestAt: new Date(exec.lastRequestAt).toISOString(),
           };
           records.set(exec.mcpSessionId, record);
         }
         if (record.bindingId === null) record.bindingId = exec.binding;
         if (record.client === '') record.client = exec.clientLabel;
+        if (record.clientName === '' && exec.clientLabel !== '') {
+          const parts = splitClientLabel(exec.clientLabel);
+          record.clientName = parts.name;
+          record.clientVersion = parts.version;
+        }
         const ids = record.execSessionIds ?? [];
         ids.push(exec.id);
         record.execSessionIds = ids;
@@ -553,6 +606,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       servers: adminServerStore,
       pool: poolControl,
       operations,
+      official: officialSync,
       onToolsRefreshed: (id) => {
         ai.onServerMutated(id);
         void ai.onToolsIndexed(id, { explicit: true });
@@ -562,6 +616,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       servers: adminServerStore,
       tools: toolStore,
       retrieval: createSearchPreview({ db }),
+      official: officialSync,
     }),
     createAdminClientsHandler({
       bindings: bindingStore,
@@ -593,8 +648,30 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     ...audit.handlers(),
   ];
 
+  /**
+   * One request's visible MCP servers (design 01 §7.2, 03 §6.2): one server
+   * read and one catalog snapshot per call, no per-server queries. A binding
+   * that vanished mid-request fails closed.
+   */
+  const visibleServersFor = (identity: RequestIdentity): McpServerOverview[] => {
+    const binding = identity.binding === null ? null : getClientBinding(db, identity.binding);
+    if (identity.binding !== null && binding === null) return [];
+    return collectVisibleMcpServers({
+      servers: listServers(db),
+      tools: catalog.snapshot().tools,
+      allowedServers: binding?.allowedServers ?? null,
+      allowedTags: binding?.allowedTags ?? null,
+    });
+  };
+
   const dispatcher = createMethodTable<McpContext>({
-    toolsList: () => ({ tools: listTools() }),
+    instructions: (context) =>
+      buildInstructions(INSTRUCTIONS, visibleServersFor(context.identity)),
+    toolsList: (_params, context) => ({
+      tools: listTools(
+        buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, visibleServersFor(context.identity)),
+      ),
+    }),
     toolsCall: async (params, context): Promise<ToolCallResponse> => {
       const name = params['name'];
       if (typeof name !== 'string' || name === '') {
@@ -661,7 +738,12 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     reports,
     log,
     onSessionActivity: (transportId, identity) => {
-      sessionActivity.set(transportId, { binding: identity.binding, client: identity.client });
+      sessionActivity.set(transportId, {
+        binding: identity.binding,
+        client: identity.client,
+        clientName: identity.clientName ?? '',
+        clientVersion: identity.clientVersion ?? '',
+      });
     },
     frames: {
       recordIn: (input) => audit.recordFrameIn(input as unknown as Parameters<typeof audit.recordFrameIn>[0]),

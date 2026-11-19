@@ -269,6 +269,8 @@ export function createReportService(deps: ReportServiceDeps): ReportService {
         source: input.source,
         binding: input.binding,
         client: input.client,
+        clientName: input.clientName ?? '',
+        clientVersion: input.clientVersion ?? '',
         mcp: input.mcp,
         exec: input.exec ?? null,
         evalId: input.evalId ?? null,

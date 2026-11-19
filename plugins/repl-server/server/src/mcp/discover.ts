@@ -4,6 +4,7 @@ import { VERSION } from '@zhangliang0115/repl-server-core';
 
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST } from './errors.ts';
 import type { JsonRpcHandler } from './jsonrpc.ts';
+import { clipText, type McpServerOverview } from './overview.ts';
 
 /** MCP protocol version served by this build. */
 export const PROTOCOL_VERSION = '2026-07-28';
@@ -94,6 +95,38 @@ export const INSTRUCTIONS = [
   '- Return a short summary, not raw dumps.',
 ].join('\n');
 
+/** The static MCP paragraph; `buildInstructions` replaces it with a per-client list. */
+const MCP_PARAGRAPH = [
+  'MCP tools are namespaced: tools.mcp.<server>.<tool>(args).',
+  'Use search_tools({ query }) to find tools not listed here, and',
+  'describe_tools({ names }) for its full schema.',
+].join('\n');
+
+/**
+ * Fills the template's MCP paragraph with the server ids visible to this
+ * client. Only names are listed; call shape and search guidance stay the same,
+ * and the rest of the template is untouched (design 01 §10.2 #10).
+ */
+export function buildInstructions(
+  base: string,
+  servers: readonly McpServerOverview[],
+): string {
+  const ids = servers
+    .map((server) => clipText(server.id, 48))
+    .filter((id) => id !== '');
+  const visible =
+    ids.length === 0
+      ? 'No MCP servers are visible to this client.'
+      : `MCP servers visible to this client: ${ids.join(', ')}.`;
+  const paragraph = [
+    'MCP tools are namespaced: tools.mcp.<server>.<tool>(args).',
+    visible,
+    'Use search_tools({ query }) to find tools not listed here, and',
+    'describe_tools({ names }) for its full schema.',
+  ].join('\n');
+  return base.includes(MCP_PARAGRAPH) ? base.replace(MCP_PARAGRAPH, paragraph) : `${base}\n\n${paragraph}`;
+}
+
 export interface ServerInfo {
   name: string;
   version: string;
@@ -119,8 +152,23 @@ export interface InitializeResult {
   instructions: string;
 }
 
-export interface DiscoverOptions {
+export interface DiscoverOptions<Context = undefined> {
+  /** Static text, or a per-request provider resolved with the transport context. */
+  instructions?: string | ((context: Context) => string);
+}
+
+/** Options that produce one concrete result (no context available). */
+export interface StaticInstructionsOptions {
   instructions?: string;
+}
+
+function resolveInstructions<Context>(
+  options: DiscoverOptions<Context>,
+  context: Context,
+): string {
+  const provider = options.instructions;
+  if (typeof provider === 'function') return provider(context);
+  return provider ?? INSTRUCTIONS;
 }
 
 export function serverInfo(): ServerInfo {
@@ -128,7 +176,7 @@ export function serverInfo(): ServerInfo {
 }
 
 /** Builds the `server/discover` result frozen in protocol.md §3.1. */
-export function discoverResult(options: DiscoverOptions = {}): DiscoverResult {
+export function discoverResult(options: StaticInstructionsOptions = {}): DiscoverResult {
   return {
     resultType: 'complete',
     supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
@@ -149,7 +197,7 @@ export function discoverResult(options: DiscoverOptions = {}): DiscoverResult {
  */
 export function initializeResult(
   params: Record<string, unknown>,
-  options: DiscoverOptions = {},
+  options: StaticInstructionsOptions = {},
 ): InitializeResult {
   const requested = params['protocolVersion'];
   if (typeof requested !== 'string' || requested.length === 0) {
@@ -169,9 +217,9 @@ export function initializeResult(
 }
 
 export function createDiscoverHandler<Context = undefined>(
-  options: DiscoverOptions = {},
+  options: DiscoverOptions<Context> = {},
 ): JsonRpcHandler<Context> {
-  return (params) => {
+  return (params, context) => {
     // A client may pin the version in `_meta`; an unsupported pin is refused
     // before any result is built (same -32600 shape as legacy initialize).
     const meta = params['_meta'];
@@ -187,12 +235,13 @@ export function createDiscoverHandler<Context = undefined>(
         }
       }
     }
-    return discoverResult(options);
+    return discoverResult({ instructions: resolveInstructions(options, context) });
   };
 }
 
 export function createInitializeHandler<Context = undefined>(
-  options: DiscoverOptions = {},
+  options: DiscoverOptions<Context> = {},
 ): JsonRpcHandler<Context> {
-  return (params) => initializeResult(params, options);
+  return (params, context) =>
+    initializeResult(params, { instructions: resolveInstructions(options, context) });
 }

@@ -25,7 +25,12 @@ export interface ProcessLedger {
 export interface RequestIdentity {
   identity: 'bound' | 'unbound';
   binding: string | null;
+  /** Self-reported `name/version` label; display only. */
   client: string;
+  /** Parsed `clientInfo.name`; display only, empty when unreported. */
+  clientName?: string;
+  /** Parsed `clientInfo.version`; display only, empty when unreported. */
+  clientVersion?: string;
   mcp: string;
   exec?: string;
 }
@@ -87,4 +92,17 @@ export interface CatalogSnapshot {
 
 export interface Catalog {
   snapshot(): CatalogSnapshot;
+}
+
+/** Outcome of one lazy `tools/list` sync for the seeded `__official__` server. */
+export interface OfficialToolsSyncResult {
+  status: 'synced' | 'unavailable' | 'failed';
+  count: number;
+  /** Human-readable reason when no rows were written. */
+  notice?: string;
+}
+
+/** Lazy official-tool catalog sync; `force` bypasses the once-per-process cache. */
+export interface OfficialToolsSync {
+  ensure(options?: { force?: boolean }): Promise<OfficialToolsSyncResult>;
 }

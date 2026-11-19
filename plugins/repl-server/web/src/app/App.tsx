@@ -1,16 +1,23 @@
-/** Admin shell: sidebar, breadcrumb header, manage tabs, command palette, theme. */
-import { App as AntApp, ConfigProvider, Layout, Menu, Tabs, Button, Alert, Tooltip } from 'antd';
+/** Admin shell: sidebar, breadcrumb header, command palette, theme. */
+import { App as AntApp, ConfigProvider, Layout, Menu, Button, Alert, Tooltip } from 'antd';
 import {
   AlertOutlined,
+  ApartmentOutlined,
+  ApiOutlined,
   AppstoreOutlined,
+  CompassOutlined,
   DashboardOutlined,
-  DownloadOutlined,
-  ReloadOutlined,
+  ImportOutlined,
   KeyOutlined,
   MoonOutlined,
+  ReloadOutlined,
+  RobotOutlined,
   SearchOutlined,
   ClusterOutlined,
   SunOutlined,
+  TagsOutlined,
+  ToolOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -36,18 +43,18 @@ import { DiscoverPage } from './pages/DiscoverPage.tsx';
 const { Sider, Header, Content } = Layout;
 const THEME_KEY = 'repl-server.admin.theme';
 
-const GROUP_TABS: Record<'conn' | 'config' | 'migrate', ManageTab[]> = {
-  conn: ['servers', 'tools', 'clients'],
-  config: ['secrets', 'tags', 'categories', 'alerts', 'ai'],
-  migrate: ['config', 'discover'],
+const TAB_ICONS: Record<ManageTab, React.ReactNode> = {
+  servers: <ClusterOutlined />,
+  tools: <ToolOutlined />,
+  clients: <ApiOutlined />,
+  secrets: <KeyOutlined />,
+  tags: <TagsOutlined />,
+  categories: <ApartmentOutlined />,
+  alerts: <WarningOutlined />,
+  ai: <RobotOutlined />,
+  config: <ImportOutlined />,
+  discover: <CompassOutlined />,
 };
-
-function groupOf(tab: ManageTab): 'conn' | 'config' | 'migrate' {
-  return (['servers', 'tools', 'clients'].includes(tab) ? 'conn' : ['config', 'discover'].includes(tab) ? 'migrate' : 'config') as
-    | 'conn'
-    | 'config'
-    | 'migrate';
-}
 
 function initialTheme(): AdminTheme {
   try {
@@ -61,11 +68,6 @@ export function App(): React.ReactElement {
   const [mode, setMode] = useState<AdminTheme>(initialTheme);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [lost, setLost] = useState(false);
-  const [lastTabs, setLastTabs] = useState<Record<'conn' | 'config' | 'migrate', ManageTab>>({
-    conn: 'servers',
-    config: 'secrets',
-    migrate: 'config',
-  });
   const route = useRoute();
 
   useEffect(() => {
@@ -97,13 +99,6 @@ export function App(): React.ReactElement {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  useEffect(() => {
-    if (route.path !== '/manage') return;
-    setLastTabs((current) =>
-      current[groupOf(route.tab)] === route.tab ? current : { ...current, [groupOf(route.tab)]: route.tab },
-    );
-  }, [route]);
-
   // A clicked menu item keeps focus after SPA navigation, which reads as a second
   // selected row; drop it once the route settles.
   useEffect(() => {
@@ -111,7 +106,7 @@ export function App(): React.ReactElement {
     if (active instanceof HTMLElement && active.closest('.ant-menu') !== null) active.blur();
   }, [route.path, route.tab]);
 
-  const selectedKey = route.path === '/manage' ? groupOf(route.tab) : route.path;
+  const selectedKey = route.path === '/manage' ? `manage:${route.tab}` : route.path;
 
   const menuItems = useMemo(
     () => [
@@ -127,11 +122,11 @@ export function App(): React.ReactElement {
       {
         type: 'group' as const,
         label: '系统管理',
-        children: [
-          { key: 'conn', icon: <ClusterOutlined />, label: '连接' },
-          { key: 'config', icon: <KeyOutlined />, label: '配置' },
-          { key: 'migrate', icon: <DownloadOutlined />, label: '迁移' },
-        ],
+        children: MANAGE_TABS.map((tab) => ({
+          key: `manage:${tab.id}`,
+          icon: TAB_ICONS[tab.id],
+          label: tab.label,
+        })),
       },
     ],
     [],
@@ -142,8 +137,7 @@ export function App(): React.ReactElement {
     navigate(item.path, item.tab ?? 'servers');
   }
 
-  const tabs = route.path === '/manage' ? GROUP_TABS[groupOf(route.tab)] : [];
-  const groupLabel = route.path === '/manage' ? MANAGE_TABS.find((tab) => tab.id === route.tab)?.group : undefined;
+  const tabLabel = route.path === '/manage' ? MANAGE_TABS.find((tab) => tab.id === route.tab)?.label : undefined;
 
   return (
     <ConfigProvider theme={adminTheme(mode)}>
@@ -165,8 +159,7 @@ export function App(): React.ReactElement {
                   navigate(key as RouteState['path']);
                   return;
                 }
-                const group = key as 'conn' | 'config' | 'migrate';
-                navigate('/manage', lastTabs[group]);
+                navigate('/manage', key.slice('manage:'.length) as ManageTab);
               }}
             />
             <div className="sidebar-foot">
@@ -181,7 +174,7 @@ export function App(): React.ReactElement {
                 <span className="sep">/</span>
                 <b>
                   {route.path === '/manage'
-                    ? `系统管理 / ${groupLabel ?? ''} / ${MANAGE_TABS.find((tab) => tab.id === route.tab)?.label ?? ''}`
+                    ? `系统管理 / ${tabLabel ?? ''}`
                     : route.path === '/overview'
                       ? '监控 / 概览'
                       : route.path === '/audit'
@@ -232,17 +225,6 @@ export function App(): React.ReactElement {
                   style={{ marginBottom: 16 }}
                 />
               ) : null}
-              {route.path === '/manage' ? (
-                <Tabs
-                  className="manage-tabs"
-                  activeKey={route.tab}
-                  items={tabs.map((tab) => ({
-                    key: tab,
-                    label: MANAGE_TABS.find((entry) => entry.id === tab)?.label ?? tab,
-                  }))}
-                  onChange={(tab) => navigate('/manage', tab as ManageTab)}
-                />
-              ) : null}
               <Page route={route} />
             </Content>
           </Layout>
@@ -265,7 +247,7 @@ function Page({ route }: { route: RouteState }): React.ReactElement {
     case 'servers':
       return <ServersPage />;
     case 'tools':
-      return <ToolsPage />;
+      return <ToolsPage serverId={route.server} />;
     case 'clients':
       return <ClientsPage />;
     case 'secrets':

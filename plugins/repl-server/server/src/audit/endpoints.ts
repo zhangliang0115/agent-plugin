@@ -203,6 +203,8 @@ export async function auditSessionsEndpoint(
       to: param(request.params, 'to'),
       binding: param(request.params, 'binding'),
       client: param(request.params, 'client'),
+      clientName: param(request.params, 'clientName'),
+      clientVersion: param(request.params, 'clientVersion'),
       exec: param(request.params, 'exec'),
     });
     const sessions = await listExecSessions(options.dir, filter);
@@ -256,6 +258,8 @@ export async function auditFramesEndpoint(
       id: param(request.params, 'id'),
       binding: param(request.params, 'binding'),
       client: param(request.params, 'client'),
+      clientName: param(request.params, 'clientName'),
+      clientVersion: param(request.params, 'clientVersion'),
       method: param(request.params, 'method'),
     });
     const pageSize = options.framePageSize ?? 200;

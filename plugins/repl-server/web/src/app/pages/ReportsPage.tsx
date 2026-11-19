@@ -18,6 +18,8 @@ interface ReportView {
   source: 'mcp' | 'admin';
   binding: string | null;
   client: string | null;
+  clientName?: string;
+  clientVersion?: string;
   severity: Severity;
   title: string;
   status: ReportStatus;
@@ -280,9 +282,14 @@ export function ReportsPage(): React.ReactElement {
                     <StateTag state={detail.alertState} />
                   </Descriptions.Item>
                   <Descriptions.Item label="来源">{detail.source === 'mcp' ? 'MCP' : '管理端'}</Descriptions.Item>
-                  <Descriptions.Item label="client">
-                    <span className="mono">{detail.client ?? '—'}</span>
+                  <Descriptions.Item label="客户端名称">
+                    <span className="mono">{detail.clientName || detail.client || '—'}</span>
                   </Descriptions.Item>
+                  {detail.clientVersion === undefined || detail.clientVersion === '' ? null : (
+                    <Descriptions.Item label="客户端版本">
+                      <span className="mono">{detail.clientVersion}</span>
+                    </Descriptions.Item>
+                  )}
                   <Descriptions.Item label="binding">
                     <span className="mono">{detail.binding ?? '—'}</span>
                   </Descriptions.Item>

@@ -115,6 +115,43 @@ test('a request without a session header opens an implicit session', async (t) =
   assert.match(response.headers.get('mcp-session-id') ?? '', /^mcp_[0-9a-f]{32}$/);
 });
 
+test('_meta clientInfo is split into clientName and clientVersion on the identity', async (t) => {
+  const { server, base } = await listen();
+  t.after(() => server.close());
+
+  const withVersion = await rpc(base, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'run_script',
+      arguments: {},
+      _meta: {
+        'io.modelcontextprotocol/clientInfo': { name: 'claude-code', version: '2.1.327' },
+      },
+    },
+  });
+  const full = (await withVersion.json()) as {
+    result: { client: string; clientName: string; clientVersion: string };
+  };
+  assert.equal(full.result.client, 'claude-code/2.1.327');
+  assert.equal(full.result.clientName, 'claude-code');
+  assert.equal(full.result.clientVersion, '2.1.327');
+
+  const nameOnly = await rpc(base, {
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: { name: 'run_script', arguments: {}, clientInfo: { name: 'probe' } },
+  });
+  const partial = (await nameOnly.json()) as {
+    result: { client: string; clientName: string; clientVersion: string };
+  };
+  assert.equal(partial.result.client, 'probe');
+  assert.equal(partial.result.clientName, 'probe');
+  assert.equal(partial.result.clientVersion, '');
+});
+
 test('an unknown session header is rejected', async (t) => {
   const { server, base } = await listen();
   t.after(() => server.close());

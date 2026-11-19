@@ -41,6 +41,10 @@ export interface IdentityRequest {
   authorization?: string | null;
   /** Client-reported `clientInfo` label (`name/version`); audit display only, never identity. */
   client?: string;
+  /** Parsed `clientInfo.name`; audit display only. */
+  clientName?: string;
+  /** Parsed `clientInfo.version`; empty when the client reported none. */
+  clientVersion?: string;
 }
 
 export interface IdentityConfig {
@@ -65,6 +69,8 @@ export interface IdentityAllowed {
   binding: ClientBinding | null;
   reason: IdentityReason;
   client: string;
+  clientName: string;
+  clientVersion: string;
 }
 
 export interface IdentityDenied {
@@ -92,11 +98,20 @@ export async function resolveIdentity(
 ): Promise<IdentityOutcome> {
   const mode = config.mode ?? 'loose';
   const client = request.client ?? '';
+  const clientName = request.clientName ?? '';
+  const clientVersion = request.clientVersion ?? '';
   const bearer = parseBearer(request.authorization);
 
   if (bearer.kind === 'none') {
     if (mode === 'strict') return deny('missing_token', 'a client token is required in strict mode');
-    return allow({ identity: 'unbound', binding: null, reason: 'no_token', client });
+    return allow({
+      identity: 'unbound',
+      binding: null,
+      reason: 'no_token',
+      client,
+      clientName,
+      clientVersion,
+    });
   }
 
   if (bearer.kind === 'invalid') {
@@ -107,7 +122,14 @@ export async function resolveIdentity(
     if (mode === 'strict') {
       return deny('global_token_disabled', 'the global mcp-token is not accepted in strict mode');
     }
-    return allow({ identity: 'unbound', binding: null, reason: 'global_token', client });
+    return allow({
+      identity: 'unbound',
+      binding: null,
+      reason: 'global_token',
+      client,
+      clientName,
+      clientVersion,
+    });
   }
 
   const tokenHash = sha256Hex(bearer.token);
@@ -120,7 +142,14 @@ export async function resolveIdentity(
     return deny('unknown_token', 'unknown client token');
   }
 
-  return allow({ identity: 'bound', binding, reason: 'client_token', client });
+  return allow({
+    identity: 'bound',
+    binding,
+    reason: 'client_token',
+    client,
+    clientName,
+    clientVersion,
+  });
 }
 
 async function findBinding(
@@ -146,6 +175,8 @@ export function toRequestIdentity(outcome: IdentityAllowed, ids: IdentityIds): R
     identity: outcome.identity,
     binding: outcome.binding?.id ?? null,
     client: outcome.client,
+    clientName: outcome.clientName,
+    clientVersion: outcome.clientVersion,
     mcp: ids.mcp,
   };
   if (ids.exec !== undefined) identity.exec = ids.exec;
@@ -153,7 +184,10 @@ export function toRequestIdentity(outcome: IdentityAllowed, ids: IdentityIds): R
 }
 
 function allow(
-  fields: Pick<IdentityAllowed, 'identity' | 'binding' | 'reason' | 'client'>,
+  fields: Pick<
+    IdentityAllowed,
+    'identity' | 'binding' | 'reason' | 'client' | 'clientName' | 'clientVersion'
+  >,
 ): IdentityAllowed {
   return { ok: true, ...fields };
 }

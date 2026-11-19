@@ -1,6 +1,7 @@
 /** FTS5 retrieval for `search_tools`: filters, BM25, synonyms and visibility. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
+import { BUILTIN_SERVER_ID } from '../db/servers.ts';
 import {
   effectiveToolDescription,
   effectiveToolTags,
@@ -614,6 +615,9 @@ export function searchTools(db: DatabaseSync, request: SearchRequest = {}): Sear
   const gate = andClauses(
     clause('s.enabled = 1'),
     clause('t.enabled = 1'),
+    // Same read-only rule as the snapshot: `__builtin__` rows are admin
+    // metadata until composite tools have an executor.
+    clause('t.server_id <> ?', [BUILTIN_SERVER_ID]),
     filterClause(filters),
   );
   const staleVisible = clause('NOT (t.stale = 1 AND t.stale_override = 0)');

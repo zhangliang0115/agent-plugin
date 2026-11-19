@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { isAllowedHost } from './auth/tokens.ts';
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
+import { parseClientInfo } from './client-info.ts';
 import type { JsonRpcDispatcher } from './mcp/jsonrpc.ts';
 import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
 import type { ReportService } from './reports/service.ts';
@@ -72,23 +73,6 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 class BodyTooLargeError extends Error {}
-
-function clientLabel(message: unknown): string {
-  if (typeof message !== 'object' || message === null) return '';
-  const params = (message as { params?: unknown }).params;
-  if (typeof params !== 'object' || params === null) return '';
-  const record = params as Record<string, unknown>;
-  const meta = record['_meta'];
-  const info =
-    typeof meta === 'object' && meta !== null
-      ? (meta as Record<string, unknown>)['io.modelcontextprotocol/clientInfo']
-      : undefined;
-  const source = info ?? record['clientInfo'];
-  if (typeof source !== 'object' || source === null) return '';
-  const { name, version } = source as { name?: unknown; version?: unknown };
-  if (typeof name !== 'string' || name === '') return '';
-  return typeof version === 'string' && version !== '' ? `${name}/${version}` : name;
-}
 
 function methodOf(message: unknown): string | null {
   if (typeof message !== 'object' || message === null) return null;
@@ -212,8 +196,17 @@ export function createApp(options: AppOptions): Server {
         transportId = session.id;
       }
 
-      const label = clientLabel(message);
-      const authorization = req.headers.authorization ?? null;      const outcome = await resolveIdentity({ authorization, client: label }, options.identity);
+      const info = parseClientInfo(message);
+      const authorization = req.headers.authorization ?? null;
+      const outcome = await resolveIdentity(
+        {
+          authorization,
+          client: info.label,
+          clientName: info.name,
+          clientVersion: info.version,
+        },
+        options.identity,
+      );
       if (!outcome.ok) {
         sendJson(
           res,
@@ -232,6 +225,8 @@ export function createApp(options: AppOptions): Server {
         identity: identity.identity,
         binding: identity.binding,
         client: identity.client,
+        clientName: identity.clientName ?? '',
+        clientVersion: identity.clientVersion ?? '',
         id: typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
         method: method ?? 'unknown',
         params: (message as { params?: unknown }).params,

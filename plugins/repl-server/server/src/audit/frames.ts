@@ -67,6 +67,8 @@ export interface FrameContext {
   identity?: 'bound' | 'unbound';
   binding?: string | null;
   client?: string;
+  clientName?: string;
+  clientVersion?: string;
   exec?: string;
   evalId?: number;
 }
@@ -105,6 +107,8 @@ interface PendingFrame {
   identity?: 'bound' | 'unbound';
   binding?: string | null;
   client?: string;
+  clientName?: string;
+  clientVersion?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -287,6 +291,8 @@ function baseEvent(ts: number, name: 'proto_in' | 'proto_out', context: FrameCon
   if (context.identity !== undefined) event.identity = context.identity;
   if (context.binding !== undefined) event.binding = context.binding;
   if (context.client !== undefined) event.client = context.client;
+  if (context.clientName !== undefined) event.clientName = context.clientName;
+  if (context.clientVersion !== undefined) event.clientVersion = context.clientVersion;
   if (context.exec !== undefined) event.exec = context.exec;
   if (context.evalId !== undefined) event.evalId = context.evalId;
   return event;
@@ -363,6 +369,8 @@ export class ProtocolFrameRecorder {
       identity: input.identity ?? pending?.identity,
       binding: input.binding === undefined ? pending?.binding : input.binding,
       client: input.client ?? pending?.client,
+      clientName: input.clientName ?? pending?.clientName,
+      clientVersion: input.clientVersion ?? pending?.clientVersion,
       exec: input.exec,
       evalId: input.evalId,
     };
@@ -436,6 +444,8 @@ export class ProtocolFrameRecorder {
       identity: input.identity,
       binding: input.binding,
       client: input.client,
+      clientName: input.clientName,
+      clientVersion: input.clientVersion,
     };
     const list = this.pending.get(key);
     if (list === undefined) {

@@ -63,6 +63,8 @@ test('summary mode records both directions and pairs a response to its request',
     identity: 'bound',
     binding: 'cb_1',
     client: 'claude-code/2.1.327',
+    clientName: 'claude-code',
+    clientVersion: '2.1.327',
     id: 1,
     method: 'tools/call',
     params: { name: 'run_script', arguments: { code: 'return 1' } },
@@ -93,6 +95,8 @@ test('summary mode records both directions and pairs a response to its request',
   assert.equal(response.ok, true);
   assert.equal(response.binding, 'cb_1', 'response inherits the request identity');
   assert.equal(response.client, 'claude-code/2.1.327');
+  assert.equal(response.clientName, 'claude-code', 'response inherits the request client name');
+  assert.equal(response.clientVersion, '2.1.327');
   assert.equal(response.exec, 'es_1');
   assert.equal(response.evalId, 7);
   assert.equal('result' in response, false, 'summary mode must not store the result');

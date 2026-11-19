@@ -71,6 +71,8 @@ export interface AuditFilterInput {
   /** Alias accepted from already-normalized filters. */
   events?: string[];
   client?: string;
+  clientName?: string;
+  clientVersion?: string;
   binding?: string;
   exec?: string;
   evalId?: number | string;
@@ -91,6 +93,8 @@ export interface AuditFilter {
   to?: number;
   events?: string[];
   client?: string;
+  clientName?: string;
+  clientVersion?: string;
   binding?: string;
   exec?: string;
   evalId?: number;
@@ -163,6 +167,10 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
   }
   const client = optionalText(input.client);
   if (client !== undefined) filter.client = client;
+  const clientName = optionalText(input.clientName);
+  if (clientName !== undefined) filter.clientName = clientName;
+  const clientVersion = optionalText(input.clientVersion);
+  if (clientVersion !== undefined) filter.clientVersion = clientVersion;
   const binding = optionalText(input.binding);
   if (binding !== undefined) filter.binding = binding;
   const exec = optionalText(input.exec);
@@ -228,6 +236,8 @@ export function parseAuditQueryParams(params: URLSearchParams): AuditFilter {
   assign('from', firstParam(params, 'from'));
   assign('to', firstParam(params, 'to'));
   assign('client', firstParam(params, 'client'));
+  assign('clientName', firstParam(params, 'clientName'));
+  assign('clientVersion', firstParam(params, 'clientVersion'));
   assign('binding', firstParam(params, 'binding'));
   assign('exec', firstParam(params, 'exec'));
   assign('evalId', firstParam(params, 'evalId'));
@@ -473,6 +483,10 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
   }
   if (filter.events !== undefined && !filter.events.includes(event.event)) return false;
   if (filter.client !== undefined && event.client !== filter.client) return false;
+  if (filter.clientName !== undefined && event.clientName !== filter.clientName) return false;
+  if (filter.clientVersion !== undefined && event.clientVersion !== filter.clientVersion) {
+    return false;
+  }
   if (filter.binding !== undefined && event.binding !== filter.binding) return false;
   if (filter.exec !== undefined && event.exec !== filter.exec) return false;
   if (filter.evalId !== undefined && Number(event.evalId) !== filter.evalId) return false;
@@ -602,6 +616,8 @@ export interface ExecSessionSummary {
   exec: string;
   binding: string | null;
   client: string | null;
+  clientName: string | null;
+  clientVersion: string | null;
   mcp: string | null;
   workspace: string | null;
   servePid: number | null;
@@ -619,6 +635,8 @@ interface SessionAccumulator {
   exec: string;
   binding: string | null;
   client: string | null;
+  clientName: string | null;
+  clientVersion: string | null;
   mcp: string | null;
   workspace: string | null;
   servePid: number | null;
@@ -654,6 +672,8 @@ export async function listExecSessions(
         exec,
         binding: stringOrNull(event.binding),
         client: stringOrNull(event.client),
+        clientName: stringOrNull(event.clientName),
+        clientVersion: stringOrNull(event.clientVersion),
         mcp: stringOrNull(event.mcp),
         workspace: null,
         servePid: null,
@@ -672,6 +692,12 @@ export async function listExecSessions(
     if (ts > session.lastAt) session.lastAt = ts;
     if (session.binding === null && typeof event.binding === 'string') session.binding = event.binding;
     if (session.client === null && typeof event.client === 'string') session.client = event.client;
+    if (session.clientName === null && typeof event.clientName === 'string') {
+      session.clientName = event.clientName;
+    }
+    if (session.clientVersion === null && typeof event.clientVersion === 'string') {
+      session.clientVersion = event.clientVersion;
+    }
     if (session.mcp === null && typeof event.mcp === 'string') session.mcp = event.mcp;
     switch (event.event) {
       case 'exec_start': {
@@ -705,6 +731,8 @@ export async function listExecSessions(
     exec: session.exec,
     binding: session.binding,
     client: session.client,
+    clientName: session.clientName,
+    clientVersion: session.clientVersion,
     mcp: session.mcp,
     workspace: session.workspace,
     servePid: session.servePid,
@@ -847,6 +875,8 @@ interface StatsWorkerFilter {
   to: number | null;
   events: string[] | null;
   client?: string;
+  clientName?: string;
+  clientVersion?: string;
   binding?: string;
   exec?: string;
   evalId?: number;
@@ -932,6 +962,8 @@ const STATS_WORKER_SOURCE = [
   '  }',
   '  if (filter.events !== null && filter.events.indexOf(event.event) === -1) return false;',
   '  if (filter.client !== undefined && event.client !== filter.client) return false;',
+  '  if (filter.clientName !== undefined && event.clientName !== filter.clientName) return false;',
+  '  if (filter.clientVersion !== undefined && event.clientVersion !== filter.clientVersion) return false;',
   '  if (filter.binding !== undefined && event.binding !== filter.binding) return false;',
   '  if (filter.exec !== undefined && event.exec !== filter.exec) return false;',
   '  if (filter.evalId !== undefined && Number(event.evalId) !== filter.evalId) return false;',
@@ -1062,6 +1094,8 @@ function statsWorkerFilter(filter: AuditFilter): StatsWorkerFilter {
     events: filter.events ?? null,
   };
   if (filter.client !== undefined) out.client = filter.client;
+  if (filter.clientName !== undefined) out.clientName = filter.clientName;
+  if (filter.clientVersion !== undefined) out.clientVersion = filter.clientVersion;
   if (filter.binding !== undefined) out.binding = filter.binding;
   if (filter.exec !== undefined) out.exec = filter.exec;
   if (filter.evalId !== undefined) out.evalId = filter.evalId;

@@ -111,13 +111,23 @@ function setup(options: { token?: string; callbackResult?: number } = {}): {
       mcpSessionId: 'mcp_1',
       bindingId: 'cb_1',
       client: 'claude-code/2.1.327',
+      clientName: 'claude-code',
+      clientVersion: '2.1.327',
       lastRequestAt: '2026-11-18T00:00:00.000Z',
     },
-    { mcpSessionId: 'mcp_2', bindingId: null, client: 'cursor/0.44' },
+    {
+      mcpSessionId: 'mcp_2',
+      bindingId: null,
+      client: 'cursor/0.44',
+      clientName: 'cursor',
+      clientVersion: '0.44',
+    },
     {
       mcpSessionId: 'mcp_3',
       bindingId: 'cb_1',
       client: 'other/1.0',
+      clientName: 'other',
+      clientVersion: '1.0',
       execSessionIds: ['es_1'],
     },
   ];
@@ -235,6 +245,8 @@ test('GET /clients returns bindings, active sessions and per-binding counts', as
     ['mcp_1', 'mcp_2', 'mcp_3'],
   );
   assert.deepEqual(sessions[2]!['execSessionIds'], ['es_1']);
+  assert.equal(sessions[0]!['clientName'], 'claude-code');
+  assert.equal(sessions[0]!['clientVersion'], '2.1.327');
 });
 
 test('PUT /clients/:id updates the binding and destroys its execution sessions', async () => {

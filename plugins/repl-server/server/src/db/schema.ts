@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -158,6 +158,38 @@ export function createSchemaV1(db: DatabaseSync): void {
 
 export function createSchemaV2(db: DatabaseSync): void {
   db.exec(SCHEMA_V2_SQL);
+}
+
+/**
+ * Adds the split client identity to `reports`. Existing rows are backfilled
+ * from the legacy `client` label at its first `/`; without a slash the whole
+ * label is the name and the version stays empty. Column checks keep the step
+ * safe when a database was reopened with an older `user_version` marker.
+ */
+export function createSchemaV4(db: DatabaseSync): void {
+  const columns = new Set(
+    db
+      .prepare('PRAGMA table_info(reports)')
+      .all()
+      .map((row) => String(row['name'])),
+  );
+  if (!columns.has('client_name')) {
+    db.exec("ALTER TABLE reports ADD COLUMN client_name TEXT NOT NULL DEFAULT ''");
+  }
+  if (!columns.has('client_version')) {
+    db.exec("ALTER TABLE reports ADD COLUMN client_version TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec(`
+    UPDATE reports SET
+      client_name = CASE
+        WHEN instr(client, '/') > 1 THEN substr(client, 1, instr(client, '/') - 1)
+        ELSE client
+      END,
+      client_version = CASE
+        WHEN instr(client, '/') > 1 THEN substr(client, instr(client, '/') + 1)
+        ELSE ''
+      END;
+  `);
 }
 
 /** Raised when repository input violates a storage invariant. */

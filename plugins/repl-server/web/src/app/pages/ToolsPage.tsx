@@ -31,6 +31,7 @@ import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../co
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
+import { navigate } from '../router.ts';
 
 type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
 
@@ -70,6 +71,8 @@ interface ToolsResponse {
   };
   tools: ToolRecord[];
   revision: number;
+  /** Why a lazy `__official__` sync produced no rows (for example: no claude binary). */
+  notice?: string;
 }
 
 interface ToolDiscoveryConfig {
@@ -166,15 +169,16 @@ const CONCURRENCY_OPTIONS = [
   { value: 'exclusive', label: 'exclusive（全局独占）' },
 ];
 
-export function ToolsPage(): React.ReactElement {
+export function ToolsPage({ serverId }: { serverId?: string | null }): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
   const dictionary = useTagDictionary();
   const categoryDictionary = useCategoryDictionary();
   const [servers, setServers] = useState<ServerListItem[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(serverId ?? null);
   const [tools, setTools] = useState<ToolRecord[]>([]);
   const [toolServer, setToolServer] = useState<ToolsResponse['server'] | null>(null);
+  const [toolNotice, setToolNotice] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
@@ -231,11 +235,13 @@ export function ToolsPage(): React.ReactElement {
         if (!alive.current) return;
         setTools(Array.isArray(response.tools) ? response.tools : []);
         setToolServer(response.server);
+        setToolNotice(typeof response.notice === 'string' ? response.notice : null);
         setRevision(typeof response.revision === 'number' ? response.revision : 0);
       } catch (error) {
         if (!alive.current) return;
         setTools([]);
         setToolServer(null);
+        setToolNotice(null);
         message.error(failureText(error));
       } finally {
         if (alive.current) setLoading(false);
@@ -248,10 +254,17 @@ export function ToolsPage(): React.ReactElement {
     void loadServers();
   }, [loadServers]);
 
+  // A hash deep link (`?server=…`) can arrive while this page is already mounted.
+  useEffect(() => {
+    if (serverId === undefined || serverId === null) return;
+    setSelectedId(serverId);
+  }, [serverId]);
+
   useEffect(() => {
     if (selectedId === null) {
       setTools([]);
       setToolServer(null);
+      setToolNotice(null);
       return;
     }
     void loadTools(selectedId);
@@ -504,14 +517,15 @@ export function ToolsPage(): React.ReactElement {
     }
   }
 
-  function changeServer(serverId: string): void {
-    setSelectedId(serverId);
+  function changeServer(nextId: string | null): void {
+    setSelectedId(nextId);
     setQuery('');
     setEditingTool(null);
     setEditorOpen(false);
     setDiscoverOpen(false);
     setPreview(null);
     setSelectedNames([]);
+    navigate('/manage', 'tools', nextId);
   }
 
   function openDiscovery(): void {
@@ -692,11 +706,12 @@ export function ToolsPage(): React.ReactElement {
           <Space wrap>
             <Select
               showSearch
+              allowClear
               optionFilterProp="label"
               style={{ width: 260 }}
               placeholder="选择 server"
               value={selectedId ?? undefined}
-              onChange={(value: string) => changeServer(value)}
+              onChange={(value?: string) => changeServer(value ?? null)}
               options={servers.map((server) => ({
                 value: server.id,
                 label: `${server.id} · ${server.label}`,
@@ -762,6 +777,9 @@ export function ToolsPage(): React.ReactElement {
           )
         }
       >
+        {toolNotice === null ? null : (
+          <Alert type="warning" showIcon message={toolNotice} style={{ marginBottom: 12 }} />
+        )}
         {selectedId === null ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}

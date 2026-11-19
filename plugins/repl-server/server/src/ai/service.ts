@@ -72,6 +72,8 @@ export interface AiRunAuditEvent {
   identity: 'unbound';
   binding: null;
   client: 'admin';
+  clientName: 'admin';
+  clientVersion: '';
   mcp: 'admin';
   kind: 'propose' | 'annotate';
   trigger: 'manual' | 'auto';
@@ -387,6 +389,8 @@ export function createAiService(deps: AiServiceDeps): AiService {
       identity: 'unbound',
       binding: null,
       client: 'admin',
+      clientName: 'admin',
+      clientVersion: '',
       mcp: 'admin',
       kind: input.kind,
       trigger: input.trigger,

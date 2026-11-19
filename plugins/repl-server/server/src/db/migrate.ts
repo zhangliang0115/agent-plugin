@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createSchemaV1, createSchemaV2, SCHEMA_VERSION } from './schema.ts';
+import { createSchemaV1, createSchemaV2, createSchemaV4, SCHEMA_VERSION } from './schema.ts';
 
 export interface OpenStateDbOptions {
   /** Create the parent directory (mode 0700) when it does not exist. Default true. */
@@ -62,6 +62,10 @@ export function migrate(db: DatabaseSync): number {
     if (current < 3) {
       applyV3(db);
       current = 3;
+    }
+    if (current < 4) {
+      applyV4(db);
+      current = 4;
     }
   });
   return current;
@@ -157,4 +161,11 @@ function applyV3(db: DatabaseSync): void {
   }
   db.prepare("UPDATE meta SET value = '3' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 3');
+}
+
+/** Splits the legacy `client` label into name/version on every existing report. */
+function applyV4(db: DatabaseSync): void {
+  createSchemaV4(db);
+  db.prepare("UPDATE meta SET value = '4' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 4');
 }

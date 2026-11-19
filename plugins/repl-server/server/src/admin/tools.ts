@@ -17,11 +17,13 @@ import {
   adminHandler,
   adminJson,
   assertRevision,
+  BUILTIN_SERVER_ID,
   expectBoolean,
   expectString,
   expectStringArray,
   invalidField,
   isPlainObject,
+  OFFICIAL_SERVER_ID,
   parseIfMatch,
   queryValue,
   rejectUnknownFields,
@@ -33,6 +35,7 @@ import {
   type ServerRecord,
   type ServerStore,
 } from './servers.ts';
+import type { OfficialToolsSync } from '../ports.ts';
 
 export type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
 
@@ -117,6 +120,11 @@ export interface AdminToolsDeps {
   servers: ServerStore;
   tools: ToolStore;
   retrieval: SearchPreview;
+  /**
+   * Lazy `__official__` tool sync. `GET /servers/__official__/tools` calls
+   * `ensure()` before listing; without it the route only reads stored rows.
+   */
+  official?: OfficialToolsSync;
 }
 
 const TOOL_PATCH_FIELDS: ReadonlySet<string> = new Set([
@@ -199,7 +207,9 @@ function viewTool(tool: ToolRecord, server: ServerRecord): Record<string, unknow
       stale: tool.stale,
       // Mirrors the executor gates: server enabled, tool enabled, stale blocks `search`
       // rows even when the administrator set `staleOverride` (design 07 §4.7).
+      // `__builtin__` rows are display-only until composite tools get an executor.
       exposed:
+        server.id !== BUILTIN_SERVER_ID &&
         server.enabled &&
         tool.enabled &&
         (!tool.stale || (tool.staleOverride && tool.discoveredVia !== 'search')),
@@ -270,12 +280,24 @@ function assertToolExists(tool: ToolRecord | null, serverId: string, name: strin
 export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
   async function listTools(serverId: string): Promise<AdminResponse> {
     const server = assertServerExists(await deps.servers.get(serverId), serverId);
+    let notice: string | undefined;
+    // First visit lists the official tools from `claude mcp serve`; the outcome
+    // is cached per process. The explicit refresh route is the retry path.
+    if (server.id === OFFICIAL_SERVER_ID && server.enabled && deps.official !== undefined) {
+      try {
+        const outcome = await deps.official.ensure();
+        notice = outcome.notice;
+      } catch (error) {
+        // The GET contract stays 200 even when a sync implementation fails.
+        notice = `官方工具同步失败：${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     const [tools, revision] = await Promise.all([
       deps.tools.listByServer(serverId),
       deps.tools.revision(),
     ]);
 
-    return adminJson(200, {
+    const body: Record<string, unknown> = {
       server: {
         id: server.id,
         label: server.label,
@@ -286,7 +308,9 @@ export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
       },
       tools: tools.map((tool) => viewTool(tool, server)),
       revision,
-    });
+    };
+    if (notice !== undefined) body['notice'] = notice;
+    return adminJson(200, body);
   }
 
   async function patchTool(

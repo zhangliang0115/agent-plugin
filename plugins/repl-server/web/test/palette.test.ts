@@ -13,11 +13,17 @@ const items = [...PALETTE_PAGES, server];
 
 test('filterPaletteItems matches labels, hints and kind', () => {
   assert.deepEqual(filterPaletteItems(items, '标签').map((item) => item.label), ['标签']);
-  assert.deepEqual(filterPaletteItems(items, '连接').map((item) => item.label), [
+  assert.deepEqual(filterPaletteItems(items, '系统管理').map((item) => item.label), [
     '服务端',
     '工具',
     '客户端',
-    'HexHub',
+    '密钥',
+    '标签',
+    '分类',
+    '告警',
+    'AI 配置',
+    '导入导出',
+    '发现',
   ]);
   assert.deepEqual(filterPaletteItems(items, 'server').map((item) => item.kind), ['Server']);
 });

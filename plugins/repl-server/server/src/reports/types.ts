@@ -48,6 +48,10 @@ export interface StoredReport {
   source: ReportSource;
   binding: string | null;
   client: string;
+  /** Parsed `clientInfo.name`; empty when the client reported none. */
+  clientName: string;
+  /** Parsed `clientInfo.version`; empty when the client reported none. */
+  clientVersion: string;
   mcp: string;
   exec: string | null;
   evalId: number | null;
@@ -73,6 +77,8 @@ export interface NewReportRow {
   source: ReportSource;
   binding: string | null;
   client: string;
+  clientName?: string;
+  clientVersion?: string;
   mcp: string;
   exec: string | null;
   evalId: number | null;
@@ -92,6 +98,8 @@ export interface ReportInput {
   context?: unknown;
   binding: string | null;
   client: string;
+  clientName?: string;
+  clientVersion?: string;
   mcp: string;
   exec?: string | null;
   evalId?: number | null;

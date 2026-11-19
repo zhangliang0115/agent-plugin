@@ -1,4 +1,4 @@
-/** Servers page: searchable list on the left, connection/detail actions on the right. */
+/** Servers page: filterable full-width list with row actions; details open in a drawer. */
 import {
   Alert,
   App as AntApp,
@@ -7,6 +7,7 @@ import {
   Col,
   Descriptions,
   Drawer,
+  Dropdown,
   Empty,
   Form,
   Input,
@@ -14,20 +15,14 @@ import {
   Row,
   Select,
   Space,
-  Spin,
   Switch,
   Table,
   Tag,
   Typography,
 } from 'antd';
 import {
-  ApiOutlined,
-  DeleteOutlined,
-  DisconnectOutlined,
-  EditOutlined,
-  ExperimentOutlined,
+  DownOutlined,
   PlusOutlined,
-  RedoOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
@@ -40,6 +35,11 @@ import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../co
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatDuration, formatRelativeTime, formatTimestamp } from '../../lib/format.ts';
+import { navigate } from '../router.ts';
+import {
+  serverRowActions,
+  type ServerRowActionKey,
+} from '../../lib/server-actions.ts';
 
 type ServerTransport = 'stdio' | 'http' | 'builtin';
 type ConnectMode = 'lazy' | 'eager';
@@ -124,7 +124,7 @@ export function ServersPage(): React.ReactElement {
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyState | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -157,9 +157,6 @@ export function ServersPage(): React.ReactElement {
       if (!alive.current) return;
       setServers(items);
       setRevision(typeof response.revision === 'number' ? response.revision : 0);
-      setSelectedId((current) =>
-        current !== null && items.some((server) => server.id === current) ? current : items[0]?.id ?? null,
-      );
     } catch (error) {
       if (alive.current) message.error(failureText(error));
     } finally {
@@ -194,7 +191,7 @@ export function ServersPage(): React.ReactElement {
     return () => window.clearInterval(timer);
   }, [servers, load]);
 
-  const selected = servers.find((server) => server.id === selectedId) ?? null;
+  const selected = servers.find((server) => server.id === detailId) ?? null;
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -210,59 +207,101 @@ export function ServersPage(): React.ReactElement {
   const tagDefinitions = dictionary.tags;
   const categoryDefinitions = categoryDictionary.categories;
 
-  const columns = useMemo(
-    () => [
-      {
-        title: '服务端',
-        dataIndex: 'label',
-        render: (value: string, server: ServerView) => (
-          <div>
-            <div>{value}</div>
-            <div className="mono muted">{server.id}</div>
+  const columns = [
+    {
+      title: '服务端',
+      dataIndex: 'label',
+      render: (value: string, server: ServerView) => (
+        <div>
+          <div>{value}</div>
+          <div className="mono muted">{server.id}</div>
+        </div>
+      ),
+    },
+    {
+      title: '传输',
+      dataIndex: 'transport',
+      width: 90,
+      render: (value: ServerTransport) => <span className="mono">{value}</span>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'state',
+      width: 110,
+      render: (value: string) => <StateTag state={value} />,
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 80,
+      render: (value: boolean) => (
+        <Tag color={value ? 'success' : 'default'} bordered={false}>
+          {value ? '启用' : '停用'}
+        </Tag>
+      ),
+    },
+    {
+      title: '标签',
+      dataIndex: 'tags',
+      width: 190,
+      render: (value: string[]) => <TagList tags={value} dictionary={tagDefinitions} />,
+    },
+    {
+      title: '更新',
+      dataIndex: 'updatedAt',
+      width: 130,
+      render: (value: string | undefined) => (
+        <span className="muted" title={value}>
+          {formatRelativeTime(value ?? null)}
+        </span>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 210,
+      render: (_value: unknown, server: ServerView) => {
+        const plan = serverRowActions(server, busy !== null && busy.serverId === server.id);
+        return (
+          <div className="row-actions" onClick={(event) => event.stopPropagation()}>
+            <Space size={0}>
+              {plan.primary.map((action) => (
+                <Button
+                  key={`${action.key}-${action.label}`}
+                  size="small"
+                  type="link"
+                  danger={action.danger}
+                  disabled={action.disabled}
+                  loading={action.key === 'pending'}
+                  onClick={() => runRowAction(server, action.key)}
+                >
+                  {action.label}
+                </Button>
+              ))}
+              {plan.more.length === 0 ? null : (
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: plan.more.map((action) => ({
+                      key: action.key,
+                      label: action.label,
+                      danger: action.danger,
+                      disabled: action.disabled === true || (action.key === 'test' && testingId === server.id),
+                    })),
+                    onClick: ({ key }) => runRowAction(server, key as ServerRowActionKey),
+                  }}
+                >
+                  <Button size="small" type="link">
+                    更多 <DownOutlined />
+                  </Button>
+                </Dropdown>
+              )}
+            </Space>
           </div>
-        ),
+        );
       },
-      {
-        title: '传输',
-        dataIndex: 'transport',
-        width: 90,
-        render: (value: ServerTransport) => <span className="mono">{value}</span>,
-      },
-      {
-        title: '状态',
-        dataIndex: 'state',
-        width: 110,
-        render: (value: string) => <StateTag state={value} />,
-      },
-      {
-        title: '启用',
-        dataIndex: 'enabled',
-        width: 80,
-        render: (value: boolean) => (
-          <Tag color={value ? 'success' : 'default'} bordered={false}>
-            {value ? '启用' : '停用'}
-          </Tag>
-        ),
-      },
-      {
-        title: '标签',
-        dataIndex: 'tags',
-        width: 190,
-        render: (value: string[]) => <TagList tags={value} dictionary={tagDefinitions} />,
-      },
-      {
-        title: '更新',
-        dataIndex: 'updatedAt',
-        width: 130,
-        render: (value: string | undefined) => (
-          <span className="muted" title={value}>
-            {formatRelativeTime(value ?? null)}
-          </span>
-        ),
-      },
-    ],
-    [tagDefinitions],
-  );
+    },
+  ];
 
   function openEditor(server: ServerView | null): void {
     setEditing(server);
@@ -380,7 +419,6 @@ export function ServersPage(): React.ReactElement {
         const response = await api.post<{ server: ServerView; revision: number }>('/servers', body);
         if (!alive.current) return;
         setRevision(response.revision);
-        setSelectedId(response.server.id);
         message.success(`已注册 server ${response.server.id}`);
       } else {
         if (target === null) return;
@@ -545,6 +583,7 @@ export function ServersPage(): React.ReactElement {
       });
       if (!alive.current) return;
       setRevision(response.revision);
+      if (detailId === server.id) setDetailId(null);
       message.success(force ? `已强制删除 server ${server.id}` : `已删除 server ${server.id}`);
       await load();
     } catch (error) {
@@ -579,7 +618,30 @@ export function ServersPage(): React.ReactElement {
     });
   }
 
-  const builtin = selected?.transport === 'builtin';
+  function runRowAction(server: ServerView, action: ServerRowActionKey): void {
+    switch (action) {
+      case 'connect':
+      case 'disconnect':
+      case 'restart':
+        void runServerAction(server, action);
+        return;
+      case 'test':
+        void testServer(server);
+        return;
+      case 'edit':
+        openEditor(server);
+        return;
+      case 'detail':
+        setDetailId(server.id);
+        return;
+      case 'delete':
+        requestDelete(server);
+        return;
+      default:
+        return;
+    }
+  }
+
   const revisionLabel = selected === null ? null : `revision ${selected.revision}`;
 
   return (
@@ -606,166 +668,108 @@ export function ServersPage(): React.ReactElement {
           </Space>
         }
       />
-      <Row gutter={[16, 16]} align="top">
-        <Col xs={24} xl={15}>
-          <Card title="服务端列表" extra={<span className="muted">{filtered.length} / {servers.length}</span>}>
-            <Table
-              size="small"
-              rowKey="id"
-              loading={loading}
-              dataSource={filtered}
-              columns={columns}
-              pagination={false}
-              scroll={{ y: 'calc(100vh - 280px)' }}
-              rowClassName={(record) => (record.id === selectedId ? 'row-selected' : '')}
-              onRow={(record) => ({
-                onClick: () => {
-                  setSelectedId(record.id);
-                  setTestResult(null);
-                },
-              })}
-              locale={{
-                emptyText: (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description={servers.length === 0 ? '还没有注册的 server' : '没有匹配的 server'}
-                  />
-                ),
-              }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} xl={9}>
-          <Card
-            className="detail-card"
-            title={selected === null ? '服务详情' : selected.label}
-            extra={
-              selected !== null && busy !== null && busy.serverId === selected.id ? (
-                <Space size={6}>
-                  <Spin size="small" />
-                  <span className="muted">{busy.label}</span>
-                </Space>
-              ) : selected === null ? null : (
-                <StateTag state={selected.state} />
-              )
-            }
-          >
-            {selected === null ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="从左侧选择一个 server" />
-            ) : (
-              <Space direction="vertical" size={14} style={{ width: '100%' }}>
-                {selected.lastError === undefined || selected.lastError === '' ? null : (
-                  <Alert type="error" showIcon message={selected.lastError} />
-                )}
-                {testResult === null || testResult.serverId !== selected.id ? null : (
-                  <Alert
-                    type={testResult.ok ? 'success' : 'error'}
-                    showIcon
-                    closable
-                    message={testResult.text}
-                    onClose={() => setTestResult(null)}
-                  />
-                )}
-                <Space wrap size={6}>
-                  <Tag bordered={false} color={selected.enabled ? 'success' : 'default'}>
-                    {selected.enabled ? '启用' : '停用'}
-                  </Tag>
-                  <Tag bordered={false} color="blue">
-                    {selected.transport}
-                  </Tag>
-                  {revisionLabel === null ? null : (
-                    <Tag bordered={false} className="muted">
-                      {revisionLabel}
-                    </Tag>
-                  )}
-                </Space>
-                <Descriptions column={2} size="small">
-                  <Descriptions.Item label="id">
-                    <span className="mono">{selected.id}</span>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="connectMode">{selected.connectMode}</Descriptions.Item>
-                  <Descriptions.Item label="command" span={2}>
-                    <span className="mono">{commandLine(selected)}</span>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="cwd" span={2}>
-                    <span className="mono">{selected.cwd ?? '—'}</span>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="url" span={2}>
-                    <span className="mono">{selected.url ?? '—'}</span>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="env 键名" span={2}>
-                    {selected.envKeys.join(', ') || '—'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="header 键名" span={2}>
-                    {selected.headerKeys.join(', ') || '—'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="summary" span={2}>
-                    {selected.summary ?? '—'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="category">
-                    {selected.category === null
-                      ? '—'
-                      : dictionaryLabel(categoryDefinitions, selected.category)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="tags">
-                    <TagList tags={selected.tags} dictionary={tagDefinitions} />
-                  </Descriptions.Item>
-                  <Descriptions.Item label="timeoutMs">{selected.timeoutMs}</Descriptions.Item>
-                  <Descriptions.Item label="maxConcurrency">{selected.maxConcurrency}</Descriptions.Item>
-                  <Descriptions.Item label="创建">{formatTimestamp(selected.createdAt ?? null)}</Descriptions.Item>
-                  <Descriptions.Item label="更新">{formatTimestamp(selected.updatedAt ?? null)}</Descriptions.Item>
-                </Descriptions>
-                <Space wrap>
-                  {builtin ? null : (
-                    <Button
-                      icon={<ApiOutlined />}
-                      disabled={busy !== null && busy.serverId === selected.id}
-                      onClick={() => void runServerAction(selected, 'connect')}
-                    >
-                      连接
-                    </Button>
-                  )}
-                  {builtin ? null : (
-                    <Button
-                      icon={<DisconnectOutlined />}
-                      disabled={busy !== null && busy.serverId === selected.id}
-                      onClick={() => void runServerAction(selected, 'disconnect')}
-                    >
-                      断开
-                    </Button>
-                  )}
-                  {builtin ? null : (
-                    <Button
-                      icon={<RedoOutlined />}
-                      disabled={busy !== null && busy.serverId === selected.id}
-                      onClick={() => void runServerAction(selected, 'restart')}
-                    >
-                      重启
-                    </Button>
-                  )}
-                  {builtin ? null : (
-                    <Button
-                      icon={<ExperimentOutlined />}
-                      loading={testingId === selected.id}
-                      onClick={() => void testServer(selected)}
-                    >
-                      测试连接
-                    </Button>
-                  )}
-                  <Button type="primary" icon={<EditOutlined />} onClick={() => openEditor(selected)}>
-                    编辑
-                  </Button>
-                  {builtin ? null : (
-                    <Button danger icon={<DeleteOutlined />} onClick={() => requestDelete(selected)}>
-                      删除
-                    </Button>
-                  )}
-                </Space>
-              </Space>
+      <Card title="服务端列表" extra={<span className="muted">{filtered.length} / {servers.length}</span>}>
+        <Table
+          size="small"
+          rowKey="id"
+          loading={loading}
+          dataSource={filtered}
+          columns={columns}
+          pagination={false}
+          scroll={{ y: 'calc(100vh - 262px)' }}
+          rowClassName="row-clickable"
+          onRow={(record) => ({
+            onClick: () => {
+              setTestResult(null);
+              navigate('/manage', 'tools', record.id);
+            },
+          })}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={servers.length === 0 ? '还没有注册的 server' : '没有匹配的 server'}
+              />
+            ),
+          }}
+        />
+      </Card>
+
+      <Drawer
+        open={detailId !== null}
+        onClose={() => setDetailId(null)}
+        title={selected === null ? '服务详情' : `${selected.label} · ${selected.id}`}
+        width={560}
+        extra={selected === null ? null : <StateTag state={selected.state} />}
+      >
+        {selected === null ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该 server 已不存在" />
+        ) : (
+          <Space direction="vertical" size={14} style={{ width: '100%' }}>
+            {selected.lastError === undefined || selected.lastError === '' ? null : (
+              <Alert type="error" showIcon message={selected.lastError} />
             )}
-          </Card>
-        </Col>
-      </Row>
+            {testResult === null || testResult.serverId !== selected.id ? null : (
+              <Alert
+                type={testResult.ok ? 'success' : 'error'}
+                showIcon
+                closable
+                message={testResult.text}
+                onClose={() => setTestResult(null)}
+              />
+            )}
+            <Space wrap size={6}>
+              <Tag bordered={false} color={selected.enabled ? 'success' : 'default'}>
+                {selected.enabled ? '启用' : '停用'}
+              </Tag>
+              <Tag bordered={false} color="blue">
+                {selected.transport}
+              </Tag>
+              {revisionLabel === null ? null : (
+                <Tag bordered={false} className="muted">
+                  {revisionLabel}
+                </Tag>
+              )}
+            </Space>
+            <Descriptions column={2} size="small">
+              <Descriptions.Item label="id">
+                <span className="mono">{selected.id}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="connectMode">{selected.connectMode}</Descriptions.Item>
+              <Descriptions.Item label="command" span={2}>
+                <span className="mono">{commandLine(selected)}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="cwd" span={2}>
+                <span className="mono">{selected.cwd ?? '—'}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="url" span={2}>
+                <span className="mono">{selected.url ?? '—'}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="env 键名" span={2}>
+                {selected.envKeys.join(', ') || '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="header 键名" span={2}>
+                {selected.headerKeys.join(', ') || '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="summary" span={2}>
+                {selected.summary ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="category">
+                {selected.category === null
+                  ? '—'
+                  : dictionaryLabel(categoryDefinitions, selected.category)}
+              </Descriptions.Item>
+              <Descriptions.Item label="tags">
+                <TagList tags={selected.tags} dictionary={tagDefinitions} />
+              </Descriptions.Item>
+              <Descriptions.Item label="timeoutMs">{selected.timeoutMs}</Descriptions.Item>
+              <Descriptions.Item label="maxConcurrency">{selected.maxConcurrency}</Descriptions.Item>
+              <Descriptions.Item label="创建">{formatTimestamp(selected.createdAt ?? null)}</Descriptions.Item>
+              <Descriptions.Item label="更新">{formatTimestamp(selected.updatedAt ?? null)}</Descriptions.Item>
+            </Descriptions>
+          </Space>
+        )}
+      </Drawer>
 
       <Drawer
         forceRender

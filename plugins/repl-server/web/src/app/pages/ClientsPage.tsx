@@ -61,6 +61,8 @@ interface McpSessionRecord {
   mcpSessionId: string;
   bindingId: string | null;
   client: string;
+  clientName: string;
+  clientVersion: string;
   connectedAt?: string;
   lastRequestAt?: string;
   execSessionIds?: string[];
@@ -410,8 +412,13 @@ export function ClientsPage(): React.ReactElement {
               render: (value: string) => <span className="mono">{formatId(value, 22)}</span>,
             },
             {
-              title: '客户端（client）',
-              dataIndex: 'client',
+              title: '客户端名称',
+              dataIndex: 'clientName',
+              render: (value: string, session: McpSessionRecord) => value || session.client || '—',
+            },
+            {
+              title: '版本',
+              dataIndex: 'clientVersion',
               render: (value: string) => value || '—',
             },
             {

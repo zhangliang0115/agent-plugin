@@ -61,7 +61,7 @@ function deepFreeze<T>(value: T): T {
  * It stays under the 2KB ceiling frozen in docs/protocol.md §3.3, and it must mention async in
  * both the schema and the description or the model never discovers the async path (01 §4.2).
  */
-const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch several tool calls, loop over results, or combine outputs before answering. Only the returned value and the text passed to log() come back to you, wrapped in a <repl-output> envelope.
+export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch several tool calls, loop over results, or combine outputs before answering. Only the returned value and the text passed to log() come back to you, wrapped in a <repl-output> envelope.
 
 - Tools are async functions: await Read({ path }), await Edit({...}); MCP tools are tools.mcp.<server>.<tool>(args).
 - Top-level declarations persist across calls in the same workspace. Changing workspace starts a new execution session; variables and state do not carry over.
@@ -187,8 +187,21 @@ export const TOOL_ORDER: readonly ToolName[] = Object.freeze(TOOL_DEFINITIONS.ma
 
 const BY_NAME = new Map<string, ToolDefinition>(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 
-export function listTools(): readonly ToolDefinition[] {
-  return TOOL_DEFINITIONS;
+/**
+ * `tools/list` entries. Passing a per-client `run_script` summary returns a
+ * rebuilt definition; every other definition stays the frozen shared one.
+ */
+export function listTools(runScriptDescription?: string): readonly ToolDefinition[] {
+  if (runScriptDescription === undefined || runScriptDescription === RUN_SCRIPT_DESCRIPTION) {
+    return TOOL_DEFINITIONS;
+  }
+  return Object.freeze(
+    TOOL_DEFINITIONS.map((tool) =>
+      tool.name === 'run_script'
+        ? Object.freeze({ ...tool, description: runScriptDescription })
+        : tool,
+    ),
+  );
 }
 
 export function getToolDefinition(name: string): ToolDefinition | undefined {
