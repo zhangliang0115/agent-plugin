@@ -15,7 +15,7 @@ import { createApiClient } from './lib/api.ts';
 import { createHashRouter, type RouteLocation } from './lib/router.ts';
 import { escapeHtml } from './lib/format.ts';
 import { createAuditPage } from './pages/audit.ts';
-import { createManagePage, MANAGE_NAV_GROUPS } from './pages/manage.ts';
+import { createManagePage, manageGroupForTab } from './pages/manage.ts';
 import { createOverviewPage } from './pages/overview.ts';
 import { iconMarkup, type PageHandle } from './pages/shared.ts';
 
@@ -53,6 +53,10 @@ interface NavItem {
   route: string;
   label: string;
   icon: string;
+  /** First tab of a manage group; also the link target. */
+  tab?: string;
+  /** Manage group label this link represents. */
+  group?: string;
 }
 
 interface NavGroup {
@@ -69,8 +73,12 @@ const NAV_GROUPS: readonly NavGroup[] = [
     ],
   },
   {
-    label: '系统',
-    items: [{ route: '/manage', label: '管理', icon: 'manage' }],
+    label: '系统管理',
+    items: [
+      { route: '/manage', tab: 'servers', group: '连接', label: '连接', icon: 'server' },
+      { route: '/manage', tab: 'secrets', group: '配置', label: '配置', icon: 'key' },
+      { route: '/manage', tab: 'config', group: '迁移', label: '迁移', icon: 'download' },
+    ],
   },
 ];
 
@@ -115,21 +123,6 @@ function currentTheme(): Theme {
   return document.documentElement.dataset['theme'] === 'light' ? 'light' : 'dark';
 }
 
-function manageSubMarkup(): string {
-  return `<div class="sidebar-sub" data-manage-sub hidden>
-    ${MANAGE_NAV_GROUPS.map(
-      (group) => `
-      <p class="sidebar-sub-label">${escapeHtml(group.label)}</p>
-      ${group.items
-        .map(
-          (item) => `
-        <a class="sidebar-sublink" href="#/manage${item.tab === 'servers' ? '' : `?tab=${item.tab}`}" data-route="/manage" data-manage-tab="${item.tab}">${escapeHtml(item.label)}</a>`,
-        )
-        .join('')}`,
-    ).join('')}
-  </div>`;
-}
-
 function navMarkup(): string {
   return NAV_GROUPS.map(
     (group) => `
@@ -138,10 +131,10 @@ function navMarkup(): string {
         ${group.items
           .map(
             (item) => `
-          <a class="sidebar-link" href="#${item.route}" data-route="${item.route}">
+          <a class="sidebar-link" href="#${item.route}${item.tab === undefined ? '' : `?tab=${item.tab}`}" data-route="${item.route}"${item.group === undefined ? '' : ` data-manage-group="${item.group}"`}>
             ${iconMarkup(item.icon, 16)}
             <span>${escapeHtml(item.label)}</span>
-          </a>${item.route === '/manage' ? manageSubMarkup() : ''}`,
+          </a>`,
           )
           .join('')}
       </div>`,
@@ -228,7 +221,7 @@ function showShell(): void {
   window.addEventListener('hashchange', guardHashNavigation);
   window.addEventListener('repl:manage-tab', (event) => {
     const tab = (event as CustomEvent<unknown>).detail;
-    if (typeof tab === 'string') setManageTabActive(tab);
+    if (typeof tab === 'string') setManageGroupActive(manageGroupForTab(tab));
   });
   router.start();
   startHealthChecks();
@@ -415,10 +408,13 @@ function setText(selector: string, text: string): void {
   if (node !== null) node.textContent = text;
 }
 
-function setManageTabActive(tab: string | null): void {
-  for (const link of appRoot.querySelectorAll<HTMLAnchorElement>('a[data-manage-tab]')) {
-    if (tab !== null && link.dataset['manageTab'] === tab) link.setAttribute('aria-current', 'page');
-    else link.removeAttribute('aria-current');
+function setManageGroupActive(group: string | null): void {
+  for (const link of appRoot.querySelectorAll<HTMLAnchorElement>('a[data-manage-group]')) {
+    if (group !== null && link.dataset['manageGroup'] === group) {
+      link.setAttribute('aria-current', 'page');
+    } else {
+      link.removeAttribute('aria-current');
+    }
   }
 }
 
@@ -430,14 +426,12 @@ function renderRoute(location: RouteLocation): void {
   setText('[data-page-summary]', meta.summary);
 
   for (const link of appRoot.querySelectorAll<HTMLAnchorElement>('a[data-route]')) {
-    if (link.dataset['manageTab'] !== undefined) continue;
+    if (link.dataset['manageGroup'] !== undefined) continue;
     if (link.dataset['route'] === location.route) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  const manageSub = appRoot.querySelector<HTMLElement>('[data-manage-sub]');
-  if (manageSub !== null) manageSub.hidden = location.route !== '/manage';
-  setManageTabActive(
-    location.route === '/manage' ? location.query.get('tab') ?? 'servers' : null,
+  setManageGroupActive(
+    location.route === '/manage' ? manageGroupForTab(location.query.get('tab')) : null,
   );
 
   resetDrawer();

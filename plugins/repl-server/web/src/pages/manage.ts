@@ -486,6 +486,14 @@ export const MANAGE_NAV_GROUPS: ReadonlyArray<{
   },
 ];
 
+/** Sidebar group that owns a tab; unknown tabs fall into 连接. */
+export function manageGroupForTab(tab: string | null): string {
+  const group = MANAGE_NAV_GROUPS.find((candidate) =>
+    candidate.items.some((item) => item.tab === tab),
+  );
+  return group?.label ?? '连接';
+}
+
 const TAB_INTROS: Readonly<Record<Tab, { title: string; description: string; hint?: string }>> = {
   servers: {
     title: '服务端',
@@ -990,10 +998,17 @@ export function createManagePage(context: PageContext): PageHandle {
   const controller = new AbortController();
   const timers = new Set<ReturnType<typeof setTimeout>>();
 
-  /** Rebuilds the underline tabs so programmatic switches and clicks share one truth. */
+  /** Rebuilds the underline tabs for the active group. */
   function renderTabs(): void {
+    const group = MANAGE_NAV_GROUPS.find((candidate) =>
+      candidate.items.some((item) => item.tab === state.tab),
+    );
+    const visible =
+      group === undefined
+        ? TABS
+        : TABS.filter((option) => group.items.some((item) => item.tab === option.id));
     tabHost.replaceChildren(
-      tabs(TABS, state.tab, (id) => setTab(id as Tab), { ariaLabel: '管理分区' }),
+      tabs(visible, state.tab, (id) => setTab(id as Tab), { ariaLabel: '管理分区' }),
     );
   }
 
