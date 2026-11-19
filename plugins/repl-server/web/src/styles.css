@@ -56,6 +56,13 @@ body {
   flex-direction: column;
 }
 
+/* Sider wraps content in an inner div; flex column must live there for the footer to drop. */
+.sidebar .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
 .brand {
   display: flex;
   align-items: center;
