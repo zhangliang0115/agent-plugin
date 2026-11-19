@@ -15,7 +15,7 @@ import {
 } from './constants.ts';
 
 /** Bumped whenever either template changes; reported by `GET /ai/config`. */
-export const PROMPT_VERSION = 6;
+export const PROMPT_VERSION = 7;
 
 /** 8 hex characters, unique per run. */
 export function createPromptNonce(): string {

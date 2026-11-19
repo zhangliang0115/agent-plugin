@@ -15,6 +15,7 @@ import { applyAnnotation } from '../src/ai/apply.ts';
 import type { AiRunAuditEvent, AiService } from '../src/ai/service.ts';
 import { createAiService } from '../src/ai/service.ts';
 import { DEFAULT_AI_SETTINGS, putAiSettings } from '../src/ai/settings.ts';
+import type { AiRunner } from '../src/ai/runner.ts';
 import { normalizeAnnotation, restrictAnnotationToDictionary } from '../src/ai/validate.ts';
 import { DbServerStore, DbSettingsStore, DbToolStore } from '../src/assembly-stores.ts';
 import { openStateDb } from '../src/db/migrate.ts';
@@ -52,7 +53,11 @@ interface Fixture {
 
 async function makeFixture(
   t: TestContext,
-  options: { settings?: Partial<typeof DEFAULT_AI_SETTINGS>; extraEnv?: Record<string, string> } = {},
+  options: {
+    settings?: Partial<typeof DEFAULT_AI_SETTINGS>;
+    extraEnv?: Record<string, string>;
+    runner?: AiRunner;
+  } = {},
 ): Promise<Fixture> {
   await chmod(FIXTURE, 0o755);
   const dir = await mkdtemp(join(tmpdir(), 'repl-ai-annotate-'));
@@ -90,6 +95,7 @@ async function makeFixture(
     clock,
     dataDir: dir,
     ...(options.extraEnv === undefined ? {} : { extraEnv: options.extraEnv }),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
     onAiRun: (event) => audits.push(event),
   });
 
@@ -180,13 +186,90 @@ test('preview returns proposed metadata without writing', async (t) => {
   assert.deepEqual(preview.proposed.tagSuggestions, []);
   assert.equal(preview.proposed.toolOverrides?.[0]?.name, 'query');
   assert.equal(preview.omittedTools, 0);
-  assert.equal(preview.meta.promptVersion, 6);
+  assert.equal(preview.meta.promptVersion, 7);
 
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'pg')?.summary, null);
   assert.equal(fixture.rebuilds.length, 0);
   assert.equal(fixture.audits.length, 1);
   assert.equal(fixture.audits[0]?.kind, 'annotate');
+});
+
+test('annotate prompt hides literal args and keeps secret names', async (t) => {
+  const prompts: string[] = [];
+  const runner: AiRunner = {
+    async run(prompt) {
+      prompts.push(prompt);
+      return {
+        payload: {
+          summary: APPLY.summary,
+          category: 'database',
+          tags: ['postgresql'],
+          toolOverrides: [],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  const skToken = `sk-live-${'A1b2C3d4'.repeat(4)}`;
+  const opaqueToken = `${'opaque-token-'.repeat(4)}9f8e7d6c`;
+  createServer(fixture.db, {
+    id: 'pg',
+    label: 'PostgreSQL',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', skToken, opaqueToken, { $secret: 'DATABASE_URL' }],
+    env: { DATABASE_URL: { $secret: 'DATABASE_URL' } },
+  });
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.equal(preview.meta.promptVersion, 7);
+  assert.equal(prompts.length, 1);
+  const prompt = prompts[0] ?? '';
+  assert.ok(!prompt.includes(skToken));
+  assert.ok(!prompt.includes(opaqueToken));
+  assert.ok(prompt.includes('"<literal>"'));
+  assert.ok(prompt.includes('"<secret:DATABASE_URL>"'));
+  assert.match(prompt, /"argCount": 4/);
+});
+
+test('preview rejects a prompt over 64 KiB without echoing the server view', async (t) => {
+  const fixture = await makeFixture(t);
+  const sentinel = 'SENTINEL_ENV_KEY_';
+  const env: Record<string, { $secret: string }> = {};
+  for (let index = 0; index < 1200; index += 1) {
+    env[`${sentinel}${String(index).padStart(4, '0')}_${'K'.repeat(48)}`] = {
+      $secret: `S${String(index).padStart(4, '0')}`,
+    };
+  }
+  createServer(fixture.db, {
+    id: 'pg',
+    label: 'PostgreSQL',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y'],
+    env,
+  });
+  seedTool(fixture.db);
+
+  const error = await expectApiError(
+    fixture.service.annotatePreview('pg'),
+    'AI_PROMPT_TOO_LARGE',
+    422,
+  );
+  const details = error.details as { limitBytes: number; actualBytes: number };
+  assert.equal(details.limitBytes, 64 * 1024);
+  assert.ok(details.actualBytes > details.limitBytes);
+  const exposed = JSON.stringify({ message: error.message, details: error.details });
+  assert.ok(!exposed.includes(sentinel));
+  assert.deepEqual(fixture.audits, []);
 });
 
 test('preview reports omittedTools beyond the 80-tool cap', async (t) => {

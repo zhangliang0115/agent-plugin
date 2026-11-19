@@ -31,6 +31,7 @@ import { applyAnnotation, UnknownToolError, type AnnotationPatch } from './apply
 import {
   AI_AUTO_MIN_INTERVAL_MS,
   AI_INPUT_MAX_BYTES,
+  AI_PROMPT_MAX_BYTES,
 } from './constants.ts';
 import { AiRunnerError } from './errors.ts';
 import { createAiLimiter } from './limiter.ts';
@@ -308,14 +309,21 @@ function serverToCreateBody(server: ProposalServer): Record<string, unknown> {
   };
 }
 
-/** Prompt view of a server (08 §4.1): keys only, secret args as placeholders. */
+/**
+ * Prompt view of a server (08 §4.1): keys only. Every literal arg is replaced by
+ * `<literal>` so tokens without a known prefix never reach the model; `$secret`
+ * refs keep only the name. `argCount` preserves the argument shape.
+ */
 function serverPromptView(record: ServerRecord, toolCount: number): Record<string, unknown> {
   return {
     id: record.id,
     label: record.label,
     transport: record.transport,
     command: record.command,
-    args: record.args.map((arg) => (typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`)),
+    args: record.args.map((arg) =>
+      typeof arg === 'string' ? '<literal>' : `<secret:${arg.$secret}>`,
+    ),
+    argCount: record.args.length,
     url: record.url,
     cwd: record.cwd,
     envKeys: Object.keys(record.env).sort(),
@@ -712,6 +720,15 @@ export function createAiService(deps: AiServiceDeps): AiService {
       dictionaries,
       createPromptNonce(),
     );
+    // The server view alone can exceed the cap when the 64 KiB trim has no tools
+    // left to drop; reject before spending a model call and never echo the view.
+    const actualBytes = Buffer.byteLength(promptResult.prompt, 'utf8');
+    if (actualBytes > AI_PROMPT_MAX_BYTES) {
+      throw new AdminApiError(422, 'AI_PROMPT_TOO_LARGE', 'annotate prompt exceeds the byte limit', {
+        limitBytes: AI_PROMPT_MAX_BYTES,
+        actualBytes,
+      });
+    }
     const { run, audit } = await callModel({
       kind: 'annotate',
       trigger,

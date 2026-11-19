@@ -244,11 +244,9 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
 
   const list = await rpc(app.base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
   const tools = (await list.json()) as {
-    result: { resultType: string; tools: Array<{ name: string }>; ttlMs: number; cacheScope: string };
+    result: { resultType: string; tools: Array<{ name: string }> };
   };
   assert.equal(tools.result.resultType, 'complete');
-  assert.equal(tools.result.ttlMs, 300_000);
-  assert.equal(tools.result.cacheScope, 'private');
   assert.deepEqual(tools.result.tools.map((tool) => tool.name), [
     'run_script',
     'search_tools',

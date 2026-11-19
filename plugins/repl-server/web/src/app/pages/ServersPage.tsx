@@ -1570,6 +1570,8 @@ function aiErrorText(error: unknown): string {
       return 'Claude 返回的草案不是合法 JSON；请调整输入后重试。';
     case 'AI_OUTPUT_TOO_LARGE':
       return 'Claude 输出超过大小上限；请缩短输入或稍后重试。';
+    case 'AI_PROMPT_TOO_LARGE':
+      return '标注提示词超过 64 KiB；请精简 env/header 键或分类/标签字典后重试。';
     case 'SERVER_EXISTS': {
       const serverId =
         isRecord(error.details) && typeof error.details['serverId'] === 'string'

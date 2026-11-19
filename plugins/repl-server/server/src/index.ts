@@ -3,7 +3,6 @@ import { join } from 'node:path';
 
 import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-server-core';
 
-import { FRAME_MODES, type FrameMode } from './audit/frames.ts';
 import { assemble } from './assembly.ts';
 import { stateDbPath } from './local-tokens.ts';
 import { runStdioBridge } from './stdio-bridge.ts';
@@ -14,7 +13,6 @@ interface CliOptions {
   stdio: boolean;
   url: string;
   tokenFile: string | undefined;
-  frameMode: FrameMode | undefined;
 }
 
 function stringArg(argv: readonly string[], name: string): string | undefined {
@@ -29,20 +27,12 @@ function readOptions(argv: readonly string[]): CliOptions {
     console.error(`repl-server: invalid port ${JSON.stringify(raw)}`);
     process.exit(2);
   }
-  const rawFrameMode = stringArg(argv, '--frame-mode') ?? process.env['REPL_FRAME_MODE'];
-  if (rawFrameMode !== undefined && !(FRAME_MODES as readonly string[]).includes(rawFrameMode)) {
-    console.error(
-      `repl-server: invalid frame mode ${JSON.stringify(rawFrameMode)} (expected ${FRAME_MODES.join('|')})`,
-    );
-    process.exit(2);
-  }
   return {
     port,
     strictAuth: argv.includes('--strict-auth'),
     stdio: argv.includes('--stdio'),
     url: stringArg(argv, '--url') ?? 'http://127.0.0.1:8787/mcp',
     tokenFile: stringArg(argv, '--token-file'),
-    frameMode: rawFrameMode as FrameMode | undefined,
   };
 }
 
@@ -67,11 +57,7 @@ if (options.stdio) {
     process.exit(1);
   }
 
-  const assembly = await assemble({
-    strictAuth: options.strictAuth,
-    bootId,
-    ...(options.frameMode === undefined ? {} : { frameMode: options.frameMode }),
-  });
+  const assembly = await assemble({ strictAuth: options.strictAuth, bootId });
 
   assembly.server.listen(options.port, host, () => {
     // stdout is reserved for the stdio bridge; logs go to stderr.

@@ -1,7 +1,7 @@
-/** Secrets page: write-only list, plus an explicit per-key reveal. */
-import { App as AntApp, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd';
+/** Secrets page: write-only values for keys declared by server env/header references. */
+import { App as AntApp, Button, Card, Empty, Form, Input, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { EyeOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useState } from 'react';
 
 import { useApi } from '../api.tsx';
@@ -27,8 +27,6 @@ export function SecretsPage(): React.ReactElement {
   const [secrets, setSecrets] = useState<SecretStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [revealing, setRevealing] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<{ name: string; value: string } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -52,27 +50,13 @@ export function SecretsPage(): React.ReactElement {
     field?.focus?.();
   }
 
-  async function reveal(name: string): Promise<void> {
-    setRevealing(name);
-    try {
-      const response = await api.get<{ name: string; value: string }>(
-        `/secrets/${encodeURIComponent(name)}`,
-      );
-      setRevealed({ name: response.name ?? name, value: response.value });
-    } catch (error) {
-      message.error(failureText(error));
-    } finally {
-      setRevealing(null);
-    }
-  }
-
   async function submit(values: SecretFormValues): Promise<void> {
     const name = values.name.trim();
     setSaving(true);
     try {
       await api.put(`/secrets/${encodeURIComponent(name)}`, { value: values.value });
       form.resetFields(['value']);
-      message.success(`已写入密钥 ${name}。`);
+      message.success(`已写入密钥 ${name}（值不回读）。`);
       await load();
     } catch (error) {
       message.error(failureText(error));
@@ -99,22 +83,11 @@ export function SecretsPage(): React.ReactElement {
     },
     {
       title: '操作',
-      width: 190,
+      width: 120,
       render: (_value, record) => (
-        <Space size={4}>
-          <Button
-            size="small"
-            icon={<EyeOutlined />}
-            disabled={!record.configured}
-            loading={revealing === record.name}
-            onClick={() => void reveal(record.name)}
-          >
-            查看
-          </Button>
-          <Button size="small" onClick={() => rotate(record.name)}>
-            写入/轮换
-          </Button>
-        </Space>
+        <Button size="small" onClick={() => rotate(record.name)}>
+          写入/轮换
+        </Button>
       ),
     },
   ];
@@ -125,7 +98,7 @@ export function SecretsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="密钥"
-        description="写入 env / header 引用的密钥值。列表只返回键名与是否已设置；需要核对当前值时，点单个键名的「查看」回读，响应不缓存。"
+        description="写入 env / header 引用的密钥值，只写不读。GET /secrets 只返回键名与是否已设置；写入后无法回读，只能轮换。"
         actions={
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
@@ -145,7 +118,7 @@ export function SecretsPage(): React.ReactElement {
             <Input className="mono" placeholder="DATABASE_URL" autoComplete="off" />
           </Form.Item>
           <Form.Item name="value" label="值" rules={[{ required: true, whitespace: true, message: '值不能为空' }]}>
-            <Input.Password placeholder="值保存在本机密钥库，可按单个键名查看" autoComplete="new-password" />
+            <Input.Password placeholder="值只在写入时发送，永不回读" autoComplete="new-password" />
           </Form.Item>
           <Space>
             <Button type="primary" htmlType="submit" loading={saving}>
@@ -181,28 +154,6 @@ export function SecretsPage(): React.ReactElement {
           }}
         />
       </Card>
-      <Modal
-        open={revealed !== null}
-        title={revealed === null ? '查看密钥' : `密钥 · ${revealed.name}`}
-        footer={null}
-        destroyOnHidden
-        onCancel={() => setRevealed(null)}
-      >
-        {revealed === null ? null : (
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
-            <Typography.Paragraph
-              className="mono"
-              copyable={{ text: revealed.value }}
-              style={{ marginBottom: 0, wordBreak: 'break-all' }}
-            >
-              {revealed.value}
-            </Typography.Paragraph>
-            <Typography.Text type="secondary">
-              值来自本机密钥库，仅在本次弹窗显示；关闭后不保留在页面状态里。
-            </Typography.Text>
-          </Space>
-        )}
-      </Modal>
     </div>
   );
 }

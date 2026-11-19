@@ -13,12 +13,7 @@ export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 export const SERVER_NAME = 'repl-server';
 export const SERVER_VERSION = VERSION;
 export const DISCOVER_TTL_MS = 3_600_000;
-/**
- * `instructions` is built from the servers visible to the requesting client
- * binding, so the discover result is not shareable across authorization
- * contexts (protocol 2026-07-28 §Caching).
- */
-export const DISCOVER_CACHE_SCOPE = 'private' as const;
+export const DISCOVER_CACHE_SCOPE = 'public';
 
 /**
  * Full prompt sent through discover/initialize `instructions`.
@@ -159,7 +154,7 @@ export interface DiscoverResult {
   _meta: { 'io.modelcontextprotocol/serverInfo': ServerInfo };
   instructions: string;
   ttlMs: number;
-  cacheScope: typeof DISCOVER_CACHE_SCOPE;
+  cacheScope: 'public';
 }
 
 export interface InitializeResult {

@@ -72,6 +72,9 @@ export interface StreamEndpointResult {
 
 export type AuditEndpointResult = JsonEndpointResult | StreamEndpointResult;
 
+/** Line ceiling for one frames request, across protocol-* and audit-* files. */
+export const AUDIT_FRAME_SCAN_MAX_LINES = 100_000;
+
 export interface AuditEndpointsOptions {
   /** Directory holding `audit-*.jsonl` and `protocol-*.jsonl`. */
   dir: string;
@@ -83,6 +86,8 @@ export interface AuditEndpointsOptions {
   framePageSize?: number;
   /** Protocol-frame page ceiling. Default 1000. */
   frameMaxPageSize?: number;
+  /** Frame scan row ceiling; reaching it marks the response truncated. Default 100000. */
+  frameScanMaxLines?: number;
 }
 
 export interface AuditEndpoints {
@@ -225,6 +230,10 @@ interface CollectedFrames {
   droppedFrames: number;
   frameKeys: Set<string>;
   droppedKeys: Set<string>;
+  /** Lines inspected so far, across both log kinds. */
+  scannedLines: number;
+  /** True once `frameScanMaxLines` stopped the scan early. */
+  truncated: boolean;
 }
 
 function frameDedupeKey(event: AuditEvent): string {
@@ -248,16 +257,23 @@ async function collectProtocolFrames(
   filter: AuditFilter,
   range: FrameEndpointFilter,
   state: CollectedFrames,
+  maxLines: number,
 ): Promise<void> {
   for await (const line of readAuditLines(dir, kind, { from: range.from, to: range.to })) {
+    if (state.scannedLines >= maxLines) {
+      state.truncated = true;
+      return;
+    }
+    state.scannedLines += 1;
     const event = parseAuditEvent(line.text);
     if (event === null) continue;
     if (event.event === 'protocol_dropped') {
       const key = droppedDedupeKey(event);
       if (state.droppedKeys.has(key)) continue;
       state.droppedKeys.add(key);
-      // Drop counters are process-global, so the time range is the only filter
-      // that applies to them.
+      // Drop counters are process-global, so only the request window applies.
+      // A ts that cannot be parsed cannot be placed in the window.
+      if (!matchesFilter(event, { from: range.from, to: range.to })) continue;
       if (typeof event.count === 'number') state.droppedFrames += event.count;
       continue;
     }
@@ -274,19 +290,29 @@ async function readProtocolFrames(
   dir: string,
   filter: AuditFilter,
   range: FrameEndpointFilter,
-): Promise<{ frames: ProtocolFramePair[]; droppedFrames: number }> {
+  maxLines: number,
+): Promise<{ frames: ProtocolFramePair[]; droppedFrames: number; truncated: boolean }> {
   const state: CollectedFrames = {
     events: [],
     droppedFrames: 0,
     frameKeys: new Set(),
     droppedKeys: new Set(),
+    scannedLines: 0,
+    truncated: false,
   };
   // Frame storage moved from audit-*.jsonl to protocol-*.jsonl, so read both:
   // old records stay visible after a restart writes the first protocol file,
-  // and the overlap is deduped by a stable event key.
-  await collectProtocolFrames(dir, 'protocol', filter, range, state);
-  await collectProtocolFrames(dir, 'audit', filter, range, state);
-  return { frames: pairProtocolFrames(state.events), droppedFrames: state.droppedFrames };
+  // and the overlap is deduped by a stable event key. The line budget spans
+  // both files; once it is spent the legacy file is skipped.
+  await collectProtocolFrames(dir, 'protocol', filter, range, state, maxLines);
+  if (!state.truncated) {
+    await collectProtocolFrames(dir, 'audit', filter, range, state, maxLines);
+  }
+  return {
+    frames: pairProtocolFrames(state.events),
+    droppedFrames: state.droppedFrames,
+    truncated: state.truncated,
+  };
 }
 
 /** GET /admin/api/audit/frames?mcp=&id=&detail=summary|full */
@@ -312,11 +338,14 @@ export async function auditFramesEndpoint(
     });
     const pageSize = options.framePageSize ?? 200;
     const pageMax = options.frameMaxPageSize ?? 1000;
+    const scanMaxLines = options.frameScanMaxLines ?? AUDIT_FRAME_SCAN_MAX_LINES;
     const limit = parseLimit(request.params.get('limit'), pageSize, pageMax);
-    const { frames, droppedFrames } = await readProtocolFrames(options.dir, filter, {
-      from: filter.from,
-      to: filter.to,
-    });
+    const { frames, droppedFrames, truncated } = await readProtocolFrames(
+      options.dir,
+      filter,
+      { from: filter.from, to: filter.to },
+      scanMaxLines,
+    );
     // Pairing needs the response frame, so the page is cut after pairing.
     const page = frames.slice(0, limit).map((pair) => {
       if (detail === 'full') return pair;
@@ -331,6 +360,7 @@ export async function auditFramesEndpoint(
       frames: page,
       hasMore: frames.length > limit,
       droppedFrames,
+      truncated,
     });
   } catch (error) {
     return endpointError(error);

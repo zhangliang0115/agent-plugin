@@ -993,6 +993,8 @@ function aiErrorText(error: unknown): string {
       return '该服务端不支持 AI 标注（内置或种子服务端）。';
     case 'AI_UNKNOWN_TOOL':
       return '标注引用了不存在的工具；请重新生成预览。';
+    case 'AI_PROMPT_TOO_LARGE':
+      return '标注提示词超过 64 KiB；请精简 env/header 键或分类/标签字典后重试。';
     case 'REVISION_CONFLICT':
       return '配置已被其他页面修改，请刷新后重试。';
     default:

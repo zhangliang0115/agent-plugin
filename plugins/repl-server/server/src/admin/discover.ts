@@ -1,7 +1,9 @@
 /** Admin API for local environment discovery (`POST /discover`, `POST /discover/secrets`).
  *
- * Probes the fixed config list from 03 §9.1 (Claude Code, Kiro, Cursor, workspace
- * `.mcp.json`), then appends built-in suggestions. The scan never returns secret values:
+ * Probes the fixed config list from 03 §9.1 (Claude Code, Kiro, Cursor); the
+ * workspace `.mcp.json` and `.kiro/settings/mcp.json` are scanned only when
+ * `deps.workspace` is provided. Built-in suggestions are appended after the scan.
+ * The scan never returns secret values:
  * client configs are parsed for server names, commands and env/header key names only, and
  * credential files are only checked for existence. `POST /discover/secrets` re-reads one
  * already-scanned entry on explicit request and copies its env/header values into the
@@ -73,6 +75,8 @@ export interface DiscoverSecretProbe {
   has(name: string): boolean | Promise<boolean>;
   /** Writes one imported literal; absent stores make `POST /discover/secrets` unavailable. */
   set?(name: string, value: string): Promise<void>;
+  /** Best-effort undo for a partially failed import; absent stores skip rollback. */
+  delete?(name: string): Promise<void>;
 }
 
 export interface DiscoverIo {
@@ -100,6 +104,22 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+/** A downstream merge of the response through [[Set]] would rewrite the prototype. */
+const RESERVED_REF_KEYS: ReadonlySet<string> = new Set(['__proto__']);
+
+/** Defines an own enumerable key; plain assignment of `__proto__` changes the prototype. */
+function defineRef(
+  target: Record<string, { $secret: string }>,
+  key: string,
+  name: string,
+): void {
+  Object.defineProperty(target, key, {
+    value: { $secret: name },
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
 
 /** Config files the scan may read; the import route accepts only these paths. */
 function configPathsFor(home: string, workspace: string | undefined): string[] {
@@ -607,6 +627,18 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
       );
     }
 
+    // Checked before the first write so a registered id never overwrites its
+    // existing `disc.*` keys.
+    const registered = await deps.servers.list();
+    if (registered.some((server) => server.id === serverId)) {
+      throw new AdminApiError(
+        409,
+        'SERVER_EXISTS',
+        `server ${serverId} is already registered`,
+        { serverId },
+      );
+    }
+
     const envRefs: Record<string, { $secret: string }> = {};
     const headerRefs: Record<string, { $secret: string }> = {};
     const imported: string[] = [];
@@ -621,22 +653,47 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
       },
     ] as const;
 
-    for (const group of groups) {
-      if (!isPlainObject(group.field)) continue;
-      for (const [key, value] of Object.entries(group.field)) {
-        // Keys outside the server API's env/header patterns cannot be declared
-        // through `envKeys`/`headerKeys` either, so they are dropped silently.
-        if (!group.pattern.test(key)) continue;
-        const name = `disc.${serverId}.${group.kind}.${key}`;
-        const resolved = resolveImportableValue(value, env);
-        if (resolved === null || !isValidSecretName(name)) {
-          skipped.push(key);
-          continue;
+    try {
+      for (const group of groups) {
+        if (!isPlainObject(group.field)) continue;
+        for (const [key, value] of Object.entries(group.field)) {
+          // Keys outside the server API's env/header patterns cannot be declared
+          // through `envKeys`/`headerKeys` either, so they are dropped silently.
+          // `__proto__` only reaches here as an env key; it is reported as skipped
+          // because a consumer merging the response would pollute its prototype.
+          if (!group.pattern.test(key) || RESERVED_REF_KEYS.has(key)) {
+            skipped.push(key);
+            continue;
+          }
+          const name = `disc.${serverId}.${group.kind}.${key}`;
+          const resolved = resolveImportableValue(value, env);
+          if (resolved === null || !isValidSecretName(name)) {
+            skipped.push(key);
+            continue;
+          }
+          await write(name, resolved);
+          defineRef(group.target, key, name);
+          imported.push(name);
         }
-        await write(name, resolved);
-        group.target[key] = { $secret: name };
-        imported.push(name);
       }
+    } catch {
+      // Best effort: undo only what this request already wrote. The error message
+      // is fixed so a store error can never echo a secret value.
+      const remove = deps.secrets?.delete;
+      if (remove !== undefined) {
+        for (const name of imported) {
+          try {
+            await remove(name);
+          } catch {
+            // keep rolling back the rest
+          }
+        }
+      }
+      throw new AdminApiError(
+        500,
+        'DISCOVER_SECRET_WRITE_FAILED',
+        'an imported secret could not be stored',
+      );
     }
 
     return adminJson(200, {

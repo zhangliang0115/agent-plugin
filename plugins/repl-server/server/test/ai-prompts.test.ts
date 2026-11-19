@@ -19,7 +19,7 @@ test('propose prompt injects both dictionaries and forbids invented keys', () =>
     'abcd1234',
   );
 
-  assert.equal(PROMPT_VERSION, 6);
+  assert.equal(PROMPT_VERSION, 7);
   assert.ok(prompt.includes('分类字典（category 只能从这里选；都不合适时用 other）：\nvector-db=向量数据库'));
   assert.ok(prompt.includes('标签字典（tags 只能从这里选；没有合适的就留空）：\nembedding=嵌入, read=只读'));
   assert.match(prompt, /category 必须从下面的分类字典 key 中选一个/);
@@ -38,7 +38,7 @@ test('annotate prompt carries both dictionaries and the suggestion rules', () =>
     'abcd1234',
   );
 
-  assert.equal(PROMPT_VERSION, 6);
+  assert.equal(PROMPT_VERSION, 7);
   assert.match(result.prompt, /database=数据库/);
   assert.match(result.prompt, /observability=可观测性/);
   assert.match(result.prompt, /env\.dev=开发环境/);

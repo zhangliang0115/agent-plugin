@@ -45,7 +45,7 @@ import {
   type ServerRecord,
   type ServerStore,
 } from './servers.ts';
-import type { SecretStore } from '../secrets/store.ts';
+import { isValidSecretName, type SecretStore } from '../secrets/store.ts';
 
 export interface AdminConfigRoutesDeps {
   secrets: SecretStore;
@@ -155,22 +155,19 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
       return adminJson(200, { name: segments[1], configured: true });
     }
 
-    // One explicit reveal per key. The list endpoint above stays value-free, and
-    // the response is never cacheable. Reveal is a local-admin convenience: the
-    // admin cookie is minted automatically on first GET, so this is not a
-    // user-password boundary.
     if (
-      request.method === 'GET' &&
+      request.method === 'DELETE' &&
       segments.length === 2 &&
       segments[0] === 'secrets' &&
       segments[1] !== undefined
     ) {
       const name = segments[1];
-      const value = await deps.secrets.get(name);
-      if (value === undefined) {
-        throw new AdminApiError(404, 'SECRET_NOT_FOUND', `secret ${name} is not stored`, { name });
+      if (!isValidSecretName(name)) {
+        throw invalidField('name', 'must be a valid secret name');
       }
-      return adminJson(200, { name, value }, { 'cache-control': 'no-store' });
+      const deleted = (await deps.secrets.get(name)) !== undefined;
+      await deps.secrets.delete(name);
+      return adminJson(200, { name, deleted });
     }
 
     if (request.method === 'GET' && path === '/config/export') {

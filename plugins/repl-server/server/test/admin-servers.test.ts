@@ -1901,6 +1901,166 @@ test('POST /discover/secrets rejects paths, names and ids outside the scanned co
   }
 });
 
+test('POST /discover/secrets rejects a registered server id before writing', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-exists-'));
+  try {
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          hexhub: { command: 'npx', env: { TOKEN: 'registered-secret-value' } },
+        },
+      }),
+    );
+
+    const writes: string[] = [];
+    const handler = createAdminDiscoverHandler({
+      servers: {
+        list: () => [{ id: 'hexhub', transport: 'stdio', command: 'npx', args: [] }],
+      },
+      homeDir: home,
+      env: { PATH: '/usr/bin' },
+      secrets: {
+        has: () => false,
+        set: async (name) => {
+          writes.push(name);
+        },
+      },
+    });
+
+    const response = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'hexhub',
+          serverId: 'hexhub',
+        },
+      }),
+    );
+    assert.equal(response.status, 409);
+    assert.equal(errorCode(response), 'SERVER_EXISTS');
+    assert.deepEqual(writes, []);
+    assert.equal(JSON.stringify(response.body).includes('registered-secret-value'), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets rolls back earlier writes when a later write fails', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-rollback-'));
+  try {
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          hexhub: {
+            command: 'npx',
+            headers: { First: 'first-value', Second: 'second-value', Third: 'third-value' },
+          },
+        },
+      }),
+    );
+
+    const writes: string[] = [];
+    const deletes: string[] = [];
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      env: { PATH: '/usr/bin' },
+      secrets: {
+        has: () => false,
+        set: async (name) => {
+          if (name.endsWith('.Second')) throw new Error('disk is full');
+          writes.push(name);
+        },
+        delete: async (name) => {
+          deletes.push(name);
+        },
+      },
+    });
+
+    const response = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'hexhub',
+          serverId: 'hexhub',
+        },
+      }),
+    );
+    assert.equal(response.status, 500);
+    assert.equal(errorCode(response), 'DISCOVER_SECRET_WRITE_FAILED');
+    assert.deepEqual(writes, ['disc.hexhub.header.First']);
+    assert.deepEqual(deletes, ['disc.hexhub.header.First']);
+
+    const serialized = JSON.stringify(response.body);
+    assert.equal(serialized.includes('first-value'), false);
+    assert.equal(serialized.includes('disk is full'), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets skips __proto__ keys without touching the prototype', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-proto-'));
+  try {
+    // Written as raw JSON: an object literal would treat __proto__ specially.
+    await writeFile(
+      join(home, '.claude.json'),
+      '{"mcpServers":{"pollute":{"command":"npx",' +
+        '"env":{"__proto__":"polluted","SAFE":"safe-value"},' +
+        '"headers":{"constructor":"polluted-header","Authorization":"auth-value"}}}}',
+    );
+
+    const writes: Array<{ name: string; value: string }> = [];
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      env: { PATH: '/usr/bin' },
+      secrets: {
+        has: () => false,
+        set: async (name, value) => {
+          writes.push({ name, value });
+        },
+      },
+    });
+
+    const response = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'pollute',
+          serverId: 'pollute',
+        },
+      }),
+    );
+    assert.equal(response.status, 200);
+    const body = bodyOf(response);
+    const env = body['env'] as Record<string, unknown>;
+    assert.deepEqual(env, { SAFE: { $secret: 'disc.pollute.env.SAFE' } });
+    assert.equal(Object.hasOwn(env, '__proto__'), false);
+    assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+    assert.deepEqual(body['headers'], {
+      constructor: { $secret: 'disc.pollute.header.constructor' },
+      Authorization: { $secret: 'disc.pollute.header.Authorization' },
+    });
+    assert.deepEqual(body['skipped'], ['__proto__']);
+    assert.deepEqual(
+      writes.map((entry) => entry.name),
+      ['disc.pollute.env.SAFE', 'disc.pollute.header.constructor', 'disc.pollute.header.Authorization'],
+    );
+    const serialized = JSON.stringify(body);
+    for (const forbidden of ['polluted', 'safe-value', 'auth-value']) {
+      assert.equal(serialized.includes(forbidden), false, `response leaked ${forbidden}`);
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('sameCommandLine normalizes whitespace and matches placeholders only positionally', () => {
   assert.equal(
     sameCommandLine(

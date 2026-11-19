@@ -5,12 +5,20 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import type { AdminHandler, AdminRequest, AdminResponse } from '../src/admin/servers.ts';
+import { createAuditEndpoints, type AuditEndpointResult } from '../src/audit/endpoints.ts';
 import { createAuditRuntime, type AuditRuntime } from '../src/audit/runtime.ts';
-import type { AuditEvent, Clock } from '../src/ports.ts';
+import type { AuditEvent, Clock, RequestIdentity } from '../src/ports.ts';
 
 const START = Date.UTC(2026, 10, 18, 6, 0, 0);
 const ISO = new Date(START).toISOString();
 const DAY = '2026-11-18';
+
+const ENDPOINT_IDENTITY: RequestIdentity = {
+  identity: 'unbound',
+  binding: null,
+  client: 'admin',
+  mcp: 'admin',
+};
 
 class TestClock implements Clock {
   private current: number;
@@ -161,6 +169,11 @@ function bodyOf(response: AdminResponse | null): Record<string, unknown> {
   assert.ok(response !== null, 'expected a handler response');
   assert.ok(response.body !== undefined, 'expected a response body');
   return response.body as Record<string, unknown>;
+}
+
+function endpointBody(result: AuditEndpointResult): Record<string, unknown> {
+  assert.ok('body' in result, 'expected a JSON body');
+  return result.body as Record<string, unknown>;
 }
 
 test('records eval, tool, task and frame events into daily JSONL and drains on close', async (t) => {
@@ -434,6 +447,81 @@ test('legacy and protocol frame files are merged without duplicates', async (t) 
   assert.equal(rows.filter((row) => row['id'] === 7).length, 1, 'the overlap is deduped');
   assert.equal(rows[0]?.['durMs'], 12);
   assert.equal(rows[1]?.['durMs'], 0);
+});
+
+test('frames endpoint applies the request window to protocol_dropped by event ts', async (t) => {
+  const { dir } = await createFixture(t);
+  const dropped = (ts: string, count: number): AuditEvent => ({
+    v: 1,
+    ts,
+    event: 'protocol_dropped',
+    count,
+    windowMs: 1000,
+  });
+  // The single daily file intersects the requested window, so the file-date
+  // filter alone would count every line; only the ts window may count.
+  const lines: AuditEvent[] = [
+    dropped('2026-11-18T05:00:00.000Z', 3),
+    dropped('2026-11-18T06:30:00.000Z', 2),
+    dropped('2026-11-18T08:00:00.000Z', 5),
+    { v: 1, ts: 'not-a-timestamp', event: 'protocol_dropped', count: 7 },
+  ];
+  await writeFile(
+    join(dir, `protocol-${DAY}.jsonl`),
+    `${lines.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    'utf8',
+  );
+
+  const endpoints = createAuditEndpoints({ dir });
+  const response = await endpoints.frames({
+    identity: ENDPOINT_IDENTITY,
+    params: new URLSearchParams({
+      from: '2026-11-18T06:00:00.000Z',
+      to: '2026-11-18T07:00:00.000Z',
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = endpointBody(response);
+  assert.equal(body.droppedFrames, 2, 'only counters inside the window count');
+  assert.equal(body.truncated, false);
+});
+
+test('frames endpoint stops at frameScanMaxLines and reports truncation', async (t) => {
+  const { dir } = await createFixture(t);
+  const frames: AuditEvent[] = Array.from({ length: 5 }, (_, index) => ({
+    v: 1,
+    ts: new Date(START + index * 10).toISOString(),
+    event: 'proto_in',
+    mcp: 'mcp_1',
+    id: index + 1,
+    method: 'tools/call',
+    bytes: 10,
+  }));
+  await writeFile(
+    join(dir, `protocol-${DAY}.jsonl`),
+    `${frames.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    'utf8',
+  );
+
+  const limited = await createAuditEndpoints({ dir, frameScanMaxLines: 2 }).frames({
+    identity: ENDPOINT_IDENTITY,
+    params: new URLSearchParams(),
+  });
+  assert.equal(limited.status, 200);
+  const limitedBody = endpointBody(limited);
+  assert.equal(limitedBody.truncated, true);
+  const rows = limitedBody.frames as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 2, 'the scan never returns more than the line budget');
+  assert.deepEqual(rows.map((row) => row.id), [1, 2]);
+
+  const complete = await createAuditEndpoints({ dir }).frames({
+    identity: ENDPOINT_IDENTITY,
+    params: new URLSearchParams(),
+  });
+  assert.equal(complete.status, 200);
+  const completeBody = endpointBody(complete);
+  assert.equal(completeBody.truncated, false);
+  assert.equal((completeBody.frames as unknown[]).length, 5);
 });
 
 test('the audit query list serves audit events only, never protocol frames', async (t) => {

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
+import { rollbackImportedSecrets } from '../../lib/discover-secrets.ts';
 
 type Confidence = 'high' | 'medium' | 'low';
 
@@ -138,7 +139,14 @@ export function DiscoverPage(): React.ReactElement {
               }
             }
           }
-          await api.post('/servers', registerBody(suggestion, imported));
+          try {
+            await api.post('/servers', registerBody(suggestion, imported));
+          } catch (registrationError) {
+            // The import already wrote secrets; drop them so a failed registration
+            // leaves nothing behind. Rollback errors stay silent and keep this one.
+            await rollbackImportedSecrets(api, imported?.imported, registrationError);
+            throw registrationError;
+          }
           // First tools/list feeds the AI auto-annotation preview; a failed refresh
           // must not fail registration, so it stays silent.
           void api
@@ -300,7 +308,7 @@ export function DiscoverPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="发现"
-        description="探测 Claude Code、Kiro、Cursor 与工作区的 MCP 配置；注册时会自动导入本地配置里的字面密钥（含可从环境变量解析的占位符），按 server 命名空间保存，值不回显。"
+        description="探测 Claude Code、Kiro、Cursor 的 MCP 配置；工作区配置仅在服务端显式配置时扫描；注册时会自动导入字面密钥和可解析的 ${VAR} 占位符，按 server 命名空间保存，值不回显。"
         actions={
           <Space>
             <Button
