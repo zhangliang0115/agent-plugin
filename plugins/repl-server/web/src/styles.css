@@ -140,13 +140,22 @@ body {
 }
 
 .topbar.ant-layout-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr minmax(220px, 420px) 1fr;
   align-items: center;
   gap: 14px;
   padding-inline: 22px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   line-height: normal;
+}
+
+.topbar-search {
+  justify-self: center;
+  width: 100%;
+  border-radius: 999px;
+  background: var(--bg);
+  cursor: pointer;
 }
 
 .crumbs {
@@ -167,7 +176,7 @@ body {
 }
 
 .topbar-actions {
-  margin-left: auto;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 4px;
