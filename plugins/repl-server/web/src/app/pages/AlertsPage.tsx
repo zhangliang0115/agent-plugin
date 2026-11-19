@@ -4,7 +4,7 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useState } from 'react';
 
 import { useApi } from '../api.tsx';
-import { PageHeader } from '../components/common.tsx';
+import { PageHeader, stateLabel } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
 import { formatBytes, formatDuration, formatNumber } from '../../lib/format.ts';
 
@@ -31,12 +31,9 @@ interface AlertTestResponse {
   details?: Record<string, unknown>;
 }
 
-const SEVERITY_OPTIONS: Array<{ value: Severity; label: string }> = [
-  { value: 'low', label: 'low' },
-  { value: 'medium', label: 'medium' },
-  { value: 'high', label: 'high' },
-  { value: 'critical', label: 'critical' },
-];
+const SEVERITY_OPTIONS: Array<{ value: Severity; label: string }> = (
+  ['low', 'medium', 'high', 'critical'] as const
+).map((value) => ({ value, label: stateLabel(value) }));
 
 export function AlertsPage(): React.ReactElement {
   const api = useApi();
@@ -100,7 +97,7 @@ export function AlertsPage(): React.ReactElement {
         : '尚未配置的 webhook';
       const ok = await confirm(
         '启用告警',
-        `启用后 severity ≥ ${minSeverity} 的报告会发送到 ${target}。继续？`,
+        `启用后严重级不低于「${stateLabel(minSeverity)}」的报告会发送到 ${target}。继续？`,
         '启用',
       );
       if (!ok) return;

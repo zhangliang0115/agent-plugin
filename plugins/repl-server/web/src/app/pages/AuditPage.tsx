@@ -7,6 +7,7 @@ import {
   Card,
   Col,
   Collapse,
+  DatePicker,
   Descriptions,
   Drawer,
   Empty,
@@ -23,10 +24,11 @@ import {
 } from 'antd';
 import type { TableProps } from 'antd';
 import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
-import { PageHeader } from '../components/common.tsx';
+import { PageHeader, stateLabel } from '../components/common.tsx';
 import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
 import {
   formatBytes,
@@ -119,21 +121,19 @@ const RANGE_OPTIONS: Array<{ value: string; label: string }> = [
 
 const EVENT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '全部事件' },
-  { value: 'tool_call', label: 'tool_call' },
-  { value: 'tool_result', label: 'tool_result' },
-  { value: 'tool_denied', label: 'tool_denied' },
-  { value: 'eval_start', label: 'eval_start' },
-  { value: 'eval_end', label: 'eval_end' },
-  { value: 'exec_start', label: 'exec_start' },
-  { value: 'exec_end', label: 'exec_end' },
-  { value: 'ai_run', label: 'ai_run' },
+  { value: 'tool_call', label: '工具调用' },
+  { value: 'tool_result', label: '工具结果' },
+  { value: 'tool_denied', label: '工具拒绝' },
+  { value: 'eval_start', label: '执行开始' },
+  { value: 'eval_end', label: '执行结束' },
+  { value: 'exec_start', label: '会话开始' },
+  { value: 'exec_end', label: '会话结束' },
+  { value: 'ai_run', label: 'AI 运行' },
 ];
 
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '全部状态' },
-  { value: 'ok', label: 'ok' },
-  { value: 'error', label: 'error' },
-  { value: 'timeout', label: 'timeout' },
+  ...(['ok', 'error', 'timeout'] as const).map((value) => ({ value, label: stateLabel(value) })),
 ];
 
 
@@ -598,7 +598,7 @@ export function AuditPage(): React.ReactElement {
         render: (_value, event) => eventClientLabel(event),
       },
       {
-        title: 'server',
+        title: '服务端（server）',
         key: 'server',
         width: 140,
         ellipsis: true,
@@ -622,7 +622,7 @@ export function AuditPage(): React.ReactElement {
         render: (_value, event) => eventModeLabel(event),
       },
       {
-        title: 'queueMs',
+        title: '排队（ms）',
         key: 'queueMs',
         width: 90,
         align: 'right',
@@ -639,7 +639,7 @@ export function AuditPage(): React.ReactElement {
         },
       },
       {
-        title: 'ms',
+        title: '耗时（ms）',
         key: 'ms',
         width: 80,
         align: 'right',
@@ -662,7 +662,7 @@ export function AuditPage(): React.ReactElement {
         render: (_value, event) => <AuditStatusCell event={event} />,
       },
       {
-        title: 'exec / eval',
+        title: '会话 / 执行',
         key: 'eval',
         width: 150,
         ellipsis: true,
@@ -766,19 +766,35 @@ export function AuditPage(): React.ReactElement {
               />
             </Field>
             <Field label="从">
-              <Input
-                type="datetime-local"
-                value={draft.from}
+              <DatePicker
+                showTime={{ format: 'HH:mm' }}
+                format="YYYY-MM-DD HH:mm"
+                placeholder="选择时间"
+                value={draft.from === '' ? null : dayjs(draft.from)}
                 style={{ width: 190 }}
-                onChange={(event) => setDraft({ ...draft, from: event.target.value, range: '' })}
+                onChange={(value) =>
+                  setDraft({
+                    ...draft,
+                    from: value === null ? '' : value.format('YYYY-MM-DDTHH:mm'),
+                    range: '',
+                  })
+                }
               />
             </Field>
             <Field label="到（留空=至今）">
-              <Input
-                type="datetime-local"
-                value={draft.to}
+              <DatePicker
+                showTime={{ format: 'HH:mm' }}
+                format="YYYY-MM-DD HH:mm"
+                placeholder="选择时间"
+                value={draft.to === '' ? null : dayjs(draft.to)}
                 style={{ width: 190 }}
-                onChange={(event) => setDraft({ ...draft, to: event.target.value, range: '' })}
+                onChange={(value) =>
+                  setDraft({
+                    ...draft,
+                    to: value === null ? '' : value.format('YYYY-MM-DDTHH:mm'),
+                    range: '',
+                  })
+                }
               />
             </Field>
             <Field label="事件类型">
@@ -809,7 +825,7 @@ export function AuditPage(): React.ReactElement {
             </Field>
           </Space>
           <Space wrap size={[12, 10]}>
-            <Field label="client">
+            <Field label="客户端（client）">
               <Input
                 value={draft.client}
                 placeholder="claude-code/2.1.327"
@@ -818,7 +834,7 @@ export function AuditPage(): React.ReactElement {
                 onPressEnter={applyDraft}
               />
             </Field>
-            <Field label="binding">
+            <Field label="绑定（binding）">
               <Input
                 value={draft.binding}
                 placeholder="cb_…"
@@ -827,7 +843,7 @@ export function AuditPage(): React.ReactElement {
                 onPressEnter={applyDraft}
               />
             </Field>
-            <Field label="server">
+            <Field label="服务端（server）">
               <Input
                 value={draft.server}
                 placeholder="server id"
@@ -836,7 +852,7 @@ export function AuditPage(): React.ReactElement {
                 onPressEnter={applyDraft}
               />
             </Field>
-            <Field label="minMs">
+            <Field label="最短耗时（ms）">
               <Input
                 type="number"
                 min={0}
@@ -855,12 +871,14 @@ export function AuditPage(): React.ReactElement {
                 onChange={changeLive}
               />
             </Field>
-            <Space align="end">
-              <Button type="primary" onClick={applyDraft}>
-                应用
-              </Button>
-              <Button onClick={clearFilters}>清空筛选</Button>
-            </Space>
+            <Field label="操作">
+              <Space>
+                <Button type="primary" onClick={applyDraft}>
+                  应用
+                </Button>
+                <Button onClick={clearFilters}>清空筛选</Button>
+              </Space>
+            </Field>
           </Space>
         </Space>
       </Card>
@@ -1111,7 +1129,7 @@ function AuditStatusCell({ event }: { event: AuditEvent }): React.ReactElement {
   return (
     <Space size={4}>
       <Tag color={color} bordered={false}>
-        {status}
+        {stateLabel(status)}
       </Tag>
       {eventCancelled(event) ? <span className="muted">已取消</span> : null}
     </Space>

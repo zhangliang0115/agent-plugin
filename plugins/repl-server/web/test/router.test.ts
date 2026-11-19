@@ -7,6 +7,7 @@ import { parseRoute, routeHash } from '../src/app/router.ts';
 test('parseRoute normalizes known paths and falls back to overview', () => {
   assert.deepEqual(parseRoute('#/audit'), { path: '/audit', tab: 'servers' });
   assert.deepEqual(parseRoute('#/reports/'), { path: '/reports', tab: 'servers' });
+  assert.deepEqual(parseRoute('#/reports?status=open'), { path: '/reports', tab: 'servers' });
   assert.deepEqual(parseRoute('#/nope'), { path: '/overview', tab: 'servers' });
   assert.deepEqual(parseRoute(''), { path: '/overview', tab: 'servers' });
 });

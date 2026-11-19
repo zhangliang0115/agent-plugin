@@ -41,6 +41,12 @@ const CONFIDENCE_COLOR: Record<Confidence, string> = {
   low: 'default',
 };
 
+const CONFIDENCE_LABEL: Record<Confidence, string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
+};
+
 export function DiscoverPage(): React.ReactElement {
   const api = useApi();
   const { message } = AntApp.useApp();
@@ -184,7 +190,7 @@ export function DiscoverPage(): React.ReactElement {
       title: '置信度',
       dataIndex: 'confidence',
       width: 90,
-      render: (value: Confidence) => <Tag color={CONFIDENCE_COLOR[value]}>{value}</Tag>,
+      render: (value: Confidence) => <Tag color={CONFIDENCE_COLOR[value]}>{CONFIDENCE_LABEL[value]}</Tag>,
     },
     {
       title: '状态',

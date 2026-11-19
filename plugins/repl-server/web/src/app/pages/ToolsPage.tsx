@@ -984,7 +984,7 @@ export function ToolsPage(): React.ReactElement {
                         ),
                       },
                       {
-                        title: 'schema',
+                        title: '参数结构（schema）',
                         dataIndex: 'schemaMissing',
                         width: 80,
                         render: (value: boolean) => (

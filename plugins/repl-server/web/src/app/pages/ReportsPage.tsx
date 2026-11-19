@@ -4,7 +4,7 @@ import { ReloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { useApi } from '../api.tsx';
-import { PageHeader, StateTag } from '../components/common.tsx';
+import { PageHeader, StateTag, stateLabel } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
 import { formatTimestamp } from '../../lib/format.ts';
 
@@ -36,12 +36,29 @@ interface CreateValues {
   context?: string;
 }
 
+const STATUS_OPTIONS: Array<{ value: '' | ReportStatus; label: string }> = [
+  { value: '', label: '全部状态' },
+  { value: 'open', label: stateLabel('open') },
+  { value: 'ack', label: stateLabel('ack') },
+  { value: 'closed', label: stateLabel('closed') },
+];
+
+const SEVERITY_OPTIONS: Array<{ value: Severity; label: string }> = (
+  ['low', 'medium', 'high', 'critical'] as const
+).map((value) => ({ value, label: stateLabel(value) }));
+
+/** `#/reports?status=…` is the entry used by the overview attention card. */
+function initialStatus(): '' | ReportStatus {
+  const value = new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('status');
+  return value === 'open' || value === 'ack' || value === 'closed' ? value : '';
+}
+
 export function ReportsPage(): React.ReactElement {
   const api = useApi();
   const { message } = AntApp.useApp();
   const [reports, setReports] = useState<ReportView[]>([]);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState<'' | ReportStatus>('');
+  const [status, setStatus] = useState<'' | ReportStatus>(initialStatus);
   const [severity, setSeverity] = useState<'' | Severity>('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReportView | null>(null);
@@ -219,24 +236,13 @@ export function ReportsPage(): React.ReactElement {
                   value={status}
                   style={{ width: 120 }}
                   onChange={(value) => setStatus(value)}
-                  options={[
-                    { value: '', label: '全部状态' },
-                    { value: 'open', label: 'open' },
-                    { value: 'ack', label: 'ack' },
-                    { value: 'closed', label: 'closed' },
-                  ]}
+                  options={STATUS_OPTIONS}
                 />
                 <Select
                   value={severity}
                   style={{ width: 130 }}
                   onChange={(value) => setSeverity(value)}
-                  options={[
-                    { value: '', label: '全部严重级' },
-                    { value: 'low', label: 'low' },
-                    { value: 'medium', label: 'medium' },
-                    { value: 'high', label: 'high' },
-                    { value: 'critical', label: 'critical' },
-                  ]}
+                  options={[{ value: '', label: '全部严重级' }, ...SEVERITY_OPTIONS]}
                 />
               </Space>
             }
@@ -333,14 +339,7 @@ export function ReportsPage(): React.ReactElement {
             <Input.TextArea rows={6} maxLength={20000} placeholder="现象、期望与实际、复现步骤；不要粘贴密钥。" />
           </Form.Item>
           <Form.Item name="severity" label="严重级">
-            <Select
-              options={[
-                { value: 'low', label: 'low' },
-                { value: 'medium', label: 'medium' },
-                { value: 'high', label: 'high' },
-                { value: 'critical', label: 'critical' },
-              ]}
-            />
+            <Select options={SEVERITY_OPTIONS} />
           </Form.Item>
           <Form.Item
             name="context"

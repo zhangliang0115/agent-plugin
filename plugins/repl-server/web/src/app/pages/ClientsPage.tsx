@@ -390,12 +390,12 @@ export function ClientsPage(): React.ReactElement {
               render: (value: string) => <span className="mono">{formatId(value, 22)}</span>,
             },
             {
-              title: 'client',
+              title: '客户端（client）',
               dataIndex: 'client',
               render: (value: string) => value || '—',
             },
             {
-              title: 'binding',
+              title: '绑定（binding）',
               dataIndex: 'bindingId',
               render: (value: string | null) => (
                 <span className={value === null ? 'muted' : 'mono'}>{value ?? 'unbound'}</span>

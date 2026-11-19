@@ -101,7 +101,7 @@ const OPEN_REPORTS_LIMIT = 50;
 const BUILTIN_SERVER_IDS: ReadonlySet<string> = new Set(['__official__', '__builtin__']);
 
 type AttentionTone = 'error' | 'queue' | 'info' | 'ok';
-type AttentionTarget = { path: '/reports' } | { path: '/manage'; tab: ManageTab };
+type AttentionTarget = { path: '/reports'; status?: 'open' } | { path: '/manage'; tab: ManageTab };
 
 interface AttentionItem {
   id: string;
@@ -351,8 +351,12 @@ export function OverviewPage(): React.ReactElement {
   }, [load]);
 
   function go(target: AttentionTarget): void {
-    if (target.path === '/reports') navigate('/reports');
-    else navigate('/manage', target.tab);
+    if (target.path === '/reports') {
+      const next = target.status === undefined ? '#/reports' : `#/reports?status=${target.status}`;
+      if (window.location.hash !== next) window.location.hash = next;
+      return;
+    }
+    navigate('/manage', target.tab);
   }
 
   function refresh(): void {
@@ -845,7 +849,7 @@ function evaluateAttention(input: {
       items.push({
         id: 'servers-empty',
         tone: 'info',
-        title: '还没有接入 server',
+        title: '还没有接入服务端',
         detail: '先添加一个 MCP server，连接并在「Tools」刷新后才能发现工具。',
         actionLabel: '去接入',
         target: manageServers,
@@ -940,10 +944,10 @@ function evaluateAttention(input: {
       tone: 'queue',
       title: `${formatNumber(input.openReports)} 条问题报告未处理`,
       detail: input.openReportsHasMore
-        ? '还有更多 open 报告；确认或关闭后才会离开列表。'
-        : 'open 状态的报告需要确认或关闭。',
+        ? '还有更多未处理报告；确认或关闭后才会离开列表。'
+        : '未处理的报告需要确认或关闭。',
       actionLabel: '去处理',
-      target: { path: '/reports' },
+      target: { path: '/reports', status: 'open' },
     });
   }
 
@@ -998,7 +1002,7 @@ function stepMeta(id: OnboardingStepId): {
   switch (id) {
     case 'servers':
       return {
-        title: '接入一个 server',
+        title: '接入一个服务端',
         actionLabel: '去接入',
         target: { path: '/manage', tab: 'servers' },
         unknownDetail: 'server 列表暂不可用，刷新后重试。',

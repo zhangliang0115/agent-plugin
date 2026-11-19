@@ -34,17 +34,28 @@ const STATE_MAP: Record<string, { color: string; label: string }> = {
   reconnecting: { color: 'warning', label: '重连中' },
   failed: { color: 'error', label: '失败' },
   disabled: { color: 'default', label: '已停用' },
-  open: { color: 'blue', label: 'open' },
-  ack: { color: 'gold', label: 'ack' },
-  closed: { color: 'green', label: 'closed' },
+  enabled: { color: 'success', label: '已启用' },
+  open: { color: 'blue', label: '未处理' },
+  ack: { color: 'gold', label: '已确认' },
+  closed: { color: 'green', label: '已关闭' },
+  low: { color: 'default', label: '低' },
+  medium: { color: 'gold', label: '中' },
+  high: { color: 'orange', label: '高' },
+  critical: { color: 'red', label: '严重' },
   pending: { color: 'blue', label: '待发送' },
   sending: { color: 'processing', label: '发送中' },
   sent: { color: 'success', label: '已送达' },
   skipped: { color: 'gold', label: '已跳过' },
   no_webhook: { color: 'error', label: '未配置' },
-  ok: { color: 'success', label: 'ok' },
-  error: { color: 'error', label: 'error' },
+  ok: { color: 'success', label: '正常' },
+  error: { color: 'error', label: '错误' },
+  timeout: { color: 'orange', label: '超时' },
 };
+
+/** Chinese label for a state/enum key; unknown keys pass through unchanged. */
+export function stateLabel(state: string): string {
+  return STATE_MAP[state]?.label ?? state;
+}
 
 export function StateTag({ state }: { state: string | null | undefined }): React.ReactElement {
   const key = state ?? '';

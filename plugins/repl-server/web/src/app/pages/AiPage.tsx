@@ -331,13 +331,13 @@ export function AiPage(): React.ReactElement {
       render: (value: string) => <span className="muted">{formatTimestamp(value)}</span>,
     },
     {
-      title: 'summary',
+      title: '摘要（summary）',
       width: 280,
       ellipsis: true,
       render: (_value, record) => record.proposed.summary ?? '—',
     },
     {
-      title: 'tags',
+      title: '标签（tags）',
       width: 220,
       render: (_value, record) =>
         record.proposed.tags.length === 0
@@ -584,7 +584,7 @@ export function AiPage(): React.ReactElement {
                   render: (value: string | null | undefined) => value ?? '—',
                 },
                 {
-                  title: '建议 tags',
+                  title: '建议标签',
                   dataIndex: 'tags',
                   width: 200,
                   render: (value: string[] | undefined) =>
