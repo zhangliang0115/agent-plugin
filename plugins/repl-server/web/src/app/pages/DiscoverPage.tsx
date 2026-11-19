@@ -20,6 +20,15 @@ interface Suggestion {
   alreadyExists: boolean;
   envKeys: string[];
   headerKeys: string[];
+  sourcePath: string | null;
+  serverName: string | null;
+}
+
+interface ImportedSecrets {
+  env: Record<string, { $secret: string }>;
+  headers: Record<string, { $secret: string }>;
+  imported: string[];
+  skipped: string[];
 }
 
 const GROUP_ORDER = ['Claude Code', 'Kiro', 'Cursor', '工作区', '内置'] as const;
@@ -102,6 +111,7 @@ export function DiscoverPage(): React.ReactElement {
     const targets = items.filter((item) => !item.alreadyExists);
     if (targets.length === 0) return;
     registeringGuard.current = true;
+    let warnedAboutImport = false;
     try {
       for (const suggestion of targets) {
         markRegistering(suggestion.id, true);
@@ -111,7 +121,24 @@ export function DiscoverPage(): React.ReactElement {
           return next;
         });
         try {
-          await api.post('/servers', registerBody(suggestion));
+          // Literal or env-resolved values from the scanned config are copied into
+          // the secret store first; the response only carries `$secret` references.
+          let imported: ImportedSecrets | undefined;
+          if (suggestion.sourcePath !== null && suggestion.serverName !== null) {
+            try {
+              imported = await api.post<ImportedSecrets>('/discover/secrets', {
+                sourcePath: suggestion.sourcePath,
+                serverName: suggestion.serverName,
+                serverId: suggestion.id,
+              });
+            } catch {
+              if (!warnedAboutImport) {
+                warnedAboutImport = true;
+                message.warning('密钥自动导入失败，请到密钥页手填');
+              }
+            }
+          }
+          await api.post('/servers', registerBody(suggestion, imported));
           // First tools/list feeds the AI auto-annotation preview; a failed refresh
           // must not fail registration, so it stays silent.
           void api
@@ -273,7 +300,7 @@ export function DiscoverPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="发现"
-        description="探测 Claude Code、Kiro、Cursor 与工作区的 MCP 配置；只读取 server 名、命令与键名，不读取密钥值。"
+        description="探测 Claude Code、Kiro、Cursor 与工作区的 MCP 配置；注册时会自动导入本地配置里的字面密钥（含可从环境变量解析的占位符），按 server 命名空间保存，值不回显。"
         actions={
           <Space>
             <Button
@@ -316,8 +343,8 @@ export function DiscoverPage(): React.ReactElement {
   );
 }
 
-/** Builds the `POST /servers` body; env/header values are declared by key only. */
-function registerBody(item: Suggestion): Record<string, unknown> {
+/** Builds the `POST /servers` body from imported `$secret` refs plus hand-fill keys. */
+function registerBody(item: Suggestion, imported?: ImportedSecrets): Record<string, unknown> {
   const body: Record<string, unknown> = { id: item.id, label: item.label, tags: [] };
   if (item.url !== null) {
     body['transport'] = 'http';
@@ -327,8 +354,24 @@ function registerBody(item: Suggestion): Record<string, unknown> {
     if (item.command !== null) body['command'] = item.command;
     body['args'] = [...item.args];
   }
-  if (item.envKeys.length > 0) body['envKeys'] = [...item.envKeys];
-  if (item.headerKeys.length > 0) body['headerKeys'] = [...item.headerKeys];
+
+  const env = imported?.env ?? {};
+  const headers = imported?.headers ?? {};
+  if (Object.keys(env).length > 0) body['env'] = env;
+  if (Object.keys(headers).length > 0) body['headers'] = headers;
+
+  // Keys the server could not import stay as declared key names for manual entry.
+  const skipped = new Set(imported?.skipped ?? []);
+  const envKeys =
+    imported === undefined
+      ? item.envKeys
+      : item.envKeys.filter((key) => skipped.has(key) && env[key] === undefined);
+  const headerKeys =
+    imported === undefined
+      ? item.headerKeys
+      : item.headerKeys.filter((key) => skipped.has(key) && headers[key] === undefined);
+  if (envKeys.length > 0) body['envKeys'] = envKeys;
+  if (headerKeys.length > 0) body['headerKeys'] = headerKeys;
   return body;
 }
 

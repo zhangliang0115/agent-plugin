@@ -1,9 +1,13 @@
-/** Admin API for local environment discovery (`POST /discover`).
+/** Admin API for local environment discovery (`POST /discover`, `POST /discover/secrets`).
  *
  * Probes the fixed config list from 03 §9.1 (Claude Code, Kiro, Cursor, workspace
- * `.mcp.json`), then appends built-in suggestions. It never reads secret values: client
- * configs are parsed for server names, commands and env/header key names only; credential
- * files are only checked for existence; secrets go through an injected name-only probe.
+ * `.mcp.json`), then appends built-in suggestions. The scan never returns secret values:
+ * client configs are parsed for server names, commands and env/header key names only, and
+ * credential files are only checked for existence. `POST /discover/secrets` re-reads one
+ * already-scanned entry on explicit request and copies its env/header values into the
+ * secret store under `disc.<serverId>.<env|header>.<key>`; `${NAME}` / `${env:NAME}`
+ * placeholders are resolved from the server's own environment first, and values never
+ * leave the store.
  *
  * `alreadyExists` compares the candidate `command + args` against registered servers
  * after whitespace normalization; `<workspace>` / `<url>` / `<path>` placeholders match
@@ -14,14 +18,16 @@
 import { constants as fsConstants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 
+import { isValidSecretName } from '../secrets/store.ts';
 import {
   AdminApiError,
   adminHandler,
   adminJson,
   isPlainObject,
   requestSegments,
+  requireObjectBody,
   type AdminHandler,
   type AdminRequest,
   type AdminResponse,
@@ -40,9 +46,13 @@ export interface DiscoverSuggestion {
   reason: string;
   confidence: DiscoverConfidence;
   alreadyExists: boolean;
-  /** Declared env/header keys only; values are never read. */
+  /** Declared env/header keys only; values are never returned by the scan. */
   envKeys: string[];
   headerKeys: string[];
+  /** Config file this suggestion came from; `null` for built-ins. */
+  sourcePath: string | null;
+  /** `mcpServers` entry name in that file; `null` for built-ins. */
+  serverName: string | null;
 }
 
 /** The subset of a registered server that `alreadyExists` needs. */
@@ -61,6 +71,8 @@ export interface DiscoverServerLookup {
 /** Name-only secret probe; values must never cross this boundary. */
 export interface DiscoverSecretProbe {
   has(name: string): boolean | Promise<boolean>;
+  /** Writes one imported literal; absent stores make `POST /discover/secrets` unavailable. */
+  set?(name: string, value: string): Promise<void>;
 }
 
 export interface DiscoverIo {
@@ -84,6 +96,56 @@ export interface AdminDiscoverDeps {
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+
+const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+
+/** Config files the scan may read; the import route accepts only these paths. */
+function configPathsFor(home: string, workspace: string | undefined): string[] {
+  const paths = [
+    join(home, '.claude.json'),
+    join(home, '.kiro', 'settings', 'mcp.json'),
+    join(home, '.cursor', 'mcp.json'),
+  ];
+  if (workspace !== undefined && workspace !== '') {
+    paths.push(join(workspace, '.mcp.json'), join(workspace, '.kiro', 'settings', 'mcp.json'));
+  }
+  return paths;
+}
+
+const PLACEHOLDER_PATTERN = /\$\{([^}]*)\}/gu;
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Resolves `${NAME}` / `${env:NAME}` placeholders against the server environment.
+ * Returns the final value, or `null` when the value is not a string, has an
+ * unresolved/empty placeholder, or resolves to an empty string. Callers must not
+ * echo the result.
+ */
+function resolveImportableValue(
+  value: unknown,
+  env: Record<string, string | undefined>,
+): string | null {
+  if (typeof value !== 'string' || value === '') return null;
+  if (!value.includes('${')) return value;
+
+  // Any `${` left after removing well-formed placeholders is an invalid template.
+  if (value.replace(PLACEHOLDER_PATTERN, '').includes('${')) return null;
+
+  let missing = false;
+  const resolved = value.replace(PLACEHOLDER_PATTERN, (_match, raw: string) => {
+    const name = raw.startsWith('env:') ? raw.slice('env:'.length) : raw;
+    const substitute = ENV_NAME_PATTERN.test(name) ? env[name] : undefined;
+    if (substitute === undefined || substitute === '') {
+      missing = true;
+      return '';
+    }
+    return substitute;
+  });
+  if (missing || resolved === '') return null;
+  return resolved;
+}
 
 const defaultIo: DiscoverIo = {
   async exists(path) {
@@ -243,6 +305,8 @@ function suggestion(
   confidence: DiscoverConfidence,
   envKeys: string[] = [],
   headerKeys: string[] = [],
+  sourcePath: string | null = null,
+  serverName: string | null = null,
 ): DiscoverSuggestion {
   return {
     id,
@@ -255,6 +319,8 @@ function suggestion(
     alreadyExists: false,
     envKeys,
     headerKeys,
+    sourcePath,
+    serverName,
   };
 }
 
@@ -302,17 +368,7 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
   }
 
   async function run(): Promise<DiscoverSuggestion[]> {
-    const configPaths = [
-      join(home, '.claude.json'),
-      join(home, '.kiro', 'settings', 'mcp.json'),
-      join(home, '.cursor', 'mcp.json'),
-    ];
-    if (deps.workspace !== undefined && deps.workspace !== '') {
-      configPaths.push(
-        join(deps.workspace, '.mcp.json'),
-        join(deps.workspace, '.kiro', 'settings', 'mcp.json'),
-      );
-    }
+    const configPaths = configPathsFor(home, deps.workspace);
 
     const [configs, gh, psql, npx, pgpass, githubToken, databaseUrl, existingServers] =
       await Promise.all([
@@ -366,6 +422,8 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
             'high',
             entry.envKeys,
             entry.headerKeys,
+            config.path,
+            entry.name,
           ),
         );
       }
@@ -465,10 +523,138 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
     return suggestions;
   }
 
+  /**
+   * Copies literal env/header values of one scanned config entry into the secret
+   * store and answers only with `$secret` references and key names. Values are
+   * never echoed, logged or put into an error message.
+   */
+  async function importSecrets(request: AdminRequest): Promise<AdminResponse> {
+    const write = deps.secrets?.set;
+    if (write === undefined) {
+      throw new AdminApiError(
+        503,
+        'DISCOVER_SECRETS_UNAVAILABLE',
+        'the secret store does not accept writes',
+      );
+    }
+
+    const body = requireObjectBody(request);
+    const sourcePath = body['sourcePath'];
+    const serverName = body['serverName'];
+    const serverId = body['serverId'];
+    if (typeof sourcePath !== 'string' || sourcePath === '') {
+      throw new AdminApiError(400, 'INVALID_BODY', 'sourcePath must be a non-empty string', {
+        field: 'sourcePath',
+      });
+    }
+    if (typeof serverName !== 'string' || serverName === '') {
+      throw new AdminApiError(400, 'INVALID_BODY', 'serverName must be a non-empty string', {
+        field: 'serverName',
+      });
+    }
+    if (typeof serverId !== 'string' || !SERVER_ID_PATTERN.test(serverId)) {
+      throw new AdminApiError(
+        400,
+        'INVALID_BODY',
+        'serverId must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}',
+        { field: 'serverId' },
+      );
+    }
+
+    const requested = resolve(sourcePath);
+    const allowedPath = configPathsFor(home, deps.workspace)
+      .map((path) => resolve(path))
+      .find((path) => path === requested);
+    if (allowedPath === undefined) {
+      throw new AdminApiError(
+        400,
+        'DISCOVER_PATH_NOT_ALLOWED',
+        'sourcePath is not one of the scanned config files',
+        { field: 'sourcePath' },
+      );
+    }
+
+    const text = await io.readText(allowedPath);
+    if (text === null) {
+      throw new AdminApiError(404, 'DISCOVER_SOURCE_UNREADABLE', 'source config could not be read', {
+        field: 'sourcePath',
+      });
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new AdminApiError(422, 'DISCOVER_SOURCE_INVALID', 'source config is not valid JSON', {
+        field: 'sourcePath',
+      });
+    }
+    const servers = isPlainObject(parsed) ? parsed['mcpServers'] : undefined;
+    if (!isPlainObject(servers) || !Object.hasOwn(servers, serverName)) {
+      throw new AdminApiError(
+        404,
+        'DISCOVER_SERVER_NOT_FOUND',
+        'serverName was not found in the source config',
+        { field: 'serverName' },
+      );
+    }
+    const entry = servers[serverName];
+    if (!isPlainObject(entry)) {
+      throw new AdminApiError(
+        404,
+        'DISCOVER_SERVER_NOT_FOUND',
+        'serverName was not found in the source config',
+        { field: 'serverName' },
+      );
+    }
+
+    const envRefs: Record<string, { $secret: string }> = {};
+    const headerRefs: Record<string, { $secret: string }> = {};
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    const groups = [
+      { field: entry['env'], kind: 'env', pattern: ENV_KEY_PATTERN, target: envRefs },
+      {
+        field: entry['headers'],
+        kind: 'header',
+        pattern: HEADER_KEY_PATTERN,
+        target: headerRefs,
+      },
+    ] as const;
+
+    for (const group of groups) {
+      if (!isPlainObject(group.field)) continue;
+      for (const [key, value] of Object.entries(group.field)) {
+        // Keys outside the server API's env/header patterns cannot be declared
+        // through `envKeys`/`headerKeys` either, so they are dropped silently.
+        if (!group.pattern.test(key)) continue;
+        const name = `disc.${serverId}.${group.kind}.${key}`;
+        const resolved = resolveImportableValue(value, env);
+        if (resolved === null || !isValidSecretName(name)) {
+          skipped.push(key);
+          continue;
+        }
+        await write(name, resolved);
+        group.target[key] = { $secret: name };
+        imported.push(name);
+      }
+    }
+
+    return adminJson(200, {
+      env: envRefs,
+      headers: headerRefs,
+      imported,
+      skipped: [...new Set(skipped)],
+    });
+  }
+
   return adminHandler(async (request: AdminRequest): Promise<AdminResponse | null> => {
+    const method = request.method.toUpperCase();
     const segments = requestSegments(request);
+    if (method === 'POST' && segments.length === 2 && segments[0] === 'discover' && segments[1] === 'secrets') {
+      return await importSecrets(request);
+    }
     if (segments.length !== 1 || segments[0] !== 'discover') return null;
-    if (request.method.toUpperCase() !== 'POST') return null;
+    if (method !== 'POST') return null;
 
     const suggestions = await withTimeout(run(), timeoutMs);
     return adminJson(200, { suggestions });

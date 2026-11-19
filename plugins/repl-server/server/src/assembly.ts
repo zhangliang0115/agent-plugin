@@ -641,7 +641,13 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     }),
     createAdminTagsHandler({ settings: settingsWithHooks }),
     createAdminCategoriesHandler({ settings: settingsWithHooks }),
-    createAdminDiscoverHandler({ servers: adminServerStore }),
+    createAdminDiscoverHandler({
+      servers: adminServerStore,
+      secrets: {
+        has: async (name) => (await secrets.get(name)) !== undefined,
+        set: (name, value) => secrets.set(name, value),
+      },
+    }),
     createAdminConfigRoutes({
       secrets,
       servers: adminServerStore,

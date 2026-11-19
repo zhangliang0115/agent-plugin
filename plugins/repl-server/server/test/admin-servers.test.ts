@@ -1662,6 +1662,8 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     assert.equal(remote['url'], 'https://example.test/mcp');
     assert.deepEqual(remote['headerKeys'], ['Authorization']);
     assert.equal(remote['alreadyExists'], true);
+    assert.equal(remote['sourcePath'], join(home, '.claude.json'));
+    assert.equal(remote['serverName'], 'claude_http');
 
     const kiro = byId.get('kiro_fs')!;
     assert.match(String(kiro['reason']), /\.kiro/);
@@ -1677,6 +1679,8 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     assert.equal(byId.get('github')!['alreadyExists'], true);
     assert.deepEqual(byId.get('github')!['envKeys'], ['GITHUB_TOKEN']);
     assert.equal(byId.get('github')!['confidence'], 'high');
+    assert.equal(byId.get('github')!['sourcePath'], null);
+    assert.equal(byId.get('github')!['serverName'], null);
 
     assert.equal(byId.get('filesystem')!['alreadyExists'], true);
     assert.equal(byId.get('filesystem')!['confidence'], 'high');
@@ -1695,6 +1699,203 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     assert.equal(serialized.includes('secret-env'), false);
     assert.equal(serialized.includes('secret-header'), false);
     assert.equal(serialized.includes('password'), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets stores literals and resolved placeholders without echoing values', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-secrets-'));
+  const workspace = join(home, 'workspace');
+  try {
+    await mkdir(join(home, '.kiro', 'settings'), { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          hexhub: {
+            type: 'http',
+            url: 'https://hexhub.test/mcp',
+            headers: {
+              Authorization: 'Bearer literal-header-value',
+              'X-From-Env': '${env:IMPORT_TOKEN}',
+              'X-Mixed': 'Bearer ${MIXED_TOKEN}',
+              'X-Unset': '${UNSET_TOKEN}',
+              'X-Object': { $secret: 'manual' },
+              'X-Empty': '',
+            },
+          },
+        },
+      }),
+    );
+    await writeFile(
+      join(home, '.kiro', 'settings', 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          hexhub: {
+            command: 'npx',
+            env: { API_KEY: '${env:IMPORT_TOKEN}' },
+            headers: { Authorization: 'kiro-literal' },
+          },
+        },
+      }),
+    );
+
+    const importTokenValue = ['import', 'token', 'value'].join('-');
+    const mixedTokenValue = ['mixed', 'token', 'value'].join('-');
+    const writes: Array<{ name: string; value: string }> = [];
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      workspace,
+      env: {
+        PATH: '/usr/bin',
+        IMPORT_TOKEN: importTokenValue,
+        MIXED_TOKEN: mixedTokenValue,
+      },
+      secrets: {
+        has: () => false,
+        set: async (name, value) => {
+          writes.push({ name, value });
+        },
+      },
+    });
+
+    const first = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'hexhub',
+          serverId: 'hexhub',
+        },
+      }),
+    );
+    assert.equal(first.status, 200);
+    assert.deepEqual(bodyOf(first), {
+      env: {},
+      headers: {
+        Authorization: { $secret: 'disc.hexhub.header.Authorization' },
+        'X-From-Env': { $secret: 'disc.hexhub.header.X-From-Env' },
+        'X-Mixed': { $secret: 'disc.hexhub.header.X-Mixed' },
+      },
+      imported: [
+        'disc.hexhub.header.Authorization',
+        'disc.hexhub.header.X-From-Env',
+        'disc.hexhub.header.X-Mixed',
+      ],
+      skipped: ['X-Unset', 'X-Object', 'X-Empty'],
+    });
+    assert.deepEqual(writes, [
+      { name: 'disc.hexhub.header.Authorization', value: 'Bearer literal-header-value' },
+      { name: 'disc.hexhub.header.X-From-Env', value: importTokenValue },
+      { name: 'disc.hexhub.header.X-Mixed', value: ['Bearer', mixedTokenValue].join(' ') },
+    ]);
+
+    const serialized = JSON.stringify(first.body);
+    for (const forbidden of ['literal-header-value', importTokenValue, mixedTokenValue]) {
+      assert.equal(serialized.includes(forbidden), false, `response leaked ${forbidden}`);
+    }
+
+    // The same header name under another server id gets its own namespace.
+    const second = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.kiro', 'settings', 'mcp.json'),
+          serverName: 'hexhub',
+          serverId: 'hexhub-2',
+        },
+      }),
+    );
+    assert.equal(second.status, 200);
+    const apiKeySecret = ['disc', 'hexhub-2', 'env', 'API_KEY'].join('.');
+    const authSecret = ['disc', 'hexhub-2', 'header', 'Authorization'].join('.');
+    assert.deepEqual(bodyOf(second), {
+      env: { API_KEY: { $secret: apiKeySecret } },
+      headers: { Authorization: { $secret: authSecret } },
+      imported: [apiKeySecret, authSecret],
+      skipped: [],
+    });
+    assert.equal(
+      JSON.stringify(second.body).includes('disc.hexhub.header.Authorization'),
+      false,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover/secrets rejects paths, names and ids outside the scanned config', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-reject-'));
+  const workspace = join(home, 'workspace');
+  try {
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      join(home, '.claude.json'),
+      JSON.stringify({
+        mcpServers: {
+          safe: { command: 'npx', env: { TOKEN: 'do-not-leak-this' } },
+        },
+      }),
+    );
+
+    const handler = createAdminDiscoverHandler({
+      servers: { list: () => [] },
+      homeDir: home,
+      workspace,
+      env: { PATH: '/usr/bin' },
+      secrets: { has: () => false, set: async () => undefined },
+    });
+
+    const arbitrary = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: { sourcePath: '/etc/hosts', serverName: 'safe', serverId: 'safe' },
+      }),
+    );
+    assert.equal(arbitrary.status, 400);
+    assert.equal(errorCode(arbitrary), 'DISCOVER_PATH_NOT_ALLOWED');
+
+    const unknown = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'missing',
+          serverId: 'safe',
+        },
+      }),
+    );
+    assert.equal(unknown.status, 404);
+    assert.equal(errorCode(unknown), 'DISCOVER_SERVER_NOT_FOUND');
+
+    const unreadable = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: { sourcePath: join(workspace, '.mcp.json'), serverName: 'safe', serverId: 'safe' },
+      }),
+    );
+    assert.equal(unreadable.status, 404);
+    assert.equal(errorCode(unreadable), 'DISCOVER_SOURCE_UNREADABLE');
+
+    const badId = await call(
+      handler,
+      makeRequest('POST', '/admin/api/discover/secrets', {
+        body: {
+          sourcePath: join(home, '.claude.json'),
+          serverName: 'safe',
+          serverId: '../escape',
+        },
+      }),
+    );
+    assert.equal(badId.status, 400);
+    assert.equal(errorCode(badId), 'INVALID_BODY');
+
+    for (const response of [arbitrary, unknown, unreadable, badId]) {
+      assert.equal(JSON.stringify(response.body).includes('do-not-leak-this'), false);
+    }
   } finally {
     await rm(home, { recursive: true, force: true });
   }

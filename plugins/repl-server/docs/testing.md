@@ -15,7 +15,7 @@ node scripts/validate.ts
 npm run matrix
 ```
 
-当前全量基线：`core` 247 个用例、`server` 763 个用例（全部通过）、`web` 43 个用例，0 skip。
+当前全量基线：`core` 247 个用例、`server` 765 个用例（全部通过）、`web` 43 个用例，0 skip。
 
 窄范围（06–08）：
 
