@@ -15,7 +15,7 @@ import {
 } from './constants.ts';
 
 /** Bumped whenever either template changes; reported by `GET /ai/config`. */
-export const PROMPT_VERSION = 5;
+export const PROMPT_VERSION = 6;
 
 /** 8 hex characters, unique per run. */
 export function createPromptNonce(): string {
@@ -60,7 +60,13 @@ export interface AnnotateDictionaries {
 }
 
 /** Template A: one-line description or a pasted MCP config → server draft. */
-export function buildProposePrompt(input: string, nonce: string): string {
+export function buildProposePrompt(
+  input: string,
+  dictionaries: AnnotateDictionaries,
+  nonce: string,
+): string {
+  const categoryKeys = renderDictionary(dictionaries.categories);
+  const tagKeys = renderDictionary(dictionaries.tags);
   return `你是 repl-server 的 MCP 配置生成器。你的唯一任务是把用户输入转换成 repl-server 的服务器配置。
 
 安全与格式规则（必须遵守）：
@@ -71,8 +77,15 @@ export function buildProposePrompt(input: string, nonce: string): string {
 5. 参数放在 args 数组里，不要拼成 shell 命令。args 中的凭据同样用 {"$secret":"KEY_NAME"}。
 6. url 只允许 http/https，且不得内嵌用户名或密码；非回环地址必须用 https。
 7. 无法确定时不要编造：把不确定项写进 warnings，并给出最保守的配置。
-8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 用小写英文短横线词，最多 8 个；category 用小写英文，建议从 database/observability/devtools/ui-automation/filesystem/search/messaging/cloud/ai/other 中选。
-9. connectMode 默认 "eager"（启动即连接）；只有用户明确要求延迟连接、按需启动或节省资源时才用 "lazy"。
+8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 只能从下面的标签字典 key 中选，最多 8 个，不要编造新 key；没有合适的就留空。
+9. category 必须从下面的分类字典 key 中选一个；都不合适时用 "other"，不要编造新 key。
+10. connectMode 默认 "eager"（启动即连接）；只有用户明确要求延迟连接、按需启动或节省资源时才用 "lazy"。
+
+分类字典（category 只能从这里选；都不合适时用 other）：
+${categoryKeys}
+
+标签字典（tags 只能从这里选；没有合适的就留空）：
+${tagKeys}
 
 输出 JSON 的字段：
 {

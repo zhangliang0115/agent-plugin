@@ -1,7 +1,7 @@
 /**
- * Audit runtime: one owned JSONL writer plus the protocol-frame recorder.
+ * Audit runtime: owned JSONL writers plus the protocol-frame recorder.
  *
- * This is the only place in the server layer that constructs an audit writer.
+ * This is the only place in the server layer that constructs audit writers.
  * Callers record through `recordEval` / `recordToolCall` / `recordTask` /
  * `recordFrameIn` / `recordFrameOut`; every write goes through the core
  * writer's bounded queue, so a slow disk drops detail events instead of
@@ -149,17 +149,24 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
   const clock = options.clock ?? systemClock;
   const log = options.log ?? ((): void => undefined);
   const writer = new AuditWriter({ dir: options.dir, now: () => clock.now() });
+  // Protocol frames get their own daily files; `readProtocolFrames` reads
+  // `protocol-*.jsonl`, not the main `audit-*.jsonl` log.
+  const protocolWriter = new AuditWriter({
+    dir: options.dir,
+    now: () => clock.now(),
+    filePrefix: 'protocol',
+  });
   const endpoints: AuditEndpoints = createAuditEndpoints({ dir: options.dir, clock });
 
   let closed = false;
   let closePromise: Promise<void> | null = null;
   let writeFailureLogged = false;
 
-  // The frame recorder's own sink is the writer, so frame events share the
-  // writer's redaction and flush/close semantics.
+  // The frame recorder's own sink is the protocol writer, so frame events
+  // share its redaction and flush/close semantics.
   const sink: FrameSink = {
     write(event) {
-      record(event);
+      recordFrame(event);
     },
   };
 
@@ -175,25 +182,36 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
     log(`repl-server: audit write failed: ${error instanceof Error ? error.message : String(error)}`);
   };
 
-  function record(event: AuditEvent): void {
-    if (closed) return;
+  function notify(event: AuditEvent): void {
+    if (options.onEvent === undefined) return;
+    try {
+      options.onEvent(event);
+    } catch (error) {
+      log(`repl-server: audit event listener failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function accept(target: AuditWriter, event: AuditEvent): boolean {
+    if (closed) return false;
     if (typeof event !== 'object' || event === null || typeof event.event !== 'string' || event.event === '') {
       log('repl-server: audit event dropped: missing event name');
-      return;
+      return false;
     }
     try {
-      writer.writeEvent(event);
+      target.writeEvent(event);
     } catch (error) {
       reportFailure(error);
-      return;
+      return false;
     }
-    if (options.onEvent !== undefined) {
-      try {
-        options.onEvent(event);
-      } catch (error) {
-        log(`repl-server: audit event listener failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    return true;
+  }
+
+  function record(event: AuditEvent): void {
+    if (accept(writer, event)) notify(event);
+  }
+
+  function recordFrame(event: AuditEvent): void {
+    if (accept(protocolWriter, event)) notify(event);
   }
 
   const handlerFor = (
@@ -266,23 +284,23 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
       return {
         dir: options.dir,
         file: writer.currentFile ?? null,
-        queueBytes: writer.queueBytes,
-        droppedEvents: writer.droppedEvents,
-        healthy: writer.healthy,
+        queueBytes: writer.queueBytes + protocolWriter.queueBytes,
+        droppedEvents: writer.droppedEvents + protocolWriter.droppedEvents,
+        healthy: writer.healthy && protocolWriter.healthy,
         frames: frames.stats(),
       };
     },
     async flush() {
       frames.flush();
-      await writer.flush();
+      await Promise.all([writer.flush(), protocolWriter.flush()]);
     },
     close() {
       if (closePromise !== null) return closePromise;
       // Flush queued frames while the sink still accepts writes, then close
-      // the writer and wait for its stream to finish.
+      // both writers and wait for their streams to finish.
       frames.close();
       closed = true;
-      closePromise = writer.close();
+      closePromise = Promise.all([writer.close(), protocolWriter.close()]).then(() => undefined);
       return closePromise;
     },
   };

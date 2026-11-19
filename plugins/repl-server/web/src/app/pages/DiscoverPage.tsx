@@ -112,6 +112,11 @@ export function DiscoverPage(): React.ReactElement {
         });
         try {
           await api.post('/servers', registerBody(suggestion));
+          // First tools/list feeds the AI auto-annotation preview; a failed refresh
+          // must not fail registration, so it stays silent.
+          void api
+            .post(`/servers/${encodeURIComponent(suggestion.id)}/tools/refresh`)
+            .catch(() => undefined);
           setSuggestions((current) =>
             current.map((item) =>
               item.id === suggestion.id ? { ...item, alreadyExists: true } : item,

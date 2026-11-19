@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -54,8 +54,12 @@ async function createFixture(
   return { dir, clock, runtime };
 }
 
-async function readRecords(dir: string, day = DAY): Promise<Array<Record<string, unknown>>> {
-  const text = await readFile(join(dir, `audit-${day}.jsonl`), 'utf8');
+async function readRecords(
+  dir: string,
+  day = DAY,
+  prefix = 'audit',
+): Promise<Array<Record<string, unknown>>> {
+  const text = await readFile(join(dir, `${prefix}-${day}.jsonl`), 'utf8');
   return text
     .split('\n')
     .filter((line) => line !== '')
@@ -190,7 +194,8 @@ test('records eval, tool, task and frame events into daily JSONL and drains on c
   const records = await readRecords(dir);
   assert.deepEqual(
     records.map((record) => record['event']),
-    ['eval_start', 'tool_call', 'tool_result', 'async_dispatch', 'proto_in', 'proto_out'],
+    ['eval_start', 'tool_call', 'tool_result', 'async_dispatch'],
+    'the audit log holds no protocol frames',
   );
   for (const record of records) {
     assert.equal(record['v'], 1);
@@ -199,7 +204,20 @@ test('records eval, tool, task and frame events into daily JSONL and drains on c
     assert.equal(record['client'], 'claude-code/2.1.327');
   }
 
-  const [protoIn, protoOut] = records.slice(-2);
+  const protocolRecords = await readRecords(dir, DAY, 'protocol');
+  assert.deepEqual(
+    protocolRecords.map((record) => record['event']),
+    ['proto_in', 'proto_out'],
+    'frames go to the protocol log',
+  );
+  for (const record of protocolRecords) {
+    assert.equal(record['v'], 1);
+    assert.equal(record['ts'], ISO);
+    assert.equal(record['binding'], 'cb_1');
+    assert.equal(record['client'], 'claude-code/2.1.327');
+  }
+
+  const [protoIn, protoOut] = protocolRecords;
   assert.ok(protoIn !== undefined && protoOut !== undefined);
   assert.equal(protoIn['id'], 1);
   assert.equal(protoIn['method'], 'tools/call');
@@ -231,20 +249,26 @@ test('flush drains without closing and close is idempotent', async (t) => {
   const { evalStart } = sampleEvents();
 
   runtime.recordEval(evalStart);
+  runtime.recordFrameIn({ mcp: 'mcp_1', id: 2, method: 'ping' });
   await runtime.flush();
   const afterFlush = await readRecords(dir);
   assert.equal(afterFlush.length, 1);
   assert.equal(afterFlush[0]?.['event'], 'eval_start');
+  const protocolAfterFlush = await readRecords(dir, DAY, 'protocol');
+  assert.equal(protocolAfterFlush.length, 1);
+  assert.equal(protocolAfterFlush[0]?.['event'], 'proto_in');
 
   await runtime.close();
   const contents = await readFile(join(dir, `audit-${DAY}.jsonl`), 'utf8');
+  const protocolContents = await readFile(join(dir, `protocol-${DAY}.jsonl`), 'utf8');
 
   runtime.recordEval({ ...evalStart, event: 'eval_end', outcome: 'ok' });
-  runtime.recordFrameIn({ mcp: 'mcp_1', id: 2, method: 'ping' });
+  runtime.recordFrameIn({ mcp: 'mcp_1', id: 3, method: 'ping' });
   runtime.recordTask({ ...evalStart, event: 'task_cancel', evalTaskId: 't_1' });
   await runtime.close();
 
   assert.equal(await readFile(join(dir, `audit-${DAY}.jsonl`), 'utf8'), contents);
+  assert.equal(await readFile(join(dir, `protocol-${DAY}.jsonl`), 'utf8'), protocolContents);
 });
 
 test('invalid events are logged and never written', async (t) => {
@@ -326,6 +350,112 @@ async function writeAuditFixture(dir: string): Promise<void> {
     'utf8',
   );
 }
+
+test('frames endpoint reads frames the runtime actually wrote', async (t) => {
+  const { runtime } = await createFixture(t);
+
+  runtime.recordFrameIn({
+    mcp: 'mcp_1',
+    identity: 'bound',
+    binding: 'cb_1',
+    client: 'claude-code/2.1.327',
+    id: 9,
+    method: 'tools/call',
+    params: { name: 'run_script' },
+    bytes: 32,
+  });
+  runtime.recordFrameOut({
+    mcp: 'mcp_1',
+    id: 9,
+    result: { content: [] },
+    exec: 'es_1',
+    evalId: 1,
+  });
+  await runtime.flush();
+
+  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
+  assert.equal(response?.status, 200);
+  const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  const pair = rows[0];
+  assert.ok(pair !== undefined);
+  assert.equal(pair['id'], 9);
+  assert.equal(pair['method'], 'tools/call');
+  assert.equal(pair['durMs'], 0);
+  assert.equal(pair['ok'], true);
+  assert.equal('params' in (pair['request'] as Record<string, unknown>), false);
+});
+
+test('frames endpoint reads legacy frame events from the audit log', async (t) => {
+  const { dir, runtime } = await createFixture(t);
+  // No protocol file: frames written by releases before the protocol writer
+  // landed in audit-*.jsonl and must still show up in the detail view.
+  await writeFile(
+    join(dir, `audit-${DAY}.jsonl`),
+    `${FIXTURE_FRAMES.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    'utf8',
+  );
+
+  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
+  assert.equal(response?.status, 200);
+  const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.['id'], 7);
+  assert.equal(rows[0]?.['method'], 'tools/call');
+});
+
+test('legacy and protocol frame files are merged without duplicates', async (t) => {
+  const { dir, clock, runtime } = await createFixture(t);
+  const legacyFrames = `${FIXTURE_FRAMES.map((event) => JSON.stringify(event)).join('\n')}\n`;
+  // The legacy pair (id 7) is still in the audit log, and the same pair was
+  // also copied into the protocol log so dedupe is exercised.
+  await writeFile(join(dir, `audit-${DAY}.jsonl`), legacyFrames, 'utf8');
+
+  clock.advance(1_000);
+  runtime.recordFrameIn({
+    mcp: 'mcp_1',
+    id: 9,
+    method: 'tools/call',
+    params: { name: 'run_script' },
+    bytes: 32,
+  });
+  runtime.recordFrameOut({ mcp: 'mcp_1', id: 9, result: { content: [] }, bytes: 8 });
+  await runtime.flush();
+  await appendFile(join(dir, `protocol-${DAY}.jsonl`), legacyFrames, 'utf8');
+
+  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
+  assert.equal(response?.status, 200);
+  const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    rows.map((row) => row['id']),
+    [7, 9],
+    'both the legacy and the new protocol pair are visible, ordered by time',
+  );
+  assert.equal(rows.filter((row) => row['id'] === 7).length, 1, 'the overlap is deduped');
+  assert.equal(rows[0]?.['durMs'], 12);
+  assert.equal(rows[1]?.['durMs'], 0);
+});
+
+test('the audit query list serves audit events only, never protocol frames', async (t) => {
+  const { dir, runtime } = await createFixture(t);
+  await writeAuditFixture(dir);
+
+  const response = await call(
+    runtime.handlers(),
+    request('GET', '/admin/api/audit/query', { limit: '100' }),
+  );
+  assert.equal(response?.status, 200);
+  const events = bodyOf(response).events as AuditEvent[];
+  assert.deepEqual(
+    events.map((event) => event.event),
+    ['eval_start', 'tool_call', 'tool_result', 'eval_end'],
+    'the call list is the audit event stream; frames live in the drawer endpoint',
+  );
+  assert.ok(
+    events.every((event) => event.event !== 'proto_in' && event.event !== 'proto_out'),
+    'protocol frames must not leak into the list or its export',
+  );
+});
 
 test('handlers serve query pagination, eval traces, sessions, frames, stats and export', async (t) => {
   const { dir, runtime } = await createFixture(t);

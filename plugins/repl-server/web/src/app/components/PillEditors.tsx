@@ -8,7 +8,7 @@ import {
   dictionarySelectOptions,
   type DictionaryEntry,
 } from '../../lib/dictionary.ts';
-import { tagLabel, type TagDefinition } from './TagPicker.tsx';
+import { tagColor, tagLabel, type TagDefinition } from './TagPicker.tsx';
 
 /** Single-select category pill; a pick applies and closes immediately. */
 export function CategoryPillEditor({
@@ -242,7 +242,7 @@ export function TagPillEditor({
         {visible.map((pill) => (
           <Tag
             key={`${pill.inherited ? 'inherited' : 'tag'}-${pill.key}`}
-            color={pill.inherited ? undefined : 'blue'}
+            color={pill.inherited ? undefined : tagColor(pill.key)}
             bordered={pill.inherited}
             title={pill.inherited ? `继承自 server：${pill.key}` : pill.key}
           >

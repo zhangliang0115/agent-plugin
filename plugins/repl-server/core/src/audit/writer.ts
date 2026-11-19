@@ -13,7 +13,10 @@ import { join } from 'node:path';
 import { redactDeep } from './redact.ts';
 
 export const AUDIT_SCHEMA_VERSION = 1;
+/** File name pattern for the default `audit` prefix; kept for compatibility. */
 export const AUDIT_FILE_PATTERN = /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/;
+const FILE_PREFIX_PATTERN = /^[a-z][a-z0-9-]*$/;
+const DEFAULT_FILE_PREFIX = 'audit';
 export const DEFAULT_MAX_QUEUE_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_RETENTION_DAYS = 14;
 export const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -31,8 +34,13 @@ export interface AuditIdentity {
 }
 
 export interface AuditWriterOptions {
-  /** Directory that holds `audit-YYYY-MM-DD.jsonl`. Created when missing. */
+  /** Directory that holds `<prefix>-YYYY-MM-DD.jsonl`. Created when missing. */
   dir: string;
+  /**
+   * Daily file prefix, `[a-z][a-z0-9-]*`. Defaults to `audit`; the server uses
+   * `protocol` for the frame log so `readProtocolFrames` finds it.
+   */
+  filePrefix?: string;
   /** Default identity; a per-event identity overrides it. */
   identity?: AuditIdentity;
   /** Injectable clock in epoch milliseconds. */
@@ -56,9 +64,13 @@ const DETAIL_EVENTS = new Set(['tool_call', 'tool_result', 'tool_denied']);
 
 const DAY_MS = 86_400_000;
 
-/** `audit-2026-11-18.jsonl` for the given UTC date. */
-export function auditFileName(date: string): string {
-  return `audit-${date}.jsonl`;
+/** `<prefix>-YYYY-MM-DD.jsonl` for the given UTC date. */
+export function auditFileName(date: string, filePrefix = DEFAULT_FILE_PREFIX): string {
+  return `${filePrefix}-${date}.jsonl`;
+}
+
+function patternForPrefix(filePrefix: string): RegExp {
+  return new RegExp(`^${filePrefix}-\\d{4}-\\d{2}-\\d{2}\\.jsonl$`);
 }
 
 /**
@@ -69,6 +81,8 @@ export function auditFileName(date: string): string {
  */
 export class AuditWriter {
   private readonly dir: string;
+  private readonly filePrefix: string;
+  private readonly filePattern: RegExp;
   private readonly identity: AuditIdentity | undefined;
   private readonly now: () => number;
   private readonly maxQueueBytes: number;
@@ -90,6 +104,11 @@ export class AuditWriter {
 
   constructor(options: AuditWriterOptions) {
     this.dir = options.dir;
+    this.filePrefix = options.filePrefix ?? DEFAULT_FILE_PREFIX;
+    if (!FILE_PREFIX_PATTERN.test(this.filePrefix)) {
+      throw new RangeError('filePrefix must match [a-z][a-z0-9-]*');
+    }
+    this.filePattern = patternForPrefix(this.filePrefix);
     this.identity = options.identity;
     this.now = options.now ?? Date.now;
     this.maxQueueBytes = options.maxQueueBytes ?? DEFAULT_MAX_QUEUE_BYTES;
@@ -161,7 +180,7 @@ export class AuditWriter {
 
   /** Applies the 14-day / 200MB (by default) retention policy. */
   async prune(at = this.now()): Promise<string[]> {
-    const currentName = this.streamDate === undefined ? undefined : auditFileName(this.streamDate);
+    const currentName = this.streamDate === undefined ? undefined : auditFileName(this.streamDate, this.filePrefix);
     let names: string[];
     try {
       names = readdirSync(this.dir);
@@ -174,8 +193,8 @@ export class AuditWriter {
     const kept: Array<{ name: string; date: string; size: number }> = [];
 
     for (const name of names) {
-      if (!AUDIT_FILE_PATTERN.test(name)) continue;
-      const date = name.slice('audit-'.length, 'audit-'.length + 10);
+      if (!this.filePattern.test(name)) continue;
+      const date = name.slice(this.filePrefix.length + 1, this.filePrefix.length + 11);
       const path = join(this.dir, name);
       if (date < cutoff && name !== currentName) {
         if (removeFile(path)) removed.push(name);
@@ -202,7 +221,9 @@ export class AuditWriter {
   }
 
   get currentFile(): string | undefined {
-    return this.streamDate === undefined ? undefined : join(this.dir, auditFileName(this.streamDate));
+    return this.streamDate === undefined
+      ? undefined
+      : join(this.dir, auditFileName(this.streamDate, this.filePrefix));
   }
 
   get queueBytes(): number {
@@ -236,7 +257,7 @@ export class AuditWriter {
     }
 
     this.streamDate = date;
-    const stream = createWriteStream(join(this.dir, auditFileName(date)), { flags: 'a', mode: 0o600 });
+    const stream = createWriteStream(join(this.dir, auditFileName(date, this.filePrefix)), { flags: 'a', mode: 0o600 });
     stream.on('open', (fd) => {
       try {
         fchmodSync(fd, 0o600);

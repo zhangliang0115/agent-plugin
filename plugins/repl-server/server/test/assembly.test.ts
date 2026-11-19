@@ -243,7 +243,10 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
   assert.deepEqual(discovered.result.supportedVersions, ['2026-07-28']);
 
   const list = await rpc(app.base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
-  const tools = (await list.json()) as { result: { tools: Array<{ name: string }> } };
+  const tools = (await list.json()) as {
+    result: { resultType: string; tools: Array<{ name: string }> };
+  };
+  assert.equal(tools.result.resultType, 'complete');
   assert.deepEqual(tools.result.tools.map((tool) => tool.name), [
     'run_script',
     'search_tools',

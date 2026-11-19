@@ -22,6 +22,7 @@ import {
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -122,6 +123,7 @@ export function ClientsPage(): React.ReactElement {
   const dictionary = useTagDictionary();
   const [clients, setClients] = useState<ClientBinding[]>([]);
   const [sessions, setSessions] = useState<McpSessionRecord[]>([]);
+  const [sessionQuery, setSessionQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ClientBinding | null>(null);
@@ -258,8 +260,27 @@ export function ClientsPage(): React.ReactElement {
         ),
       },
     ],
-    [tagDefinitions],
+    [clients, tagDefinitions],
   );
+
+  const filteredSessions = useMemo(() => {
+    const query = sessionQuery.trim().toLowerCase();
+    if (query === '') return sessions;
+    return sessions.filter((session) => {
+      const bindingLabel =
+        session.bindingId === null
+          ? ''
+          : (clients.find((client) => client.id === session.bindingId)?.label ?? '');
+      return [
+        session.mcpSessionId,
+        session.clientName,
+        session.client,
+        session.clientVersion,
+        session.bindingId ?? '',
+        bindingLabel,
+      ].some((value) => value.toLowerCase().includes(query));
+    });
+  }, [clients, sessionQuery, sessions]);
 
   async function showMcpConfig(client: ClientBinding): Promise<void> {
     const base = { clientId: client.id, label: client.label };
@@ -472,13 +493,31 @@ export function ClientsPage(): React.ReactElement {
 
       <Card
         title="活跃 MCP 会话"
-        extra={<span className="muted">{formatNumber(sessions.length)} 个传输会话</span>}
+        extra={
+          <Space>
+            <Input
+              allowClear
+              prefix={<SearchOutlined />}
+              placeholder="搜索 session / 客户端 / binding"
+              value={sessionQuery}
+              onChange={(event) => setSessionQuery(event.target.value)}
+              style={{ width: 260 }}
+            />
+            <span className="muted">
+              {formatNumber(filteredSessions.length)} / {formatNumber(sessions.length)} 个传输会话
+            </span>
+          </Space>
+        }
       >
+        <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+          “活跃”按 Mcp-Session-Id 统计：最近 60 分钟内有请求即算活跃；客户端直接断开不会立即删除，60
+          分钟无请求后由后台清理。它不是 TCP 在线状态。
+        </Typography.Text>
         <Table
           size="small"
           rowKey="mcpSessionId"
           loading={loading}
-          dataSource={sessions}
+          dataSource={filteredSessions}
           pagination={false}
           columns={[
             {
@@ -499,9 +538,15 @@ export function ClientsPage(): React.ReactElement {
             {
               title: '绑定（binding）',
               dataIndex: 'bindingId',
-              render: (value: string | null) => (
-                <span className={value === null ? 'muted' : 'mono'}>{value ?? 'unbound'}</span>
-              ),
+              render: (value: string | null) => {
+                if (value === null) return <span className="muted">unbound</span>;
+                const label = clients.find((client) => client.id === value)?.label;
+                return (
+                  <span className={label === undefined ? 'mono' : undefined} title={value}>
+                    {label ?? value}
+                  </span>
+                );
+              },
             },
             {
               title: '执行会话',
@@ -521,7 +566,14 @@ export function ClientsPage(): React.ReactElement {
             },
           ]}
           locale={{
-            emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有活跃会话" />,
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  sessionQuery.trim() === '' ? '当前没有活跃会话' : '没有匹配的会话'
+                }
+              />
+            ),
           }}
         />
       </Card>

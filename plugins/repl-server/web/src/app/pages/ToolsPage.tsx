@@ -893,7 +893,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             dataSource={filtered}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1280, y: 'calc(100vh - 300px)' }}
+            scroll={{ x: 1280 }}
             locale={{
               emptyText: (
                 <Empty

@@ -1,7 +1,10 @@
 /** Tag dictionary hook plus the multi-select used by server/tool/client forms. */
 import { Select, Tag, type SelectProps } from 'antd';
 
+import { tagColor } from '../../lib/tag-color.ts';
 import { useDictionaryResource } from './dictionary-resource.ts';
+
+export { tagColor };
 
 export interface TagDefinition {
   key: string;
@@ -68,7 +71,7 @@ export function TagPicker({
         const definition = dictionary.find((tag) => tag.key === key);
         return (
           <Tag
-            color={definition === undefined ? 'default' : 'geekblue'}
+            color={definition === undefined ? 'default' : tagColor(key)}
             bordered={definition !== undefined}
             closable={closable}
             onClose={onClose}

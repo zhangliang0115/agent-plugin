@@ -545,7 +545,8 @@ export function createAiService(deps: AiServiceDeps): AiService {
   async function propose(body: unknown): Promise<ProposeResponse> {
     const ai = ensureEnabled();
     const inputText = readProposeInput(body);
-    const prompt = buildProposePrompt(inputText, createPromptNonce());
+    const dictionaries = await annotationDictionaries();
+    const prompt = buildProposePrompt(inputText, dictionaries, createPromptNonce());
     const { run, audit } = await callModel({
       kind: 'propose',
       trigger: 'manual',
@@ -867,7 +868,15 @@ export function createAiService(deps: AiServiceDeps): AiService {
 
     const record = await deps.servers.get(serverId);
     if (record === null || isBuiltinRecord(record)) return;
-    if (!emptyText(record.summary) || !emptyText(record.category)) return;
+    // Only a fully annotated server is skipped: discovery-registered servers arrive
+    // with a summary but no category/tags and still need a preview.
+    if (
+      !emptyText(record.summary) &&
+      !emptyText(record.category) &&
+      record.tags.length > 0
+    ) {
+      return;
+    }
 
     const tools = await deps.tools.listByServer(serverId);
     if (tools.length === 0) return;

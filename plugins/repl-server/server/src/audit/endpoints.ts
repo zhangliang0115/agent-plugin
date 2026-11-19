@@ -44,6 +44,7 @@ import {
   readAuditLines,
   readEvalTrace,
   type AuditFilter,
+  type AuditLogKind,
   type AuditStatsOptions,
 } from './query.ts';
 import {
@@ -219,26 +220,73 @@ interface FrameEndpointFilter {
   to?: number;
 }
 
+interface CollectedFrames {
+  events: AuditEvent[];
+  droppedFrames: number;
+  frameKeys: Set<string>;
+  droppedKeys: Set<string>;
+}
+
+function frameDedupeKey(event: AuditEvent): string {
+  return JSON.stringify([
+    event.event,
+    event.mcp ?? null,
+    event.id ?? null,
+    event.ts,
+    event.method ?? null,
+    event.bytes ?? null,
+  ]);
+}
+
+function droppedDedupeKey(event: AuditEvent): string {
+  return JSON.stringify([event.event, event.ts, event.count ?? null]);
+}
+
+async function collectProtocolFrames(
+  dir: string,
+  kind: AuditLogKind,
+  filter: AuditFilter,
+  range: FrameEndpointFilter,
+  state: CollectedFrames,
+): Promise<void> {
+  for await (const line of readAuditLines(dir, kind, { from: range.from, to: range.to })) {
+    const event = parseAuditEvent(line.text);
+    if (event === null) continue;
+    if (event.event === 'protocol_dropped') {
+      const key = droppedDedupeKey(event);
+      if (state.droppedKeys.has(key)) continue;
+      state.droppedKeys.add(key);
+      // Drop counters are process-global, so the time range is the only filter
+      // that applies to them.
+      if (typeof event.count === 'number') state.droppedFrames += event.count;
+      continue;
+    }
+    if (event.event !== 'proto_in' && event.event !== 'proto_out') continue;
+    const key = frameDedupeKey(event);
+    if (state.frameKeys.has(key)) continue;
+    state.frameKeys.add(key);
+    if (!matchesFilter(event, filter)) continue;
+    state.events.push(event);
+  }
+}
+
 async function readProtocolFrames(
   dir: string,
   filter: AuditFilter,
   range: FrameEndpointFilter,
 ): Promise<{ frames: ProtocolFramePair[]; droppedFrames: number }> {
-  const events: AuditEvent[] = [];
-  let droppedFrames = 0;
-  for await (const line of readAuditLines(dir, 'protocol', { from: range.from, to: range.to })) {
-    const event = parseAuditEvent(line.text);
-    if (event === null) continue;
-    if (event.event === 'protocol_dropped') {
-      // Drop counters are process-global, so the time range is the only filter
-      // that applies to them.
-      if (typeof event.count === 'number') droppedFrames += event.count;
-      continue;
-    }
-    if (!matchesFilter(event, filter)) continue;
-    events.push(event);
-  }
-  return { frames: pairProtocolFrames(events), droppedFrames };
+  const state: CollectedFrames = {
+    events: [],
+    droppedFrames: 0,
+    frameKeys: new Set(),
+    droppedKeys: new Set(),
+  };
+  // Frame storage moved from audit-*.jsonl to protocol-*.jsonl, so read both:
+  // old records stay visible after a restart writes the first protocol file,
+  // and the overlap is deduped by a stable event key.
+  await collectProtocolFrames(dir, 'protocol', filter, range, state);
+  await collectProtocolFrames(dir, 'audit', filter, range, state);
+  return { frames: pairProtocolFrames(state.events), droppedFrames: state.droppedFrames };
 }
 
 /** GET /admin/api/audit/frames?mcp=&id=&detail=summary|full */

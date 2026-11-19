@@ -246,3 +246,53 @@ test('prune honours the retention window and total size cap', async () => {
     assert.deepEqual((await readdir(dir)).sort(), ['audit-2026-11-18.jsonl', 'notes.txt']);
   });
 });
+
+test('filePrefix writes to its own daily file', async () => {
+  await withTempDir(async (dir) => {
+    const writer = new AuditWriter({
+      dir,
+      filePrefix: 'protocol',
+      now: () => Date.parse('2026-11-18T12:00:00.000Z'),
+    });
+    writer.write('proto_in', { id: 1, method: 'tools/list' });
+    await writer.close();
+
+    assert.deepEqual(await readdir(dir), ['protocol-2026-11-18.jsonl']);
+    const events = await readEvents(join(dir, 'protocol-2026-11-18.jsonl'));
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.event, 'proto_in');
+  });
+});
+
+test('prune only touches files with the writer prefix', async () => {
+  await withTempDir(async (dir) => {
+    await writeFile(join(dir, 'audit-2020-01-01.jsonl'), 'x');
+    await writeFile(join(dir, 'protocol-2020-01-01.jsonl'), 'x');
+    await writeFile(join(dir, 'protocol-2026-11-18.jsonl'), 'x');
+
+    const writer = new AuditWriter({
+      dir,
+      filePrefix: 'protocol',
+      now: () => Date.parse('2026-11-18T12:00:00.000Z'),
+      retentionDays: 14,
+    });
+    const removed = await writer.prune();
+    await writer.close();
+
+    assert.deepEqual(removed, ['protocol-2020-01-01.jsonl']);
+    assert.deepEqual((await readdir(dir)).sort(), [
+      'audit-2020-01-01.jsonl',
+      'protocol-2026-11-18.jsonl',
+    ]);
+  });
+});
+
+test('rejects an invalid filePrefix', () => {
+  for (const filePrefix of ['', 'Protocol', '../escape', 'a_b', '1st', 'a/b']) {
+    assert.throws(
+      () => new AuditWriter({ dir: '/tmp/repl-audit-ignored', filePrefix }),
+      RangeError,
+      `expected ${JSON.stringify(filePrefix)} to be rejected`,
+    );
+  }
+});

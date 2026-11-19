@@ -180,7 +180,7 @@ test('preview returns proposed metadata without writing', async (t) => {
   assert.deepEqual(preview.proposed.tagSuggestions, []);
   assert.equal(preview.proposed.toolOverrides?.[0]?.name, 'query');
   assert.equal(preview.omittedTools, 0);
-  assert.equal(preview.meta.promptVersion, 5);
+  assert.equal(preview.meta.promptVersion, 6);
 
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'pg')?.summary, null);
@@ -912,13 +912,31 @@ test('auto preview does not run without creation or explicit refresh', async (t)
   assert.equal(fixture.audits.length, 0);
 });
 
-test('auto preview skips servers that already have summary or category', async (t) => {
+test('auto preview skips only servers that already have summary, category and tags', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db, {
+    summary: 'manual',
+    summarySource: 'manual',
+    category: 'database',
+    tags: ['postgresql'],
+  });
+  seedTool(fixture.db);
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+});
+
+test('auto preview still runs when only summary exists', async (t) => {
   const fixture = await makeFixture(t);
   seedServer(fixture.db, { summary: 'manual', summarySource: 'manual' });
   seedTool(fixture.db);
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
-  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+
+  const pending = await fixture.service.pendingAnnotations();
+  assert.equal(pending.items.length, 1);
+  assert.equal(pending.items[0]?.proposed.category, 'database');
+  assert.deepEqual(pending.items[0]?.proposed.tags, ['postgresql', 'query', 'write']);
 });
 
 test('pending previews expire and are dropped on mutation', async (t) => {

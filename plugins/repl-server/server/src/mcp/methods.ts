@@ -49,7 +49,9 @@ export function createMethodTable<Context = undefined>(
   dispatcher.register('server/discover', createDiscoverHandler<Context>(discoverOptions));
   dispatcher.register('initialize', createInitializeHandler<Context>(discoverOptions));
   dispatcher.register('notifications/initialized', () => undefined);
-  dispatcher.register('ping', () => ({}));
+  // Modern results must carry `resultType`; the empty-object form is only
+  // valid for earlier revisions.
+  dispatcher.register('ping', () => ({ resultType: 'complete' }));
   dispatcher.register('tools/list', options.toolsList ?? notWired('tools/list'));
   dispatcher.register('tools/call', options.toolsCall ?? notWired('tools/call'));
   dispatcher.register('tasks/get', options.tasksGet ?? notWired('tasks/get'));

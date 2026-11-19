@@ -15,7 +15,7 @@ node scripts/validate.ts
 npm run matrix
 ```
 
-当前全量基线：`server` 757 个用例（全部通过）、`web` 40 个用例，0 skip。
+当前全量基线：`core` 247 个用例、`server` 763 个用例（全部通过）、`web` 43 个用例，0 skip。
 
 窄范围（06–08）：
 
@@ -52,7 +52,7 @@ interactive TUI 冒烟：用 Terminal（或 kimi-cu）运行同一 `claude --mcp
 | automated（客户端身份） | `clientInfo` 从 `_meta` 与 legacy `initialize` 两处读取；名称 128 码点、版本 64 码点、控制字符剔除、trim、缺 name 时两段为空；旧 `name/version` 标签按第一个 `/` 拆分 | `node --test test/client-info.test.ts` |
 | automated（内置与官方工具目录） | `__builtin__` 5 个协议工具幂等种子、保留管理员字段、只补空字段、从 catalog 快照排除；`__official__` 懒同步（无 `claude` → notice、写库保留覆盖、按进程缓存、`force` 重跑、GET 200、POST refresh 202、`__builtin__` 拒绝刷新） | `node --test test/builtin-seed.test.ts test/official-sync.test.ts` |
 | automated（会话概览） | 可见 server 过滤（enabled、非 builtin、binding 的 server/tag 白名单）、行格式与文本裁剪、无可见 server 文案、2KB 预算下从尾部截断且固定指引保留、`instructions` 的 MCP 段同步 | `node --test test/mcp-overview.test.ts` |
-| automated（web） | SSE 重连/缺口/轮询回退（`api-stream`）、hash 路由与 `?server=` 过滤（`router`）、命令面板过滤（`palette`）、字典标签与选项解析（`dictionary`）、MCP 配置片段（`mcp-config`）、服务端行动作表（`server-actions`）、AI 提案输入与 apply body（`ai-proposal`）、工具 input schema 展平为参数行（`schema-doc`，含非对象/坏类型、循环、深度与行数上限）；8 组共 40 个用例，只测纯逻辑，不渲染 React 组件 | `cd plugins/repl-server/web && npm test` |
+| automated（web） | SSE 重连/缺口/轮询回退（`api-stream`）、hash 路由与 `?server=` 过滤（`router`）、命令面板过滤（`palette`）、字典标签与选项解析（`dictionary`）、MCP 配置片段（`mcp-config`）、服务端行动作表（`server-actions`）、AI 提案输入与 apply body（`ai-proposal`）、工具 input schema 展平为参数行（`schema-doc`，含非对象/坏类型、循环、深度与行数上限）、标签稳定配色（`tag-color`）；9 组共 43 个用例，只测纯逻辑，不渲染 React 组件 | `cd plugins/repl-server/web && npm test` |
 | manual | 终端按 Esc 触发 tasks/cancel、TUI 任务面板、管理端视觉与 3D 资源约束 | 按上面的 interactive 冒烟步骤人工执行，结果写进交付说明 |
 | external | 真实 `claude mcp serve` 的 22 工具形状、真实第三方 MCP | `REPL_CLAUDE_BIN` 指向真实二进制；结果贴进交付说明 |
 
@@ -127,7 +127,7 @@ cd plugins/repl-server/server && node --test test/ai-*.test.ts
 
 ### Web 页面
 
-`web/test/*.test.ts` 用 `node:test`，不需要浏览器，当前覆盖八组纯逻辑：`api-stream` 覆盖 SSE 包装的 Last-Event-ID、缺口帧、重连与轮询回退，`router` 覆盖 hash 路由解析、`#/manage?tab=…` 归一化与工具页 `?server=` 过滤，`palette` 覆盖命令面板过滤，`dictionary` 覆盖字典标签与选项解析，`mcp-config` 覆盖 MCP 配置片段，`server-actions` 覆盖服务端行内动作表（builtin / disabled / ready / idle / failed / 进行中），`ai-proposal` 覆盖输入字节上限、`<secret:NAME>` 往返与 apply body 的 stdio/http 分支，`schema-doc` 覆盖嵌套对象/数组展平、enum/$ref/oneOf 类型标签、坏数据不抛错，以及循环、深度与行数上限。八组共 40 个用例，不渲染 React 组件；管理端页面行为仍归 manual。命令：
+`web/test/*.test.ts` 用 `node:test`，不需要浏览器，当前覆盖九组纯逻辑：`api-stream` 覆盖 SSE 包装的 Last-Event-ID、缺口帧、重连与轮询回退，`router` 覆盖 hash 路由解析、`#/manage?tab=…` 归一化与工具页 `?server=` 过滤，`palette` 覆盖命令面板过滤，`dictionary` 覆盖字典标签与选项解析，`mcp-config` 覆盖 MCP 配置片段，`server-actions` 覆盖服务端行内动作表（builtin / disabled / ready / idle / failed / 进行中），`ai-proposal` 覆盖输入字节上限、`<secret:NAME>` 往返与 apply body 的 stdio/http 分支，`schema-doc` 覆盖嵌套对象/数组展平、enum/$ref/oneOf 类型标签、坏数据不抛错，以及循环、深度与行数上限，`tag-color` 覆盖语义标签固定颜色与未知 key 的稳定哈希落色。九组共 43 个用例，不渲染 React 组件；管理端页面行为仍归 manual。命令：
 
 ```bash
 cd plugins/repl-server/web && npm test

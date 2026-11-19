@@ -258,13 +258,13 @@ test('unwired tools and tasks methods fail with -32603 instead of -32601', async
   }
 });
 
-test('ping answers with an empty object and notifications/initialized stays silent', async () => {
+test('ping carries resultType and notifications/initialized stays silent', async () => {
   const rpc = createMethodTable();
 
   assert.deepEqual(await rpc.handle({ jsonrpc: '2.0', id: 9, method: 'ping', params: {} }), {
     jsonrpc: '2.0',
     id: 9,
-    result: {},
+    result: { resultType: 'complete' },
   });
   assert.equal(
     await rpc.handle({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }),

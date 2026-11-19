@@ -490,7 +490,13 @@ export function AiPage(): React.ReactElement {
                 </Space>
               </Form.Item>
               <Form.Item label="新接入 server 自动生成标注预览">
-                <Switch checked={autoAnnotate} onChange={setAutoAnnotate} />
+                <Space direction="vertical" size={2}>
+                  <Switch checked={autoAnnotate} onChange={setAutoAnnotate} />
+                  <Typography.Text type="secondary">
+                    启用且 AI 已启用时，新建或从发现页注册的 server 在首次拿到工具列表后会生成
+                    summary/category/tags 建议，进入下方「待处理标注」；不会自动写入，需审阅或点「直接应用」。失败不重试，可手动生成标注预览。
+                  </Typography.Text>
+                </Space>
               </Form.Item>
               <Form.Item label="claudeBin">
                 <Input

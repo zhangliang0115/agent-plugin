@@ -716,6 +716,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     toolsList: (_params, context) => {
       const surface = toolSurfaceFor(context.identity);
       return {
+        resultType: 'complete',
         tools: listTools({
           runScriptDescription: surface.runScriptDescription,
           searchToolsDescription: surface.searchToolsDefinition.description,
