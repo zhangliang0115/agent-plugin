@@ -16,7 +16,13 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import {
+  CopyOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
@@ -24,6 +30,12 @@ import { PageHeader } from '../components/common.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { ApiError } from '../../lib/api.ts';
 import { formatId, formatNumber, formatRelativeTime, formatTimestamp } from '../../lib/format.ts';
+import {
+  buildClaudeMcpAddCommand,
+  buildMcpConfigText,
+  mcpEndpoint,
+  TOKEN_PLACEHOLDER,
+} from '../../lib/mcp-config.ts';
 
 type ClientQuotaKey =
   | 'maxExecSessionsPerBinding'
@@ -94,7 +106,8 @@ export function ClientsPage(): React.ReactElement {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ClientBinding | null>(null);
   const [saving, setSaving] = useState(false);
-  const [tokenReveal, setTokenReveal] = useState<{ label: string; token: string } | null>(null);
+  /** `token` is present only right after creation; existing bindings get a placeholder. */
+  const [mcpReveal, setMcpReveal] = useState<{ label: string; token: string | null } | null>(null);
   const [form] = Form.useForm<ClientFormValues>();
   const alive = useRef(true);
 
@@ -202,9 +215,12 @@ export function ClientsPage(): React.ReactElement {
       },
       {
         title: '操作',
-        width: 150,
+        width: 220,
         render: (_value: unknown, client: ClientBinding) => (
           <Space size={0}>
+            <Button size="small" type="link" icon={<CopyOutlined />} onClick={() => showMcpConfig(client)}>
+              MCP 配置
+            </Button>
             <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditor(client)}>
               编辑
             </Button>
@@ -223,6 +239,10 @@ export function ClientsPage(): React.ReactElement {
     ],
     [tagDefinitions],
   );
+
+  function showMcpConfig(client: ClientBinding): void {
+    setMcpReveal({ label: client.label, token: null });
+  }
 
   function openEditor(client: ClientBinding | null): void {
     setEditing(client);
@@ -283,8 +303,8 @@ export function ClientsPage(): React.ReactElement {
       if (target === null) {
         const response = await api.post<{ client: ClientBinding; token: string }>('/clients', body);
         if (!alive.current) return;
-        setTokenReveal({ label: response.client.label, token: response.token });
-        message.success('已创建绑定；明文 token 只显示这一次');
+        setMcpReveal({ label: response.client.label, token: response.token });
+        message.success('已创建绑定；MCP 配置与明文 token 只显示这一次');
       } else {
         const response = await api.put<{
           client: ClientBinding;
@@ -507,32 +527,112 @@ export function ClientsPage(): React.ReactElement {
         </Form>
       </Drawer>
 
-      <Modal
-        open={tokenReveal !== null}
-        title={tokenReveal === null ? '一次性 token' : `一次性 token · ${tokenReveal.label}`}
-        okText="我已保存"
-        cancelText="关闭"
-        onOk={() => setTokenReveal(null)}
-        onCancel={() => setTokenReveal(null)}
-      >
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Alert
-            type="warning"
-            showIcon
-            message="明文 token 只显示这一次；关闭窗口或离开本页后无法再次查看。"
-          />
+      <McpConfigModal
+        open={mcpReveal !== null}
+        label={mcpReveal?.label ?? ''}
+        token={mcpReveal?.token ?? null}
+        onClose={() => setMcpReveal(null)}
+      />
+    </div>
+  );
+}
+
+/** Shows the binding's MCP JSON and Claude Code command; copies only on user click. */
+function McpConfigModal({
+  open,
+  label,
+  token,
+  onClose,
+}: {
+  open: boolean;
+  label: string;
+  token: string | null;
+  onClose: () => void;
+}): React.ReactElement {
+  const { message } = AntApp.useApp();
+  const url = mcpEndpoint(window.location.origin);
+  const value = token ?? TOKEN_PLACEHOLDER;
+  const configText = buildMcpConfigText({ url, token: value });
+  const command = buildClaudeMcpAddCommand({ url, token: value });
+
+  async function copy(text: string, success: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success(success);
+    } catch {
+      message.warning('复制失败，请手动选中文本复制。');
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      width={640}
+      title={label === '' ? 'MCP 配置' : `MCP 配置 · ${label}`}
+      onCancel={onClose}
+      footer={
+        <Button type="primary" onClick={onClose}>
+          {token === null ? '关闭' : '我已保存'}
+        </Button>
+      }
+    >
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Alert
+          type={token === null ? 'info' : 'warning'}
+          showIcon
+          message={
+            token === null
+              ? 'token 只在创建时显示一次，丢失请删除绑定后重新创建（等同于重新生成 token）。'
+              : '明文 token 只显示这一次；关闭窗口或离开本页后无法再次查看。'
+          }
+        />
+        <div>
+          <Typography.Text strong>MCP 配置（JSON）</Typography.Text>
           <Input.TextArea
             readOnly
             className="mono"
-            autoSize={{ minRows: 2, maxRows: 4 }}
-            value={tokenReveal?.token ?? ''}
+            style={{ marginTop: 8 }}
+            autoSize={{ minRows: 7, maxRows: 14 }}
+            value={configText}
           />
-          <Typography.Paragraph copyable={{ text: tokenReveal?.token ?? '' }} style={{ marginBottom: 0 }}>
-            复制 token，填入客户端的 Authorization header。
-          </Typography.Paragraph>
-        </Space>
-      </Modal>
-    </div>
+          <Button
+            style={{ marginTop: 8 }}
+            icon={<CopyOutlined />}
+            onClick={() => void copy(configText, '已复制 MCP 配置')}
+          >
+            复制配置
+          </Button>
+        </div>
+        <div>
+          <Typography.Text strong>Claude Code 一键配置命令</Typography.Text>
+          <Input.TextArea
+            readOnly
+            className="mono"
+            style={{ marginTop: 8 }}
+            autoSize={{ minRows: 2, maxRows: 4 }}
+            value={command}
+          />
+          <Space style={{ marginTop: 8 }}>
+            <Button icon={<CopyOutlined />} onClick={() => void copy(command, '已复制 Claude Code 命令')}>
+              复制命令
+            </Button>
+            <Typography.Text type="secondary">复制后粘贴到终端执行，不会自动运行。</Typography.Text>
+          </Space>
+        </div>
+        {token === null ? null : (
+          <div>
+            <Typography.Text strong>明文 token</Typography.Text>
+            <Input.TextArea
+              readOnly
+              className="mono"
+              style={{ marginTop: 8 }}
+              autoSize={{ minRows: 2, maxRows: 4 }}
+              value={token}
+            />
+          </div>
+        )}
+      </Space>
+    </Modal>
   );
 }
 
