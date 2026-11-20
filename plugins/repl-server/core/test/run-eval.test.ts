@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 
-import { LIMITS } from '../src/constants.ts';
 import { EvalTimeoutError, ReplError, StaleEvalError, WorkerKilledError } from '../src/errors.ts';
 import { EvalRegistry } from '../src/eval/eval-registry.ts';
 import {
@@ -195,23 +194,22 @@ test('an async eval releases the lock after dispatch and settles through onSettl
   assert.equal(session.inFlightEvals, 0);
 });
 
-test('the ninth in-flight eval is rejected with CAPACITY_EXCEEDED', async (t) => {
+test('an eval beyond the in-flight limit is rejected with CAPACITY_EXCEEDED', async (t) => {
   const executor = new FakeExecutor();
-  const session = track(t, makeSession(executor));
-  assert.equal(session.limits.inFlightLimit, 8);
-  assert.equal(LIMITS.inFlightPerExecSession, 8);
+  const session = track(t, makeSession(executor, { inFlightLimit: 2 }));
+  assert.equal(session.limits.inFlightLimit, 2);
 
-  for (let index = 1; index <= 8; index += 1) {
+  for (let index = 1; index <= 2; index += 1) {
     const receipt = await runEval(session, `bg-${index}`, { async: true, timeoutMs: 60_000 });
     assert.equal(receipt.evalId, index);
   }
-  assert.equal(session.inFlightEvals, 8);
+  assert.equal(session.inFlightEvals, 2);
 
   await assert.rejects(
     runEval(session, 'overflow', { async: true, timeoutMs: 60_000 }),
     (error: unknown) => error instanceof ReplError && error.code === 'CAPACITY_EXCEEDED',
   );
-  assert.equal(session.inFlightEvals, 8);
+  assert.equal(session.inFlightEvals, 2);
 });
 
 test('tool calls require a live (epoch, evalId, callSeq) triple', async (t) => {

@@ -11,7 +11,9 @@ import {
   Space,
   Spin,
   Steps,
+  Table,
   Tag,
+  theme,
   Typography,
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
@@ -20,7 +22,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { Mono, PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
-import { formatNumber, formatPercent, formatTimestamp, type Tone } from '../../lib/format.ts';
+import { formatBytes, formatNumber, formatPercent, formatTimestamp, type Tone } from '../../lib/format.ts';
 import { navigate, type ManageTab } from '../router.ts';
 
 const { Text } = Typography;
@@ -43,11 +45,39 @@ interface ServerSummary {
   enabled: number;
 }
 
+interface ResourceSample {
+  ts: number;
+  selfRssBytes: number;
+  childRssBytes: number;
+  childCount: number;
+  totalRssBytes: number;
+  selfCpuPercent: number;
+  childCpuPercent: number;
+  totalCpuPercent: number;
+}
+
+interface ResourceSnapshot {
+  current: ResourceSample | null;
+  series: ResourceSample[];
+  intervalMs: number;
+}
+
+interface BindingActivity {
+  binding: string | null;
+  label: string | null;
+  execSessions: number;
+  inFlightEvals: number;
+  inFlightCalls: number;
+  queuedCalls: number;
+}
+
 interface Snapshot {
   capacity: Record<string, number>;
   pool: PoolCounts;
   sessions: SessionCounts;
   servers: ServerSummary;
+  bindings: BindingActivity[];
+  resources: ResourceSnapshot | null;
 }
 
 interface RuntimeSettings {
@@ -85,8 +115,7 @@ interface GuidanceState {
 const CAPACITY_LABELS: ReadonlyArray<{ key: string; label: string; hint: string }> = [
   { key: 'maxExecSessions', label: '执行会话', hint: '全进程上限' },
   { key: 'maxExecSessionsPerBinding', label: '每 binding 执行会话', hint: '单个客户端身份' },
-  { key: 'maxWorkspacesPerMcpSession', label: '每 MCP 会话 workspace', hint: '单个传输会话' },
-  { key: 'maxServeProcesses', label: 'serve 进程', hint: '必须不小于执行会话上限' },
+  { key: 'maxServeProcesses', label: 'serve 组', hint: '1 组 = keeper + serve，约 2 个进程' },
   { key: 'maxWorkers', label: 'worker', hint: '全进程上限' },
   { key: 'maxInFlightEvalsPerExecSession', label: '每执行会话在飞 eval', hint: '异步派发后释放锁' },
   { key: 'maxInFlightEvalsPerBinding', label: '每 binding 在飞 eval', hint: '跨执行会话总量' },
@@ -515,6 +544,10 @@ export function OverviewPage(): React.ReactElement {
 
       <CapacitySection capacity={capacity} settingsAvailable={settings !== null} />
 
+      <ResourceSection resources={snapshot.resources} />
+
+      <BindingActivitySection bindings={snapshot.bindings} />
+
       {onboarding.allDone ? (
         <Card size="small">
           <Space>
@@ -828,6 +861,304 @@ function CapacitySection({
   );
 }
 
+function ResourceSection({
+  resources,
+}: {
+  resources: ResourceSnapshot | null;
+}): React.ReactElement {
+  const current = resources?.current ?? null;
+  const series = resources?.series ?? [];
+  const intervalSeconds = resources === null ? null : Math.round(resources.intervalMs / 1000);
+  const intervalLabel =
+    intervalSeconds === null || intervalSeconds <= 0
+      ? '不可用'
+      : `每 ${formatNumber(intervalSeconds)} 秒采样 · 保留 30 分钟`;
+
+  return (
+    <Card title="资源" extra={<Tag bordered={false}>{intervalLabel}</Tag>}>
+      <Row gutter={[12, 12]}>
+        <ResourceMetric
+          label="总 RSS"
+          value={current === null ? '—' : formatBytes(current.totalRssBytes)}
+          hint="主进程 + 子进程"
+        />
+        <ResourceMetric
+          label="主进程 RSS"
+          value={current === null ? '—' : formatBytes(current.selfRssBytes)}
+          hint="含 worker_threads"
+        />
+        <ResourceMetric
+          label="子进程 RSS"
+          value={current === null ? '—' : formatBytes(current.childRssBytes)}
+          hint={current === null ? 'keeper / serve / 第三方 server' : `${formatNumber(current.childCount)} 个子进程`}
+        />
+        <ResourceMetric
+          label="总 CPU"
+          value={current === null ? '—' : formatCpu(current.totalCpuPercent)}
+          hint="单核百分比口径"
+        />
+        <ResourceMetric
+          label="主进程 CPU"
+          value={current === null ? '—' : formatCpu(current.selfCpuPercent)}
+          hint="两次采样差值的区间值"
+        />
+        <ResourceMetric
+          label="子进程 CPU"
+          value={current === null ? '—' : formatCpu(current.childCpuPercent)}
+          hint="ps %cpu 之和，非区间瞬时值"
+        />
+      </Row>
+      <Row gutter={[12, 12]} style={{ marginTop: 10 }}>
+        <Col xs={24} xl={12}>
+          <Sparkline
+            label="总 RSS 趋势"
+            samples={series.map((sample) => ({
+              ts: sample.ts,
+              value: sample.totalRssBytes,
+            }))}
+            format={formatBytes}
+          />
+        </Col>
+        <Col xs={24} xl={12}>
+          <Sparkline
+            label="总 CPU 趋势"
+            samples={series.map((sample) => ({
+              ts: sample.ts,
+              value: sample.totalCpuPercent,
+            }))}
+            format={formatCpu}
+          />
+        </Col>
+      </Row>
+    </Card>
+  );
+}
+
+function BindingActivitySection({
+  bindings,
+}: {
+  bindings: readonly BindingActivity[];
+}): React.ReactElement {
+  return (
+    <Card title="实时并发" extra={<Tag bordered={false}>每 5 秒刷新</Tag>}>
+      <Table
+        size="small"
+        rowKey={(row) => row.binding ?? 'unbound'}
+        dataSource={bindings}
+        pagination={false}
+        locale={{ emptyText: '当前没有活跃 binding' }}
+        columns={[
+          {
+            title: 'Binding',
+            dataIndex: 'binding',
+            render: (_value: string | null, row: BindingActivity) =>
+              row.binding === null ? (
+                <Text type="secondary">未绑定</Text>
+              ) : (
+                <Space direction="vertical" size={0}>
+                  <Text>{row.label ?? row.binding}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    <Mono>{row.binding}</Mono>
+                  </Text>
+                </Space>
+              ),
+          },
+          { title: '执行会话', dataIndex: 'execSessions', align: 'right' },
+          { title: '在飞 eval', dataIndex: 'inFlightEvals', align: 'right' },
+          { title: '在飞调用', dataIndex: 'inFlightCalls', align: 'right' },
+          { title: '排队调用', dataIndex: 'queuedCalls', align: 'right' },
+        ]}
+      />
+    </Card>
+  );
+}
+
+function ResourceMetric({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+}): React.ReactElement {
+  return (
+    <Col xs={24} sm={12} xl={8}>
+      <Card size="small" style={{ height: '100%' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {label}
+        </Text>
+        <div
+          style={{
+            fontSize: 22,
+            fontWeight: 650,
+            lineHeight: 1.25,
+            letterSpacing: '-0.02em',
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          {value}
+        </div>
+        <Text type="secondary" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
+          {hint}
+        </Text>
+      </Card>
+    </Col>
+  );
+}
+
+const CHART_WIDTH = 320;
+const CHART_HEIGHT = 120;
+const CHART_MARGIN = { top: 10, right: 10, bottom: 22, left: 46 };
+
+function formatClock(ts: number): string {
+  const date = new Date(ts);
+  const two = (value: number): string => String(value).padStart(2, '0');
+  return `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+}
+
+function Sparkline({
+  label,
+  samples,
+  format,
+}: {
+  label: string;
+  samples: readonly { ts: number; value: number }[];
+  format: (value: number) => string;
+}): React.ReactElement {
+  const { token } = theme.useToken();
+
+  if (samples.length === 0) {
+    return (
+      <Card size="small" title={label}>
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无采样" />
+      </Card>
+    );
+  }
+
+  const values = samples.map((sample) => sample.value);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const padding = (rawMax - rawMin) * 0.08 || Math.max(Math.abs(rawMax) * 0.05, 1);
+  const min = Math.max(0, rawMin - padding);
+  const max = rawMax + padding;
+
+  const plotLeft = CHART_MARGIN.left;
+  const plotTop = CHART_MARGIN.top;
+  const plotWidth = CHART_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
+  const plotHeight = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
+  const plotBottom = plotTop + plotHeight;
+  const xAt = (index: number): number =>
+    samples.length === 1
+      ? plotLeft + plotWidth / 2
+      : plotLeft + (index / (samples.length - 1)) * plotWidth;
+  const yAt = (value: number): number =>
+    plotTop + (1 - (value - min) / (max - min)) * plotHeight;
+
+  const points = samples
+    .map((sample, index) => `${xAt(index).toFixed(1)},${yAt(sample.value).toFixed(1)}`)
+    .join(' ');
+  const yTicks = [max, (min + max) / 2, min];
+  const xTickIndexes = [...new Set([0, Math.floor((samples.length - 1) / 2), samples.length - 1])];
+
+  return (
+    <Card
+      size="small"
+      title={label}
+      extra={
+        <Text type="secondary" style={{ fontSize: 11.5 }}>
+          最大 {format(rawMax)} · 最小 {format(rawMin)}
+        </Text>
+      }
+    >
+      <svg
+        role="img"
+        aria-label={label}
+        viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+        style={{ display: 'block', width: '100%', height: 'auto' }}
+      >
+        {yTicks.map((tick) => (
+          <g key={tick}>
+            <line
+              x1={plotLeft}
+              x2={plotLeft + plotWidth}
+              y1={yAt(tick)}
+              y2={yAt(tick)}
+              stroke={token.colorBorderSecondary}
+              strokeWidth={1}
+              strokeDasharray="3 3"
+              vectorEffect="non-scaling-stroke"
+            />
+            <text
+              x={plotLeft - 6}
+              y={yAt(tick)}
+              textAnchor="end"
+              dominantBaseline="middle"
+              fontSize={8.5}
+              fill={token.colorTextTertiary}
+            >
+              {format(tick)}
+            </text>
+          </g>
+        ))}
+        <line
+          x1={plotLeft}
+          x2={plotLeft}
+          y1={plotTop}
+          y2={plotBottom}
+          stroke={token.colorBorder}
+          strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+        />
+        <line
+          x1={plotLeft}
+          x2={plotLeft + plotWidth}
+          y1={plotBottom}
+          y2={plotBottom}
+          stroke={token.colorBorder}
+          strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+        />
+        {xTickIndexes.map((index) => {
+          const sample = samples[index];
+          if (sample === undefined) return null;
+          return (
+            <text
+              key={index}
+              x={xAt(index)}
+              y={CHART_HEIGHT - 6}
+              textAnchor={
+                samples.length === 1
+                  ? 'middle'
+                  : index === 0
+                    ? 'start'
+                    : index === samples.length - 1
+                      ? 'end'
+                      : 'middle'
+              }
+              fontSize={8.5}
+              fill={token.colorTextTertiary}
+            >
+              {formatClock(sample.ts)}
+            </text>
+          );
+        })}
+        <polyline
+          points={points}
+          fill="none"
+          stroke={token.colorPrimary}
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    </Card>
+  );
+}
+
+function formatCpu(value: number): string {
+  return `${formatNumber(Math.round(value * 10) / 10)}%`;
+}
+
 // ---------------------------------------------------------------------------
 // Attention and onboarding logic
 // ---------------------------------------------------------------------------
@@ -1134,6 +1465,57 @@ function normalizeSnapshot(value: unknown): Snapshot {
       total: numberOrZero(servers['total']),
       enabled: numberOrZero(servers['enabled']),
     },
+    bindings: normalizeBindings(record['bindings']),
+    resources: normalizeResources(record['resources']),
+  };
+}
+
+function normalizeBindings(value: unknown): BindingActivity[] {
+  if (!Array.isArray(value)) return [];
+  const bindings: BindingActivity[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    bindings.push({
+      binding: typeof entry['binding'] === 'string' ? entry['binding'] : null,
+      label: typeof entry['label'] === 'string' ? entry['label'] : null,
+      execSessions: numberOrZero(entry['execSessions']),
+      inFlightEvals: numberOrZero(entry['inFlightEvals']),
+      inFlightCalls: numberOrZero(entry['inFlightCalls']),
+      queuedCalls: numberOrZero(entry['queuedCalls']),
+    });
+  }
+  return bindings;
+}
+
+function normalizeResources(value: unknown): ResourceSnapshot | null {
+  if (!isRecord(value)) return null;
+  const rawSeries = Array.isArray(value['series']) ? value['series'] : [];
+  const series: ResourceSample[] = [];
+  for (const entry of rawSeries) {
+    const sample = normalizeResourceSample(entry);
+    if (sample !== null) series.push(sample);
+  }
+  const current =
+    normalizeResourceSample(value['current']) ??
+    (series.length === 0 ? null : series[series.length - 1] ?? null);
+  return {
+    current,
+    series,
+    intervalMs: numberOrZero(value['intervalMs']),
+  };
+}
+
+function normalizeResourceSample(value: unknown): ResourceSample | null {
+  if (!isRecord(value)) return null;
+  return {
+    ts: numberOrZero(value['ts']),
+    selfRssBytes: numberOrZero(value['selfRssBytes']),
+    childRssBytes: numberOrZero(value['childRssBytes']),
+    childCount: numberOrZero(value['childCount']),
+    totalRssBytes: numberOrZero(value['totalRssBytes']),
+    selfCpuPercent: numberOrZero(value['selfCpuPercent']),
+    childCpuPercent: numberOrZero(value['childCpuPercent']),
+    totalCpuPercent: numberOrZero(value['totalCpuPercent']),
   };
 }
 

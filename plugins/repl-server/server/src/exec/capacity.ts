@@ -16,11 +16,9 @@ import { LIMITS } from '@zhangliang0115/repl-server-core/src/constants.ts';
 export interface CapacityLimits {
   /** Execution sessions across the whole process. Capped by `maxWorkers`. */
   maxExecSessions: number;
-  /** Execution sessions owned by one binding (unbound clients: one MCP session). */
+  /** Execution sessions owned by one binding (unbound clients: one transport id). */
   maxExecSessionsPerBinding: number;
-  /** Workspace bindings inside one MCP session. */
-  maxWorkspacesPerMcpSession: number;
-  /** Serve processes (`claude mcp serve` entries) across the process. */
+  /** Serve groups across the process; one group is a keeper plus `claude mcp serve`. */
   maxServeProcesses: number;
   /** Worker processes across the process; one per execution session. */
   maxWorkers: number;
@@ -37,11 +35,10 @@ export interface CapacityLimits {
 }
 
 export const CAPACITY_DEFAULTS: Readonly<CapacityLimits> = Object.freeze({
-  maxExecSessions: 8,
+  maxExecSessions: 64,
   maxExecSessionsPerBinding: LIMITS.execSessionsPerBinding,
-  maxWorkspacesPerMcpSession: 4,
-  maxServeProcesses: 8,
-  maxWorkers: 8,
+  maxServeProcesses: 64,
+  maxWorkers: 64,
   maxInFlightEvalsPerExecSession: LIMITS.inFlightPerExecSession,
   maxInFlightEvalsPerBinding: LIMITS.inFlightPerBinding,
   maxInFlightCallsPerBindingPerServer: LIMITS.callsPerBindingPerServer,
@@ -52,7 +49,6 @@ export const CAPACITY_DEFAULTS: Readonly<CapacityLimits> = Object.freeze({
 export const CAPACITY_ENV: Readonly<Record<keyof CapacityLimits, string>> = {
   maxExecSessions: 'REPL_CAPACITY_MAX_EXEC_SESSIONS',
   maxExecSessionsPerBinding: 'REPL_CAPACITY_MAX_EXEC_SESSIONS_PER_BINDING',
-  maxWorkspacesPerMcpSession: 'REPL_CAPACITY_MAX_WORKSPACES_PER_MCP_SESSION',
   maxServeProcesses: 'REPL_CAPACITY_MAX_SERVE_PROCESSES',
   maxWorkers: 'REPL_CAPACITY_MAX_WORKERS',
   maxInFlightEvalsPerExecSession: 'REPL_CAPACITY_MAX_IN_FLIGHT_EVALS_PER_EXEC_SESSION',
@@ -165,13 +161,12 @@ export function capacityLimitsFromEnv(
   return resolveCapacityLimitsFromSettings({}, env);
 }
 
-/** `CAPACITY_EXCEEDED` for capacity quotas, `WS_LIMIT` for the workspace quota. */
+/** `CAPACITY_EXCEEDED` for capacity quotas; `WS_LIMIT` belongs to workspace resolution. */
 export type CapacityCode = 'CAPACITY_EXCEEDED' | 'WS_LIMIT';
 
 export type CapacityResource =
   | 'exec_sessions'
   | 'exec_sessions_per_binding'
-  | 'workspaces_per_mcp_session'
   | 'in_flight_evals_per_exec_session'
   | 'in_flight_evals_per_binding'
   | 'serve_processes';

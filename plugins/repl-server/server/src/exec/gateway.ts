@@ -148,6 +148,12 @@ export interface ExecGatewayOptions {
   workspaceFs?: WorkspaceFileSystem;
   /** L1 defaults; tests shrink them. */
   toolTimeouts?: Partial<ToolCallTimeouts>;
+  /**
+   * Wall applied when `timeout` is omitted, so a script that awaits forever
+   * cannot hold an eval slot indefinitely. 0 disables it. Defaults to
+   * `REPL_DEFAULT_MAX_EVAL_MS`, or 0 (no wall) when that is unset.
+   */
+  defaultMaxEvalMs?: number;
   /** L5 overrides; tests shrink the media caps. */
   outputLimits?: Partial<OutputLimits>;
   /** Task table injection; defaults to a private store using `ttlMs`. */
@@ -225,6 +231,29 @@ function toolServer(call: ToolCallRequest): string {
 function runFields(runtime: SessionRuntime, evalId: number): Record<string, unknown> {
   const runId = runtime.runIds.get(evalId);
   return { exec: runtime.record.id, ...(runId === undefined ? {} : { runId }) };
+}
+
+/** Default wall for evals that omit `timeout`; 0 means no wall. */
+const DEFAULT_MAX_EVAL_MS = 0;
+
+/** Resolves the optional wall from an explicit option or `REPL_DEFAULT_MAX_EVAL_MS`. */
+export function resolveDefaultMaxEvalMs(explicit?: number): number {
+  const raw = explicit ?? process.env['REPL_DEFAULT_MAX_EVAL_MS'];
+  if (raw === undefined || raw === '') return DEFAULT_MAX_EVAL_MS;
+  const value = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError('defaultMaxEvalMs must be an integer >= 0');
+  }
+  return value;
+}
+
+/** Applies the default wall only when the request omitted `timeout`. */
+export function resolveDefaultEvalTimeout(
+  explicit: number | undefined,
+  defaultMaxEvalMs: number,
+): number | undefined {
+  if (explicit !== undefined) return explicit;
+  return defaultMaxEvalMs > 0 ? defaultMaxEvalMs : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -435,6 +464,7 @@ export class ExecGateway implements ExecutionGateway {
   private readonly now: () => number;
   private readonly clock: Clock;
   private readonly toolTimeouts: ToolCallTimeouts;
+  private readonly defaultMaxEvalMs: number;
   private readonly outputLimits: Partial<OutputLimits>;
   private readonly workspaceFs: WorkspaceFileSystem | undefined;
   private readonly tasks: TaskStore;
@@ -465,6 +495,7 @@ export class ExecGateway implements ExecutionGateway {
     this.clock = options.clock ?? { now: this.now };
     this.workspaceFs = options.workspaceFs;
     this.toolTimeouts = { ...DEFAULT_TOOL_CALL_TIMEOUTS, ...options.toolTimeouts };
+    this.defaultMaxEvalMs = resolveDefaultMaxEvalMs(options.defaultMaxEvalMs);
     this.outputLimits = options.outputLimits ?? {};
     const limits: Partial<CapacityLimits> = { ...options.limits };
     if (options.maxInFlight !== undefined) limits.maxInFlightEvalsPerExecSession = options.maxInFlight;
@@ -520,8 +551,7 @@ export class ExecGateway implements ExecutionGateway {
 
   /**
    * Reserves one in-flight slot and returns the session runtime. Quotas and
-   * idle LRU eviction live in `ExecSessionRegistry`; `WS_LIMIT` comes from its
-   * per-MCP-session workspace quota.
+   * idle LRU eviction live in `ExecSessionRegistry`.
    */
   private async runtimeFor(
     request: ScriptRequest,
@@ -619,7 +649,7 @@ export class ExecGateway implements ExecutionGateway {
 
   /** Timeout that `runEval` will apply; used to derive the L1 deadline up front. */
   private evalTimeoutFor(request: ScriptRequest): number | undefined {
-    return resolveEvalTimeout(request.timeoutMs);
+    return resolveDefaultEvalTimeout(resolveEvalTimeout(request.timeoutMs), this.defaultMaxEvalMs);
   }
 
   /**
@@ -1056,27 +1086,64 @@ export class ExecGateway implements ExecutionGateway {
     return { sessions: this.execSessions.size, inFlightEvals };
   }
 
+  /** Live per-binding counters; unbound sessions are grouped under `null`. */
+  bindingStats(): Array<{ binding: string | null; execSessions: number; inFlightEvals: number }> {
+    const byBinding = new Map<
+      string,
+      { binding: string | null; execSessions: number; inFlightEvals: number }
+    >();
+    for (const record of this.execSessions.list()) {
+      const key = record.binding ?? '';
+      let entry = byBinding.get(key);
+      if (entry === undefined) {
+        entry = { binding: record.binding, execSessions: 0, inFlightEvals: 0 };
+        byBinding.set(key, entry);
+      }
+      entry.execSessions += 1;
+      entry.inFlightEvals += record.inFlightEvals;
+    }
+    return [...byBinding.values()];
+  }
+
   /**
-   * `DELETE /mcp` / binding deletion: cancels in-flight evals, drops the task
-   * table slice, disposes workers and serve handles, and is idempotent.
-   * `owner` may be a binding id or an MCP session id.
+   * Binding deletion/rotation: cancels in-flight evals, drops the binding's
+   * tasks and disposes every execution session it owns across transports.
    */
   async destroyOwner(owner: string): Promise<void> {
     if (typeof owner !== 'string' || owner === '') return;
+    const targets = this.execSessions.list().filter((record) => record.binding === owner);
+    await this.destroySessions(targets, owner);
+  }
+
+  /**
+   * `DELETE /mcp` / idle transport expiry: tears down the unbound execution
+   * sessions created by one transport and the tasks they own. Bound sessions
+   * and their tasks belong to the binding and stay alive.
+   */
+  async destroyTransport(transportId: string): Promise<void> {
+    if (typeof transportId !== 'string' || transportId === '') return;
     const targets = this.execSessions
       .list()
-      .filter((record) => record.binding === owner || record.mcpSessionId === owner);
+      .filter((record) => record.binding === null && record.mcpSessionId === transportId);
+    await this.destroySessions(targets, transportId);
+  }
+
+  /** Cancels the affected tasks, removes the records and awaits their teardown. */
+  private async destroySessions(
+    targets: ExecSessionRecord<SessionRuntime, unknown>[],
+    taskOwner: string,
+  ): Promise<void> {
     const targetIds = new Set(targets.map((record) => record.id));
 
     // Cancel linked tasks first, so a settling eval cannot flip them to completed.
     for (const [taskId, link] of [...this.taskLinks]) {
-      if (!targetIds.has(link.sessionId) && link.owner !== owner) continue;
+      if (!targetIds.has(link.sessionId) && link.owner !== taskOwner) continue;
       this.tasks.cancel(taskId);
       this.tasks.remove(taskId);
       this.taskLinks.delete(taskId);
       this.taskMedia.delete(taskId);
     }
-    this.tasks.removeOwner(owner);
+    this.tasks.removeOwner(taskOwner);
 
     const teardowns: Promise<void>[] = [];
     for (const record of targets) {
@@ -1184,7 +1251,7 @@ export class ExecGateway implements ExecutionGateway {
     });
   }
 
-  /** Awaited by `destroyOwner`/`disposeAll`; never rejects. */
+  /** Awaited by the destroy methods/`disposeAll`; never rejects. */
   private async teardown(runtime: SessionRuntime, reason: SessionRemovalReason): Promise<void> {
     runtime.filters.clear();
     runtime.bindings.clear();

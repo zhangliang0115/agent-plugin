@@ -1,8 +1,8 @@
 /**
  * Keyed registry of execution sessions.
  *
- * The registry purposefully owns no policy: capacity, LRU eviction and the
- * workspace quota belong to the server layer (plan `srv-07` / `srv-08`). Here a
+ * The registry purposefully owns no policy: capacity limits and LRU eviction
+ * belong to the server layer (plan `srv-07` / `srv-08`). Here a
  * key is opaque — the assembly uses `${mcpSessionId}\u0000${workspace}` — and the
  * only lifecycle operation is "drop it and dispose its worker".
  *

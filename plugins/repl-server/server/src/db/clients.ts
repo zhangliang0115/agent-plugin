@@ -31,7 +31,6 @@ export class WorkspaceError extends Error {
 export interface BindingQuota {
   [key: string]: number | undefined;
   maxExecSessionsPerBinding?: number;
-  maxWorkspacesPerMcpSession?: number;
   maxInFlightEvalsPerBinding?: number;
   maxInFlightCallsPerBindingPerServer?: number;
   maxQueuedCallsPerBindingPerServer?: number;
@@ -264,7 +263,7 @@ function toBinding(row: DbRow): ClientBindingRecord {
     defaultWorkspace: readText(row, 'default_workspace'),
     allowedServers: readNullableStringArray(row, 'allowed_servers_json'),
     allowedTags: readNullableStringArray(row, 'allowed_tags_json'),
-    quota: readNullableObject<BindingQuota>(row, 'quota_json'),
+    quota: normalizeQuota(readNullableObject<BindingQuota>(row, 'quota_json')),
     createdAt: requireText(row, 'created_at'),
     lastSeenAt: readText(row, 'last_seen_at'),
   };
@@ -321,5 +320,13 @@ function requireQuota(value: BindingQuota | null | undefined): BindingQuota | nu
     }
     copy[key] = limit;
   }
+  return normalizeQuota(copy);
+}
+
+/** Drops the retired per-MCP-session workspace quota from stored and incoming rows. */
+function normalizeQuota(quota: BindingQuota | null): BindingQuota | null {
+  if (quota === null) return null;
+  const copy = { ...quota };
+  delete copy['maxWorkspacesPerMcpSession'];
   return copy;
 }

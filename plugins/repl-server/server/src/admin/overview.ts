@@ -2,12 +2,28 @@ import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { adminJson, type AdminHandler } from './servers.ts';
+import type { ResourceSnapshot } from './resources.ts';
+
+export interface BindingActivity {
+  /** Client binding id; `null` groups unbound clients. */
+  binding: string | null;
+  /** Display label from `client_bindings`; null for unbound clients. */
+  label?: string | null;
+  execSessions: number;
+  inFlightEvals: number;
+  inFlightCalls: number;
+  queuedCalls: number;
+}
 
 export interface OverviewSnapshot {
   capacity: Record<string, number>;
   pool: { total: number; ready: number; reconnecting: number; failed: number };
   sessions: { transport: number; exec: number; inFlightEvals: number };
   servers: { total: number; enabled: number };
+  /** Live per-binding counters; optional so existing overview stubs still work. */
+  bindings?: BindingActivity[];
+  /** Process-tree memory/CPU samples; optional so existing overview stubs still work. */
+  resources?: ResourceSnapshot;
 }
 
 export interface AdminOverviewDeps {

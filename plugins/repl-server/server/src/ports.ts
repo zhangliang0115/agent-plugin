@@ -74,6 +74,8 @@ export interface ExecutionGateway {
   getTask(owner: string, taskId: string): Promise<TaskSnapshot | null>;
   cancelTask(owner: string, taskId: string): Promise<boolean>;
   destroyOwner(owner: string): Promise<void>;
+  /** Tears down the unbound execution sessions created through one transport. */
+  destroyTransport(transportId: string): Promise<void>;
 }
 
 /** Catalog snapshot used by search/describe and the script tool surface. */

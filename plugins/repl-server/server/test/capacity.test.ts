@@ -11,15 +11,14 @@ import {
 
 test('frozen defaults match design 03 §2.6 and protocol §8', () => {
   assert.deepEqual(CAPACITY_DEFAULTS, {
-    maxExecSessions: 8,
-    maxExecSessionsPerBinding: 4,
-    maxWorkspacesPerMcpSession: 4,
-    maxServeProcesses: 8,
-    maxWorkers: 8,
-    maxInFlightEvalsPerExecSession: 8,
-    maxInFlightEvalsPerBinding: 16,
-    maxInFlightCallsPerBindingPerServer: 4,
-    maxQueuedCallsPerBindingPerServer: 32,
+    maxExecSessions: 64,
+    maxExecSessionsPerBinding: 64,
+    maxServeProcesses: 64,
+    maxWorkers: 64,
+    maxInFlightEvalsPerExecSession: 64,
+    maxInFlightEvalsPerBinding: 256,
+    maxInFlightCallsPerBindingPerServer: 64,
+    maxQueuedCallsPerBindingPerServer: 256,
     evictIdleMs: 300_000,
   });
   assert.ok(Object.isFrozen(CAPACITY_DEFAULTS));
@@ -29,9 +28,9 @@ test('resolveCapacityLimits merges overrides without mutating defaults', () => {
   const limits = resolveCapacityLimits({ maxExecSessions: 2, evictIdleMs: 0 });
   assert.equal(limits.maxExecSessions, 2);
   assert.equal(limits.evictIdleMs, 0);
-  assert.equal(limits.maxExecSessionsPerBinding, 4);
-  assert.equal(limits.maxInFlightEvalsPerBinding, 16);
-  assert.equal(CAPACITY_DEFAULTS.maxExecSessions, 8);
+  assert.equal(limits.maxExecSessionsPerBinding, 64);
+  assert.equal(limits.maxInFlightEvalsPerBinding, 256);
+  assert.equal(CAPACITY_DEFAULTS.maxExecSessions, 64);
   assert.equal(CAPACITY_DEFAULTS.evictIdleMs, 300_000);
 
   assert.deepEqual(resolveCapacityLimits(), { ...CAPACITY_DEFAULTS });
@@ -49,7 +48,6 @@ test('capacityLimitsFromEnv applies REPL_CAPACITY_* outside production', () => {
   const overridden = capacityLimitsFromEnv({
     REPL_CAPACITY_MAX_EXEC_SESSIONS: '2',
     REPL_CAPACITY_MAX_EXEC_SESSIONS_PER_BINDING: '1',
-    REPL_CAPACITY_MAX_WORKSPACES_PER_MCP_SESSION: '1',
     REPL_CAPACITY_MAX_IN_FLIGHT_EVALS_PER_EXEC_SESSION: '3',
     REPL_CAPACITY_MAX_IN_FLIGHT_EVALS_PER_BINDING: '5',
     REPL_CAPACITY_EVICT_IDLE_MS: '0',
@@ -58,7 +56,6 @@ test('capacityLimitsFromEnv applies REPL_CAPACITY_* outside production', () => {
     ...CAPACITY_DEFAULTS,
     maxExecSessions: 2,
     maxExecSessionsPerBinding: 1,
-    maxWorkspacesPerMcpSession: 1,
     maxInFlightEvalsPerExecSession: 3,
     maxInFlightEvalsPerBinding: 5,
     evictIdleMs: 0,
@@ -100,7 +97,7 @@ test('resolveCapacityLimitsFromSettings merges defaults ← stored ← env', () 
   assert.equal(onlyStored.maxInFlightCallsPerBindingPerServer, 2);
   assert.equal(onlyStored.maxQueuedCallsPerBindingPerServer, 7);
   // Untouched keys keep their defaults.
-  assert.equal(onlyStored.maxWorkspacesPerMcpSession, CAPACITY_DEFAULTS.maxWorkspacesPerMcpSession);
+  assert.equal(onlyStored.maxExecSessionsPerBinding, CAPACITY_DEFAULTS.maxExecSessionsPerBinding);
 
   const envWins = resolveCapacityLimitsFromSettings(stored, {
     REPL_CAPACITY_MAX_EXEC_SESSIONS: '3',
@@ -178,6 +175,15 @@ test('capacityLimitsFromEnv rejects malformed values', () => {
   );
 });
 
+test('retired workspace quota keys are ignored', () => {
+  const limits = resolveCapacityLimitsFromSettings(
+    { capacity: { maxWorkspacesPerMcpSession: 2, maxExecSessions: 5 } },
+    {},
+  );
+  assert.equal(limits.maxExecSessions, 5);
+  assert.equal('maxWorkspacesPerMcpSession' in limits, false);
+});
+
 test('CapacityExceededError carries the protocol payload', () => {
   const error = new CapacityExceededError({
     resource: 'exec_sessions',
@@ -194,15 +200,4 @@ test('CapacityExceededError carries the protocol payload', () => {
   assert.equal(error.scope, 'global');
   assert.match(error.message, /exec_sessions/);
   assert.match(error.message, /global/);
-
-  const workspace = new CapacityExceededError({
-    code: 'WS_LIMIT',
-    resource: 'workspaces_per_mcp_session',
-    current: 4,
-    limit: 4,
-    scope: 'mcp_abc',
-    message: 'workspace limit',
-  });
-  assert.equal(workspace.code, 'WS_LIMIT');
-  assert.equal(workspace.message, 'workspace limit');
 });

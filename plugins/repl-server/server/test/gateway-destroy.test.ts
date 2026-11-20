@@ -35,7 +35,7 @@ function request(code: string, extra: Partial<ScriptRequest> = {}): ScriptReques
   return { code, timeoutMs: 60_000, async: true, identity: IDENTITY, ...extra };
 }
 
-test('destroyOwner cancels in-flight evals, clears tasks and is idempotent', async (t) => {
+test('destroyTransport cancels in-flight evals, clears unbound tasks and is idempotent', async (t) => {
   let arrived = false;
   let aborted = false;
   const closed: string[] = [];
@@ -65,7 +65,7 @@ test('destroyOwner cancels in-flight evals, clears tasks and is idempotent', asy
   await waitFor(() => arrived);
   assert.equal(gateway.stats().inFlightEvals, 1);
 
-  await gateway.destroyOwner(IDENTITY.mcp);
+  await gateway.destroyTransport(IDENTITY.mcp);
   assert.equal(aborted, true);
   assert.deepEqual(gateway.stats(), { sessions: 0, inFlightEvals: 0 });
   assert.deepEqual(closed, ['.']);
@@ -76,7 +76,7 @@ test('destroyOwner cancels in-flight evals, clears tasks and is idempotent', asy
   );
 
   // Idempotent: a second cascade is a no-op.
-  await gateway.destroyOwner(IDENTITY.mcp);
+  await gateway.destroyTransport(IDENTITY.mcp);
   assert.deepEqual(gateway.stats(), { sessions: 0, inFlightEvals: 0 });
 
   // A dispatch after the cascade starts a fresh session.
@@ -88,7 +88,7 @@ test('destroyOwner cancels in-flight evals, clears tasks and is idempotent', asy
   assert.equal(waited.events[0]?.status, 'completed');
 });
 
-test('destroyOwner drops already-consumed tasks of the session too', async (t) => {
+test('destroyTransport keeps bound sessions and tasks; destroyOwner drops them', async (t) => {
   const gateway = createGateway(t);
   const bound = { identity: 'bound' as const, binding: 'cb_x', client: 'test', mcp: 'mcp_x' };
 
@@ -96,22 +96,51 @@ test('destroyOwner drops already-consumed tasks of the session too', async (t) =
   await gateway.waitTasks('cb_x', [dispatched.taskId], 5_000);
   assert.ok((await gateway.getTask('cb_x', dispatched.taskId)) !== null);
 
-  await gateway.destroyOwner('mcp_x');
+  await gateway.destroyTransport('mcp_x');
+  assert.equal(gateway.stats().sessions, 1);
+  assert.ok((await gateway.getTask('cb_x', dispatched.taskId)) !== null);
+
+  await gateway.destroyOwner('cb_x');
+  assert.equal(gateway.stats().sessions, 0);
   assert.equal(await gateway.getTask('cb_x', dispatched.taskId), null);
 });
 
-test('destroyOwner matches a binding across MCP sessions and leaves others alone', async (t) => {
+test('destroyOwner matches a binding across transports and leaves others alone', async (t) => {
   const gateway = createGateway(t);
   const bound = { identity: 'bound' as const, binding: 'cb_work', client: 'test', mcp: 'mcp_1' };
+  const reconnected = { ...bound, mcp: 'mcp_2' };
   const other = { identity: 'bound' as const, binding: 'cb_other', client: 'test', mcp: 'mcp_1' };
 
-  await gateway.runScript(request('return 1;', { identity: bound }));
-  await gateway.runScript(request('return 2;', { identity: bound }));
+  await gateway.runScript(request('state.marker = 1; return 1;', { identity: bound }));
+  const reused = await gateway.runScript(request('return state.marker;', { identity: reconnected }));
+  assert.match(reused.content, /<result>1<\/result>/);
   await gateway.runScript(request('return 3;', { identity: other }));
   assert.equal(gateway.stats().sessions, 2);
 
   await gateway.destroyOwner('cb_work');
   assert.equal(gateway.stats().sessions, 1);
-  await gateway.destroyOwner('mcp_1');
+  // A transport id no longer matches bound sessions.
+  await gateway.destroyTransport('mcp_1');
+  assert.equal(gateway.stats().sessions, 1);
+  await gateway.destroyOwner('cb_other');
   assert.equal(gateway.stats().sessions, 0);
+});
+
+test('destroyTransport drops unbound sessions and their tasks but keeps bound ones', async (t) => {
+  const gateway = createGateway(t);
+  const bound = { identity: 'bound' as const, binding: 'cb_work', client: 'test', mcp: 'mcp_destroy' };
+
+  const unboundTask = await gateway.dispatchScript(request('return 1;'));
+  const boundTask = await gateway.dispatchScript(request('return 2;', { identity: bound }));
+  await gateway.waitTasks(IDENTITY.mcp, [unboundTask.taskId], 5_000);
+  await gateway.waitTasks('cb_work', [boundTask.taskId], 5_000);
+  assert.equal(gateway.stats().sessions, 2);
+
+  await gateway.destroyTransport(IDENTITY.mcp);
+  assert.equal(gateway.stats().sessions, 1);
+  await assert.rejects(
+    gateway.waitTasks(IDENTITY.mcp, [unboundTask.taskId], 1_000),
+    (error: unknown) => (error as { code?: string }).code === 'UNKNOWN_TASK',
+  );
+  assert.ok((await gateway.getTask('cb_work', boundTask.taskId)) !== null);
 });

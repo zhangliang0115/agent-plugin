@@ -49,6 +49,8 @@ export interface PoolGateLimits {
 
 interface BindingQuota {
   readonly key: string;
+  readonly serverId: string;
+  readonly bindingId: string | null;
   running: number;
   readonly waiters: Array<() => void>;
 }
@@ -96,12 +98,12 @@ export class PoolGates {
     });
   }
 
-  /** In-flight limit for one binding x server pair (default 4). */
+  /** In-flight limit for one binding x server pair. */
   get callsPerBinding(): number {
     return this.callsPerBindingValue;
   }
 
-  /** Queue limit for one binding x server pair (default 32). */
+  /** Queue limit for one binding x server pair. */
   get queuedPerBinding(): number {
     return this.queuedPerBindingValue;
   }
@@ -114,6 +116,21 @@ export class PoolGates {
   /** Calls admitted (non-exclusive) and currently executing across all servers. */
   get inFlight(): number {
     return this.serverGates.exclusiveGate.inFlightCount;
+  }
+
+  /** Live per-binding x server counters; idle pairs are removed from the map. */
+  bindingStats(): Array<{
+    binding: string | null;
+    serverId: string;
+    running: number;
+    queued: number;
+  }> {
+    return [...this.quotas.values()].map((quota) => ({
+      binding: quota.bindingId,
+      serverId: quota.serverId,
+      running: quota.running,
+      queued: quota.waiters.length,
+    }));
   }
 
   /** True while an exclusive call holds the gate and new calls are queueing. */
@@ -199,7 +216,7 @@ export class PoolGates {
     const key = `${serverId}\u0000${bindingId ?? ''}`;
     let quota = this.quotas.get(key);
     if (quota === undefined) {
-      quota = { key, running: 0, waiters: [] };
+      quota = { key, serverId, bindingId, running: 0, waiters: [] };
       this.quotas.set(key, quota);
     }
     return quota;

@@ -64,6 +64,7 @@ class FakeGateway implements ExecutionGateway {
   }
 
   async destroyOwner(): Promise<void> {}
+  async destroyTransport(): Promise<void> {}
 }
 
 function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
@@ -342,22 +343,19 @@ test('tasks/cancel reports the terminal state when the eval finishes during the 
   assert.deepEqual(gateway.cancelCalls, [{ owner: 'owner-a', taskId: 'ev_1' }]);
 });
 
-test('McpTaskStore records the creating transport session and clears only that session', () => {
+test('McpTaskStore clears tasks by owner and leaves other owners alone', () => {
   const clock = fakeClock();
   let next = 0;
   const store = new McpTaskStore({ clock, idFactory: () => `t_${(next += 1)}` });
-  const first = store.create('cb_bound', 'ev_1', 'mcp_a');
-  const second = store.create('cb_bound', 'ev_2', 'mcp_b');
-  const legacy = store.create('owner-c', 'ev_3');
+  const first = store.create('cb_bound', 'ev_1');
+  const second = store.create('cb_bound', 'ev_2');
+  store.create('owner-c', 'ev_3');
 
-  assert.equal(store.resolve('cb_bound', first.taskId).transportSessionId, 'mcp_a');
-  assert.equal(store.resolve('owner-c', legacy.taskId).transportSessionId, 'owner-c');
-
-  assert.equal(store.clearSession('mcp_a'), 1);
-  assert.equal(store.size, 2);
+  assert.equal(store.clearOwner('cb_bound'), 2);
+  assert.equal(store.size, 1);
   assert.throws(() => store.resolve('cb_bound', first.taskId), TaskMethodError);
-  assert.equal(store.resolve('cb_bound', second.taskId).evalTaskId, 'ev_2');
-  assert.equal(store.clearSession('owner-c'), 1);
+  assert.throws(() => store.resolve('cb_bound', second.taskId), TaskMethodError);
+  assert.equal(store.resolve('owner-c', 't_3').evalTaskId, 'ev_3');
 });
 
 test('tasks/cancel and tasks/update use the task error codes', async () => {

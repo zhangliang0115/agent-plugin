@@ -6,7 +6,11 @@ import { newId } from '../src/ids.ts';
 
 test('frozen defaults match the design docs', () => {
   assert.equal(LIMITS.syncMs, 5_000);
-  assert.equal(LIMITS.inFlightPerExecSession, 8);
+  assert.equal(LIMITS.inFlightPerExecSession, 64);
+  assert.equal(LIMITS.execSessionsPerBinding, 64);
+  assert.equal(LIMITS.inFlightPerBinding, 256);
+  assert.equal(LIMITS.callsPerBindingPerServer, 64);
+  assert.equal(LIMITS.queuedPerBindingPerServer, 256);
   assert.equal(LIMITS.taskTtlMs, 9_000_000);
 });
 

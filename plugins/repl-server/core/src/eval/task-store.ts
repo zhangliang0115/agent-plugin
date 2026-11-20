@@ -18,14 +18,14 @@ import { newId } from '../ids.ts';
 import type { EvalTaskEvent, FinishedTaskStatus, StructuredToolError, TaskStatus } from '../types.ts';
 
 /**
- * Process-wide retention for the task table. It is deliberately larger than a
- * single execution session's in-flight quota: the table is shared by every
- * owner, and a finished task stays here for `ttlMs`. The default equals
- * `maxExecSessions * maxInFlightEvalsPerExecSession` (8 × 8).
+ * Process-wide retention floor for the task table. It is deliberately larger
+ * than a single execution session's in-flight quota: the table is shared by
+ * every owner, and a finished task stays here for `ttlMs`. The gateway raises
+ * the floor to `maxExecSessions * maxInFlightEvalsPerExecSession`.
  */
 export const DEFAULT_TASK_CAPACITY = 64;
 
-/** Per-owner retention: `maxExecSessionsPerBinding * maxInFlightEvalsPerExecSession` (4 × 8). */
+/** Per-owner retention floor; the gateway raises it to `maxExecSessionsPerBinding * maxInFlightEvalsPerExecSession`. */
 export const DEFAULT_TASK_OWNER_CAPACITY = 32;
 
 /** Time source. Tests inject a manual clock and advance it past the TTL. */

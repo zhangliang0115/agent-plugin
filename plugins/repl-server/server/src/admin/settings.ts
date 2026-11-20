@@ -29,7 +29,6 @@ import {
 export const CAPACITY_KEYS = [
   'maxExecSessions',
   'maxExecSessionsPerBinding',
-  'maxWorkspacesPerMcpSession',
   'maxServeProcesses',
   'maxWorkers',
   'maxInFlightEvalsPerExecSession',
@@ -44,15 +43,14 @@ export type CapacitySettings = Record<CapacityKey, number>;
 
 /** Frozen defaults from 03 §2.6. */
 export const DEFAULT_CAPACITY: CapacitySettings = {
-  maxExecSessions: 8,
-  maxExecSessionsPerBinding: 4,
-  maxWorkspacesPerMcpSession: 4,
-  maxServeProcesses: 8,
-  maxWorkers: 8,
-  maxInFlightEvalsPerExecSession: 8,
-  maxInFlightEvalsPerBinding: 16,
-  maxInFlightCallsPerBindingPerServer: 4,
-  maxQueuedCallsPerBindingPerServer: 32,
+  maxExecSessions: 64,
+  maxExecSessionsPerBinding: 64,
+  maxServeProcesses: 64,
+  maxWorkers: 64,
+  maxInFlightEvalsPerExecSession: 64,
+  maxInFlightEvalsPerBinding: 256,
+  maxInFlightCallsPerBindingPerServer: 64,
+  maxQueuedCallsPerBindingPerServer: 256,
   evictIdleMs: 300_000,
 };
 
@@ -89,7 +87,6 @@ export interface AdminSettingsDeps {
 const MINIMUM: Record<CapacityKey, number> = {
   maxExecSessions: 1,
   maxExecSessionsPerBinding: 1,
-  maxWorkspacesPerMcpSession: 1,
   maxServeProcesses: 1,
   maxWorkers: 1,
   maxInFlightEvalsPerExecSession: 1,

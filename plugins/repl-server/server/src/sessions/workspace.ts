@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ReplError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
-/** Design 03 §2.6 / protocol.md §8: `maxWorkspacesPerMcpSession`. */
+/** Default cap for this helper; no production path wires it in. */
 export const MAX_WORKSPACES_PER_MCP_SESSION = 4;
 
 export type WorkspaceSource = 'explicit' | 'roots' | 'binding' | 'cwd';

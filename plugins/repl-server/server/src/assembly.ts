@@ -2,10 +2,11 @@ import type { Server } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ProcessLedger, newId, type PoolEntry, type ToolCallRequest } from '@zhangliang0115/repl-server-core';
+import { AuditWriter, ProcessLedger, newId, type PoolEntry, type ToolCallRequest } from '@zhangliang0115/repl-server-core';
 
 import { createLog, type LogFn } from './log.ts';
-import { createAdminOverviewHandler } from './admin/overview.ts';
+import { createAdminOverviewHandler, type BindingActivity } from './admin/overview.ts';
+import { createResourceMonitor } from './admin/resources.ts';
 import { createAdminClientsHandler, type McpSessionRecord, type SessionRegistry } from './admin/clients.ts';
 import { createAdminDiscoverHandler } from './admin/discover.ts';
 import { createAdminServersHandler, createOperationLauncher, type AdminOperation, type OperationLauncher } from './admin/servers.ts';
@@ -210,6 +211,21 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     frameMode: 'full',
     onEvent: (event) => {
       auditHub.publish('audit', event);
+    },
+  });
+  // Samples are kept beyond the 30-minute in-memory series for later analysis.
+  const resourceWriter = new AuditWriter({
+    dir: join(dataDir, 'metrics'),
+    filePrefix: 'resource',
+    redact: false,
+  });
+  const resourceMonitor = createResourceMonitor({
+    log,
+    onSample: (sample) => {
+      resourceWriter.write('resource_sample', { ...sample });
+      if (!resourceWriter.healthy) {
+        throw resourceWriter.error ?? new Error('resource writer is unhealthy');
+      }
     },
   });
   const adminSession = createAdminSession({ adminToken: tokens.adminToken });
@@ -797,10 +813,35 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       const pool = poolRuntime.snapshot();
       const gatewayStats = gateway.stats();
       const limits = gateway.sessions.limits;
+      const byBinding = new Map<string, BindingActivity>();
+      const activityFor = (binding: string | null): BindingActivity => {
+        const key = binding ?? '';
+        let entry = byBinding.get(key);
+        if (entry === undefined) {
+          entry = { binding, execSessions: 0, inFlightEvals: 0, inFlightCalls: 0, queuedCalls: 0 };
+          byBinding.set(key, entry);
+        }
+        return entry;
+      };
+      for (const stat of gateway.bindingStats()) {
+        const entry = activityFor(stat.binding);
+        entry.execSessions += stat.execSessions;
+        entry.inFlightEvals += stat.inFlightEvals;
+      }
+      for (const stat of poolRuntime.gates.bindingStats()) {
+        const entry = activityFor(stat.binding);
+        entry.inFlightCalls += stat.running;
+        entry.queuedCalls += stat.queued;
+      }
+      const bindings = [...byBinding.values()]
+        .map((entry) => ({
+          ...entry,
+          label: entry.binding === null ? null : (getClientBinding(db, entry.binding)?.label ?? null),
+        }))
+        .sort((a, b) => (a.binding ?? '').localeCompare(b.binding ?? ''));
       return {
         capacity: {
           maxExecSessions: limits.maxExecSessions,
-          maxWorkspacesPerMcpSession: limits.maxWorkspacesPerMcpSession,
           maxInFlightEvalsPerExecSession: limits.maxInFlightEvalsPerExecSession,
           // Cold keys report what the live components enforce, not the raw row.
           maxServeProcesses: serveRuntime.maxProcesses,
@@ -818,6 +859,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           total: db.prepare('SELECT count(*) AS n FROM servers').get()?.['n'] as number,
           enabled: db.prepare('SELECT count(*) AS n FROM servers WHERE enabled = 1').get()?.['n'] as number,
         },
+        bindings,
+        resources: resourceMonitor.snapshot(),
       };
     },
   });
@@ -865,6 +908,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   });
   publishPoolState();
   alertDispatcher.start();
+  resourceMonitor.start();
 
   let closing = false;
   let closePromise: Promise<void> | null = null;
@@ -923,6 +967,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       closing = true;
       clearInterval(sweepTimer);
       clearInterval(poolStateTimer);
+      resourceMonitor.stop();
       closePromise = (async () => {
         // A sweep that started before `closing` owns the gateway until it ends.
         if (activeSweep !== null) await activeSweep.catch(() => undefined);
@@ -943,6 +988,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           });
         }
         await audit.close();
+        await resourceWriter.close();
         db.close();
       })();
       return closePromise;

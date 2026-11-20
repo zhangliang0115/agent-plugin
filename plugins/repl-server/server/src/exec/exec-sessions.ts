@@ -1,7 +1,11 @@
 /** Execution-session registry: lazy creation, quotas and handle lifecycle.
  *
- * One execution session is keyed by `(Mcp-Session-Id, binding, workspace
- * realpath)` and owns exactly one worker and one serve handle. The registry
+ * An execution session is keyed by `(binding, workspace realpath)` for a bound
+ * client and by `(Mcp-Session-Id, workspace realpath)` for an unbound client.
+ * `mcpSessionId` records the transport that created the session; it is
+ * correlation/diagnostic data only and never identifies a bound session.
+ *
+ * Each session owns exactly one worker and one serve handle. The registry
  * never spawns or terminates anything itself: the executor installs the handles
  * and receives an `onRemove` callback when a record leaves the registry, so
  * worker/serve teardown stays in the executor.
@@ -30,8 +34,9 @@ export type SessionRemovalReason =
 export interface ExecSession<W = unknown, S = unknown> {
   /** `es_...`, unique per process. */
   id: string;
+  /** Transport session that created this record; correlation and diagnostics only. */
   mcpSessionId: string;
-  /** `client_bindings.id`; null for unbound clients. */
+  /** `client_bindings.id`; non-null makes it part of the identity key. */
   binding: string | null;
   /** Self-reported client label, display only. */
   clientLabel: string;
@@ -82,12 +87,14 @@ function describeOwner(binding: string | null, mcpSessionId: string): string {
 }
 
 /**
- * Execution-session key. `binding` participates so two identities that happen
- * to share one `Mcp-Session-Id` (for example a bound and an unbound request on
- * the same transport) never share a JS context (design 03 §2.1–2.2).
+ * Execution-session key. A bound client is identified by `(binding, workspace)`
+ * across transports; an unbound client by `(Mcp-Session-Id, workspace)`. The
+ * owner prefix keeps the two id spaces from colliding (design 03 §2).
  */
 function sessionKey(mcpSessionId: string, binding: string | null, workspace: string): string {
-  return `${mcpSessionId}\u0000${binding ?? ''}\u0000${workspace}`;
+  return binding === null
+    ? `${SESSION_OWNER}${mcpSessionId}\u0000${workspace}`
+    : `${BINDING_OWNER}${binding}\u0000${workspace}`;
 }
 
 function assertRequest(request: SessionRequest): void {
@@ -115,19 +122,19 @@ function deleteFrom(index: Map<string, Set<string>>, key: string, sessionId: str
 /**
  * Registry for execution sessions.
  *
- * Identity (design 03 §2.1): the key is `(Mcp-Session-Id, binding, workspace
- * realpath)`, so an unbound and a bound request on the same transport never
- * share a JS context.
+ * Identity (design 03 §2): a bound client is keyed by `(binding, workspace
+ * realpath)` across transports; an unbound client by `(Mcp-Session-Id,
+ * workspace realpath)`.
  *
  * Quotas (design 03 §2.6):
- * - 8 sessions per process, 4 per binding (unbound clients are bucketed per
- *   MCP session), 4 workspaces per MCP session;
+ * - 64 sessions per process, 64 per binding (unbound clients are bucketed per
+ *   transport id);
  * - 8 in-flight evals per execution session, 16 per binding.
  *
  * Creating a session while the global limit is reached first attempts to evict
  * the least recently used session that has no in-flight eval and has been idle
- * longer than `evictIdleMs`; otherwise it throws `CAPACITY_EXCEEDED`. The
- * workspace quota never evicts, it throws `WS_LIMIT` (protocol §8).
+ * longer than `evictIdleMs`; otherwise it throws `CAPACITY_EXCEEDED`. At the
+ * per-binding limit the same eviction is attempted inside that owner only.
  */
 export class ExecSessionRegistry<W = unknown, S = unknown> {
   private limitsValue: CapacityLimits;
@@ -186,6 +193,7 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     return [...this.sessions.values()];
   }
 
+  /** Sessions created through one transport, bound or unbound (diagnostics). */
   listForMcpSession(mcpSessionId: string): ExecSession<W, S>[] {
     return this.collect(this.byMcpSession.get(mcpSessionId));
   }
@@ -199,10 +207,10 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
   }
 
   /**
-   * Returns the session for `(mcpSessionId, workspace)`, creating it lazily.
-   * Creating enforces the workspace, binding and global quotas. At the global
-   * limit an idle LRU session is evicted when eligible; otherwise this throws
-   * `CapacityExceededError` (`WS_LIMIT` only for the workspace quota).
+   * Returns the session for the request's identity key, creating it lazily.
+   * Creating enforces the binding and global quotas. At either limit an idle
+   * LRU session is evicted when eligible; otherwise this throws
+   * `CapacityExceededError`.
    */
   acquire(request: SessionRequest): ExecSession<W, S> {
     assertRequest(request);
@@ -210,20 +218,9 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     const existing = this.find(request.mcpSessionId, request.workspace, binding);
     if (existing !== undefined) return existing;
 
-    const workspaceCount = this.workspaceCountForMcpSession(request.mcpSessionId);
-    if (workspaceCount >= this.limits.maxWorkspacesPerMcpSession) {
-      throw new CapacityExceededError({
-        code: 'WS_LIMIT',
-        resource: 'workspaces_per_mcp_session',
-        current: workspaceCount,
-        limit: this.limits.maxWorkspacesPerMcpSession,
-        scope: request.mcpSessionId,
-      });
-    }
-
     const ownerKey = ownerKeyFor(binding, request.mcpSessionId);
     const ownerCount = this.byOwner.get(ownerKey)?.size ?? 0;
-    if (ownerCount >= this.limits.maxExecSessionsPerBinding) {
+    if (ownerCount >= this.limits.maxExecSessionsPerBinding && !this.evictLruForOwner(ownerKey)) {
       throw new CapacityExceededError({
         resource: 'exec_sessions_per_binding',
         current: ownerCount,
@@ -270,7 +267,7 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
   }
 
   /**
-   * Reserves one in-flight eval slot for `(mcpSessionId, workspace)`, creating
+   * Reserves one in-flight eval slot for the request's identity key, creating
    * the session lazily and marking it active (`lastEvalAt = now`).
    * Exceeding the per-session or per-binding in-flight quota throws
    * `CAPACITY_EXCEEDED`; callers must not queue.
@@ -336,9 +333,12 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     return this.remove(sessionId, reason) !== undefined;
   }
 
-  /** `DELETE /mcp`: removes every execution session under one transport session. */
-  destroyByMcpSession(mcpSessionId: string, reason: SessionRemovalReason = 'delete'): number {
-    return this.removeMany(this.listForMcpSession(mcpSessionId), reason);
+  /** `DELETE /mcp`: removes the unbound execution sessions created by one transport. */
+  destroyByTransport(transportId: string, reason: SessionRemovalReason = 'delete'): number {
+    const targets = this.collect(this.byMcpSession.get(transportId)).filter(
+      (session) => session.binding === null,
+    );
+    return this.removeMany(targets, reason);
   }
 
   /** Binding deletion/rotation: removes every execution session of one binding. */
@@ -392,18 +392,6 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     return result;
   }
 
-  /** Distinct workspaces bound to one MCP session; the quota counts directories, not identities. */
-  private workspaceCountForMcpSession(mcpSessionId: string): number {
-    const ids = this.byMcpSession.get(mcpSessionId);
-    if (ids === undefined) return 0;
-    const workspaces = new Set<string>();
-    for (const id of ids) {
-      const session = this.sessions.get(id);
-      if (session !== undefined) workspaces.add(session.workspace);
-    }
-    return workspaces.size;
-  }
-
   private inFlightForOwner(ownerKey: string): number {
     const ids = this.byOwner.get(ownerKey);
     if (ids === undefined) return 0;
@@ -416,14 +404,16 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
   }
 
   /**
-   * Evicts the least recently used idle session that has been idle longer than
-   * `evictIdleMs`. Sessions with in-flight evals never qualify. Returns false
-   * when no candidate exists.
+   * Evicts the least recently used idle session among `candidates` that has
+   * been idle longer than `evictIdleMs`. Sessions with in-flight evals never
+   * qualify. Returns false when no candidate exists.
    */
-  private evictLru(): boolean {
+  private evictLru(
+    candidates: Iterable<ExecSession<W, S>> = this.sessions.values(),
+  ): boolean {
     const now = this.clock.now();
     let candidate: ExecSession<W, S> | undefined;
-    for (const session of this.sessions.values()) {
+    for (const session of candidates) {
       if (session.inFlightEvals > 0) continue;
       if (now - session.lastEvalAt <= this.limits.evictIdleMs) continue;
       if (
@@ -437,6 +427,11 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     if (candidate === undefined) return false;
     this.remove(candidate.id, 'capacity_evict');
     return true;
+  }
+
+  /** Capacity eviction restricted to one binding/MCP-session owner. */
+  private evictLruForOwner(ownerKey: string): boolean {
+    return this.evictLru(this.collect(this.byOwner.get(ownerKey)));
   }
 
   private removeMany(targets: ExecSession<W, S>[], reason: SessionRemovalReason): number {

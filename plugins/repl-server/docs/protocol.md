@@ -173,8 +173,10 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 ```
 
 - `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值也没有上限。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。
-- `workspace` 取 realpath 后作为执行会话 key；换 workspace 新建执行会话，变量与 `state` 不继承。
+- `workspace` 取 realpath 后参与执行会话 key：已绑定客户端按 `(binding, workspace)` 识别，跨传输会话复用；未绑定客户端按 `(Mcp-Session-Id, workspace)` 识别。换 workspace 新建执行会话，变量与 `state` 不继承。
 - `visibleTools` 内置工具用裸名，MCP 工具用 `<server>.<tool>`；只收窄，不放大。
+
+**workspace 数量配额**：现代协议无传输会话，按 MCP 会话的 workspace 配额已移除；未绑定客户端仍以传输 id 作为 owner 参与 binding 级配额，但现代客户端每次请求新建传输，因此该配额只对 legacy 客户端有意义。
 
 ### `search_tools`
 
@@ -316,7 +318,6 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 | `INVALID_ARGUMENT` | schema 校验失败、timeout 非正整数、`describe_tools` 超过 10 个名字 |
 | `UNKNOWN_TOOL` | `describe_tools` 的名字未知或对该客户端不可见 |
 | `WS_INVALID` | workspace 不存在或不是目录 |
-| `WS_LIMIT` | 超过每 MCP 会话的 workspace 上限 |
 | `CAPACITY_EXCEEDED` | 执行会话/绑定配额已满且无可淘汰 |
 | `UNKNOWN_TASK` | `wait_tasks` 的 id 不存在 |
 | `ALREADY_CONSUMED` | 同一任务结果被二次收取 |
@@ -348,7 +349,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 |---|---|
 | 路径不存在、Host 不允许、JSON 解析失败 | HTTP 400/403/404 |
 | 未知方法、参数不是对象、批量请求 | JSON-RPC `-32601` / `-32602` / `-32600` |
-| `WS_INVALID`、`WS_LIMIT`、`CAPACITY_EXCEEDED`、`MCP_QUEUE_FULL`、`MCP_CALL_TIMEOUT`、`MCP_CALL_CANCELLED`、`MCP_DISCOVERY_PREPARE_FAILED`、`MCP_DISCOVERY_TOOL_STALE`、工具执行失败 | `CallToolResult` + `isError: true`，正文 `<repl-output><error>` |
+| `WS_INVALID`、`CAPACITY_EXCEEDED`、`MCP_QUEUE_FULL`、`MCP_CALL_TIMEOUT`、`MCP_CALL_CANCELLED`、`MCP_DISCOVERY_PREPARE_FAILED`、`MCP_DISCOVERY_TOOL_STALE`、工具执行失败 | `CallToolResult` + `isError: true`，正文 `<repl-output><error>` |
 | `tasks/get` 未知/过期 | JSON-RPC `-32602`，`data: { code: "TASK_NOT_FOUND" \| "TASK_EXPIRED" }` |
 | 上游（第三方 MCP）返回 `CreateTaskResult` | 第一版不支持，工具层 `UPSTREAM_TASK_UNSUPPORTED` |
 
@@ -356,7 +357,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 **任务归属**：`owner = bindingId ?? mcpSessionId`。绑定客户端按 binding 校验；未绑定客户端只能访问同一 `Mcp-Session-Id` 创建的任务，重连后旧任务不可见（返回 `TASK_NOT_FOUND`）。
 
-**`DELETE /mcp`**：取消该会话所有在飞 eval（task 状态 `cancelled`），终止 worker/serve，删除执行会话的 task store，返回 204；之后 `tasks/get` / `tasks/cancel` 返回 `TASK_NOT_FOUND`。审计 `exec_end.reason = "delete"`。
+**`DELETE /mcp`**：只销毁该传输下**未绑定**的执行会话：取消其所有在飞 eval（task 状态 `cancelled`），终止 worker/serve，删除这些执行会话的 task store，返回 204；之后这些任务 `tasks/get` / `tasks/cancel` 返回 `TASK_NOT_FOUND`。已绑定客户端的执行会话与任务属于 binding，不随传输关闭销毁。审计 `exec_end.reason = "delete"`。
 
 **空闲计时**：传输会话用 `lastRequestAt`（60min）；执行会话用 `lastEvalAt`（60min）；容量 LRU 淘汰看 `lastEvalAt`，且必须无在飞 eval 且超过 `evictIdleMs`（默认 5min）。`tasks/get` / `search_tools` 不更新 `lastEvalAt`。
 

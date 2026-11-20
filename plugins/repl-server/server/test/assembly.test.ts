@@ -463,7 +463,6 @@ test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {
     {
       REPL_ADMIN_TOKEN: ADMIN_TOKEN,
       REPL_CAPACITY_MAX_EXEC_SESSIONS: '3',
-      REPL_CAPACITY_MAX_WORKSPACES_PER_MCP_SESSION: '2',
       REPL_CAPACITY_MAX_IN_FLIGHT_EVALS_PER_EXEC_SESSION: '5',
     },
     async () => {
@@ -475,18 +474,58 @@ test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {
         headers: adminHeaders(),
       });
       assert.equal(response.status, 200);
-      const body = (await response.json()) as { capacity: Record<string, number> };
+      const body = (await response.json()) as {
+        capacity: Record<string, number>;
+        bindings: unknown[];
+        resources: {
+          intervalMs: number;
+          current: {
+            selfRssBytes: number;
+            childRssBytes: number;
+            totalRssBytes: number;
+          } | null;
+        };
+      };
       assert.deepEqual(body.capacity, {
         maxExecSessions: 3,
-        maxWorkspacesPerMcpSession: 2,
         maxInFlightEvalsPerExecSession: 5,
-        maxServeProcesses: 8,
-        maxWorkers: 8,
-        maxInFlightCallsPerBindingPerServer: 4,
-        maxQueuedCallsPerBindingPerServer: 32,
+        maxServeProcesses: 64,
+        maxWorkers: 64,
+        maxInFlightCallsPerBindingPerServer: 64,
+        maxQueuedCallsPerBindingPerServer: 256,
       });
+      assert.deepEqual(body.bindings, []);
+      assert.ok(body.resources.intervalMs > 0);
+      assert.ok(body.resources.current !== null);
+      assert.equal(
+        body.resources.current.totalRssBytes,
+        body.resources.current.selfRssBytes + body.resources.current.childRssBytes,
+      );
     },
   );
+});
+
+test('persists resource samples as daily JSONL', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'repl-resource-'));
+  const app = await startIn(root);
+  try {
+    await app.close();
+    const dir = join(root, 'repl-server', 'metrics');
+    const names = await readdir(dir);
+    const file = names.find((name) => /^resource-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
+    assert.ok(file !== undefined, `metrics files: ${names.join(', ')}`);
+    const lines = (await readFile(join(dir, file), 'utf8'))
+      .trim()
+      .split('\n')
+      .filter((line) => line !== '');
+    assert.ok(lines.length >= 1);
+    const sample = JSON.parse(lines[0] ?? '{}') as Record<string, unknown>;
+    assert.equal(sample['event'], 'resource_sample');
+    assert.equal(typeof sample['ts'], 'string');
+    assert.equal(typeof sample['totalRssBytes'], 'number');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('switching discovery back to static refreshes the catalog', async (t) => {
@@ -997,8 +1036,8 @@ test('a rejected relation change is not written or applied', async (t) => {
         settings: { capacity: Record<string, number> };
       };
       assert.equal(body.revision, revision, 'a rejected PATCH must not bump the revision');
-      assert.equal(body.settings.capacity['maxServeProcesses'], 8);
-      assert.equal(app.assembly.capacity().maxServeProcesses, 8);
+      assert.equal(body.settings.capacity['maxServeProcesses'], 64);
+      assert.equal(app.assembly.capacity().maxServeProcesses, 64);
     } finally {
       await app.close();
     }

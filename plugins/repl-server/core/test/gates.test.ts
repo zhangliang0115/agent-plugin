@@ -27,8 +27,8 @@ test('defaults come from the frozen LIMITS and the 30s exclusive timeout', () =>
   const gates = new ServerGates();
   assert.equal(gates.callsPerBinding, LIMITS.callsPerBindingPerServer);
   assert.equal(gates.queuedPerBinding, LIMITS.queuedPerBindingPerServer);
-  assert.equal(LIMITS.callsPerBindingPerServer, 4);
-  assert.equal(LIMITS.queuedPerBindingPerServer, 32);
+  assert.equal(LIMITS.callsPerBindingPerServer, 64);
+  assert.equal(LIMITS.queuedPerBindingPerServer, 256);
   assert.equal(gates.exclusiveGate.timeoutMs, EXCLUSIVE_TIMEOUT_MS);
   assert.equal(EXCLUSIVE_TIMEOUT_MS, 30_000);
 });

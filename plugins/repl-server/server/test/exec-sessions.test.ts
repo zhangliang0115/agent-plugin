@@ -22,7 +22,7 @@ class ManualClock implements Clock {
 }
 
 interface ExpectedCapacity {
-  code?: 'CAPACITY_EXCEEDED' | 'WS_LIMIT';
+  code?: 'CAPACITY_EXCEEDED';
   resource: CapacityResource;
   current: number;
   limit: number;
@@ -41,7 +41,7 @@ function expectCapacityError(fn: () => unknown, expected: ExpectedCapacity): voi
   });
 }
 
-test('creates one execution session per (Mcp-Session-Id, workspace) lazily', () => {
+test('creates one execution session per (Mcp-Session-Id, workspace) for an unbound client lazily', () => {
   const clock = new ManualClock();
   const registry = new ExecSessionRegistry({ clock });
 
@@ -84,7 +84,7 @@ test('creates one execution session per (Mcp-Session-Id, workspace) lazily', () 
   );
 });
 
-test('the session key includes the binding, so identities never share a record', () => {
+test('the session key keeps bound and unbound identities apart', () => {
   const clock = new ManualClock();
   const registry = new ExecSessionRegistry({ clock });
 
@@ -99,9 +99,50 @@ test('the session key includes the binding, so identities never share a record',
   assert.equal(registry.find('mcp_a', '/repo', 'cb_work'), bound);
   assert.equal(registry.find('mcp_a', '/repo', 'cb_other'), undefined);
 
-  // Both records still belong to the same transport session and are destroyed together.
-  assert.equal(registry.destroyByMcpSession('mcp_a'), 2);
+  // The transport cascade only removes the unbound record; the bound one
+  // belongs to its binding and survives the transport.
+  assert.equal(registry.destroyByTransport('mcp_a'), 1);
+  assert.equal(registry.find('mcp_a', '/repo', 'cb_work'), bound);
+  assert.equal(registry.destroyByBinding('cb_work'), 1);
   assert.equal(registry.size, 0);
+});
+
+test('a bound client reuses one session per (binding, workspace) across transports', () => {
+  const registry = new ExecSessionRegistry({ clock: new ManualClock() });
+
+  const first = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/repo', binding: 'cb_work' });
+  const second = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/repo', binding: 'cb_work' });
+  assert.equal(second, first);
+  assert.equal(first.mcpSessionId, 'mcp_a');
+  assert.equal(registry.countForBinding('cb_work'), 1);
+
+  const otherWorkspace = registry.acquire({
+    mcpSessionId: 'mcp_b',
+    workspace: '/other',
+    binding: 'cb_work',
+  });
+  assert.notEqual(otherWorkspace, first);
+  assert.equal(registry.find('mcp_a', '/other', 'cb_work'), otherWorkspace);
+  assert.equal(registry.countForBinding('cb_work'), 2);
+
+  const otherBinding = registry.acquire({
+    mcpSessionId: 'mcp_b',
+    workspace: '/repo',
+    binding: 'cb_other',
+  });
+  assert.notEqual(otherBinding, first);
+  assert.equal(registry.size, 3);
+});
+
+test('unbound sessions stay isolated per Mcp-Session-Id', () => {
+  const registry = new ExecSessionRegistry({ clock: new ManualClock() });
+
+  const a = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/repo' });
+  const b = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/repo' });
+  assert.notEqual(a, b);
+  assert.equal(registry.size, 2);
+  assert.equal(registry.find('mcp_a', '/repo'), a);
+  assert.equal(registry.find('mcp_b', '/repo'), b);
 });
 
 test('records binding and client label; idFactory is injectable', () => {
@@ -139,30 +180,54 @@ test('rejects duplicate ids coming from an injectable idFactory', () => {
   assert.equal(registry.size, 1);
 });
 
-test('caps workspaces per MCP session at 4 with WS_LIMIT', () => {
+test('does not cap workspaces per MCP session', () => {
   const registry = new ExecSessionRegistry({ clock: new ManualClock() });
 
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     registry.acquire({ mcpSessionId: 'mcp_a', workspace: `/w${index}` });
   }
+  assert.equal(registry.size, 5);
+  assert.equal(registry.countForMcpSession('mcp_a'), 5);
+  assert.equal(registry.listForMcpSession('mcp_a').length, 5);
+
+  // Another transport only shares the global execution-session limit.
+  registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/w0' });
+  assert.equal(registry.size, 6);
+});
+
+test('unbound clients keep the per-owner execution-session quota', () => {
+  const registry = new ExecSessionRegistry({
+    clock: new ManualClock(),
+    limits: { maxExecSessionsPerBinding: 3 },
+  });
+
+  for (let index = 0; index < 3; index += 1) {
+    registry.acquire({ mcpSessionId: 'mcp_a', workspace: `/b${index}`, binding: 'cb_work' });
+  }
+  assert.equal(registry.countForBinding('cb_work'), 3);
+
+  for (let index = 0; index < 3; index += 1) {
+    registry.acquire({ mcpSessionId: 'mcp_a', workspace: `/u${index}` });
+  }
   expectCapacityError(
-    () => registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/w4' }),
+    () => registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/u3' }),
     {
-      code: 'WS_LIMIT',
-      resource: 'workspaces_per_mcp_session',
-      current: 4,
-      limit: 4,
-      scope: 'mcp_a',
+      resource: 'exec_sessions_per_binding',
+      current: 3,
+      limit: 3,
+      scope: 'mcp:mcp_a',
     },
   );
 
-  // Another MCP session has its own workspace budget.
-  registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/w4' });
-  assert.equal(registry.size, 5);
+  // Another transport has its own owner bucket.
+  registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/u3' });
 });
 
 test('caps execution sessions per binding at 4 across MCP sessions', () => {
-  const registry = new ExecSessionRegistry({ clock: new ManualClock() });
+  const registry = new ExecSessionRegistry({
+    clock: new ManualClock(),
+    limits: { maxExecSessionsPerBinding: 4 },
+  });
 
   for (let index = 0; index < 2; index += 1) {
     registry.acquire({ mcpSessionId: 'mcp_a', workspace: `/a${index}`, binding: 'cb_work' });
@@ -183,6 +248,30 @@ test('caps execution sessions per binding at 4 across MCP sessions', () => {
   registry.acquire({ mcpSessionId: 'mcp_c', workspace: '/c', binding: 'cb_other' });
   assert.equal(registry.countForBinding('cb_other'), 1);
   assert.equal(registry.size, 5);
+});
+
+test('evicts the idle LRU session inside one binding at its quota', () => {
+  const clock = new ManualClock();
+  const registry = new ExecSessionRegistry({
+    clock,
+    limits: { maxExecSessionsPerBinding: 2, evictIdleMs: 60_000 },
+  });
+
+  const other = registry.acquire({ mcpSessionId: 'mcp_o', workspace: '/o', binding: 'cb_other' });
+  clock.advance(10_000);
+  const a = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/a', binding: 'cb_work' });
+  clock.advance(10_000);
+  const b = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/b', binding: 'cb_work' });
+  clock.advance(60_001);
+
+  const c = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/c', binding: 'cb_work' });
+
+  // `other` is globally older but belongs to another binding and must survive.
+  assert.equal(registry.get(other.id), other);
+  assert.equal(registry.get(a.id), undefined);
+  assert.equal(registry.get(b.id), b);
+  assert.equal(registry.get(c.id), c);
+  assert.equal(registry.countForBinding('cb_work'), 2);
 });
 
 test('unbound sessions are bucketed per MCP session for the binding quota', () => {
@@ -209,7 +298,10 @@ test('unbound sessions are bucketed per MCP session for the binding quota', () =
 });
 
 test('caps execution sessions per process at 8 when nothing can be evicted', () => {
-  const registry = new ExecSessionRegistry({ clock: new ManualClock() });
+  const registry = new ExecSessionRegistry({
+    clock: new ManualClock(),
+    limits: { maxExecSessions: 8 },
+  });
 
   for (const mcpSessionId of ['mcp_a', 'mcp_b']) {
     for (let index = 0; index < 4; index += 1) {
@@ -419,7 +511,7 @@ test('tracks worker and serve handles with a rebuild epoch', () => {
   assert.throws(() => registry.detachServe(session), /not registered/);
 });
 
-test('destroys sessions by id, MCP session, binding and shutdown', () => {
+test('destroys sessions by id, transport, binding and shutdown', () => {
   const clock = new ManualClock();
   const events: string[] = [];
   const registry = new ExecSessionRegistry({
@@ -428,22 +520,22 @@ test('destroys sessions by id, MCP session, binding and shutdown', () => {
   });
 
   const a = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/a', binding: 'cb_a' });
-  const b = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/b', binding: 'cb_a' });
+  const b = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/b', binding: 'cb_a' });
   const c = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/c', binding: 'cb_b' });
   const d = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/d' });
 
-  assert.equal(registry.destroyByMcpSession('mcp_missing'), 0);
-  assert.equal(registry.destroyByMcpSession('mcp_a'), 2);
-  assert.deepEqual(events, [`delete:${a.id}`, `delete:${b.id}`]);
-  assert.equal(registry.size, 2);
+  assert.equal(registry.destroyByTransport('mcp_missing'), 0);
+  assert.equal(registry.destroyByTransport('mcp_b'), 1);
+  assert.deepEqual(events, [`delete:${d.id}`]);
+  assert.equal(registry.size, 3);
 
-  assert.equal(registry.destroyByBinding('cb_b'), 1);
-  assert.deepEqual(events.slice(2), [`binding_deleted:${c.id}`]);
-  assert.equal(registry.get(d.id), d);
+  assert.equal(registry.destroyByBinding('cb_a'), 2);
+  assert.deepEqual(events.slice(1), [`binding_deleted:${a.id}`, `binding_deleted:${b.id}`]);
+  assert.equal(registry.get(c.id), c);
 
-  assert.equal(registry.destroySession(d.id), true);
-  assert.equal(registry.destroySession(d.id), false);
-  assert.equal(events.at(-1), `delete:${d.id}`);
+  assert.equal(registry.destroySession(c.id), true);
+  assert.equal(registry.destroySession(c.id), false);
+  assert.equal(events.at(-1), `delete:${c.id}`);
   assert.equal(registry.size, 0);
 
   const again = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/d' });
@@ -451,6 +543,20 @@ test('destroys sessions by id, MCP session, binding and shutdown', () => {
   assert.equal(registry.destroyAll('shutdown'), 1);
   assert.equal(events.at(-1), `shutdown:${again.id}`);
   assert.equal(registry.size, 0);
+});
+
+test('destroyByTransport leaves bound sessions of the same transport alive', () => {
+  const registry = new ExecSessionRegistry({ clock: new ManualClock() });
+
+  const unbound = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/u' });
+  const bound = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/b', binding: 'cb_work' });
+  const otherTransport = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/u' });
+
+  assert.equal(registry.destroyByTransport('mcp_a'), 1);
+  assert.equal(registry.get(unbound.id), undefined);
+  assert.equal(registry.get(bound.id), bound);
+  assert.equal(registry.get(otherTransport.id), otherTransport);
+  assert.equal(registry.destroyByTransport('mcp_a'), 0);
 });
 
 test('rejects empty identifiers before touching quota state', () => {

@@ -393,7 +393,7 @@ test('client bindings hash tokens, resolve workspaces and round-trip quotas', (t
     defaultWorkspace: link,
     allowedServers: ['pg'],
     allowedTags: ['db', 'read'],
-    quota: { maxExecSessionsPerBinding: 2, maxWorkspacesPerMcpSession: 3 },
+    quota: { maxExecSessionsPerBinding: 2 },
   });
   assert.equal(created.token, 'plain-token');
   assert.equal(created.binding.tokenHash, hashToken('plain-token'));
@@ -406,7 +406,6 @@ test('client bindings hash tokens, resolve workspaces and round-trip quotas', (t
   assert.deepEqual(created.binding.allowedTags, ['db', 'read']);
   assert.deepEqual(created.binding.quota, {
     maxExecSessionsPerBinding: 2,
-    maxWorkspacesPerMcpSession: 3,
   });
 
   assert.equal(findBindingByToken(db, 'plain-token')?.id, created.binding.id);
@@ -480,6 +479,24 @@ test('client binding validation rejects bad workspaces and quotas', (t) => {
     DbValidationError,
   );
   assert.equal(listClientBindings(db).length, 0);
+});
+
+test('legacy per-MCP-session workspace quota is dropped on read and write', (t) => {
+  const { db } = fixture(t);
+  const created = createClientBinding(db, {
+    label: 'Legacy',
+    token: 'legacy-token',
+    quota: { maxExecSessionsPerBinding: 2, maxWorkspacesPerMcpSession: 3 },
+  });
+  assert.deepEqual(created.binding.quota, { maxExecSessionsPerBinding: 2 });
+
+  db.prepare('UPDATE client_bindings SET quota_json = ? WHERE id = ?').run(
+    JSON.stringify({ maxExecSessionsPerBinding: 2, maxWorkspacesPerMcpSession: 3 }),
+    created.binding.id,
+  );
+  assert.deepEqual(getClientBinding(db, created.binding.id)?.quota, {
+    maxExecSessionsPerBinding: 2,
+  });
 });
 
 test('settings round-trip JSON values and bump the catalog revision', (t) => {

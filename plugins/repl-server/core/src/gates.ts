@@ -28,9 +28,9 @@ export interface ExclusiveGateOptions {
 }
 
 export interface ServerGatesOptions {
-  /** Calls in flight per binding x server. Defaults to `LIMITS.callsPerBindingPerServer` (4). */
+  /** Calls in flight per binding x server. Defaults to `LIMITS.callsPerBindingPerServer`. */
   callsPerBinding?: number;
-  /** Calls waiting per binding x server. Defaults to `LIMITS.queuedPerBindingPerServer` (32). */
+  /** Calls waiting per binding x server. Defaults to `LIMITS.queuedPerBindingPerServer`. */
   queuedPerBinding?: number;
   /** Max wait to become exclusive. Defaults to `EXCLUSIVE_TIMEOUT_MS` (30s). */
   exclusiveTimeoutMs?: number;

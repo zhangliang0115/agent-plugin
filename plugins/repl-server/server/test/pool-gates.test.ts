@@ -21,13 +21,32 @@ function isCode(code: string): (error: unknown) => boolean {
   };
 }
 
-test('pool gates use the frozen 4/32 limits and the 30s exclusive timeout', () => {
+test('pool gates use the frozen defaults and the 30s exclusive timeout', () => {
   const gates = new PoolGates();
-  assert.equal(gates.callsPerBinding, 4);
-  assert.equal(gates.queuedPerBinding, 32);
+  assert.equal(gates.callsPerBinding, 64);
+  assert.equal(gates.queuedPerBinding, 256);
   assert.equal(gates.exclusiveGate.timeoutMs, 30_000);
   assert.equal(gates.inFlight, 0);
   assert.equal(gates.admissionClosed, false);
+});
+
+test('bindingStats reports live running and queued calls per binding x server', async () => {
+  const gates = new PoolGates({ callsPerBinding: 1, queuedPerBinding: 2 });
+  const release = deferred();
+  const running = gates.run('srv', 'cb_a', 'parallel', async () => {
+    await release.promise;
+  });
+  await tick();
+  const queued = gates.run('srv', 'cb_a', 'parallel', async () => undefined);
+  await tick();
+
+  assert.deepEqual(gates.bindingStats(), [
+    { binding: 'cb_a', serverId: 'srv', running: 1, queued: 1 },
+  ]);
+
+  release.resolve();
+  await Promise.all([running, queued]);
+  assert.deepEqual(gates.bindingStats(), []);
 });
 
 test('parallel calls share the per-server read lock and overlap', async () => {
@@ -104,7 +123,7 @@ test('one server serialized does not block another server', async () => {
 });
 
 test('a binding x server allows 4 in flight and starts the fifth when one finishes', async () => {
-  const gates = new PoolGates();
+  const gates = new PoolGates({ callsPerBinding: 4, queuedPerBinding: 32 });
   let active = 0;
   let peak = 0;
   const releases: Array<() => void> = [];

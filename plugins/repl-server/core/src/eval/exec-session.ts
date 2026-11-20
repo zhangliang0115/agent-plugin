@@ -170,7 +170,7 @@ export interface ExecSessionLimits {
   graceMs: number;
   /** `worker.terminate()` budget. Defaults to `LIMITS.terminateMs`. */
   terminateMs: number;
-  /** In-flight evals per execution session. Defaults to `LIMITS.inFlightPerExecSession` (8). */
+  /** In-flight evals per execution session. Defaults to `LIMITS.inFlightPerExecSession`. */
   inFlightLimit: number;
 }
 

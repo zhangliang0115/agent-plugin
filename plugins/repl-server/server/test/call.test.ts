@@ -116,6 +116,7 @@ class FakeGateway implements ExecutionGateway {
   }
 
   async destroyOwner(): Promise<void> {}
+  async destroyTransport(): Promise<void> {}
 }
 
 interface Harness {

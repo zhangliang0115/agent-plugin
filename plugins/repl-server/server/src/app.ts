@@ -9,7 +9,6 @@ import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
 import type { ReportService } from './reports/service.ts';
 import type { TransportSessionRegistry } from './sessions/transport.ts';
 import type { McpTaskStore } from './tasks/mcp-tasks.ts';
-import { withTransportSession } from './tasks/mcp-tasks.ts';
 import { VERSION } from '@zhangliang0115/repl-server-core';
 
 export interface McpContext {
@@ -183,10 +182,11 @@ export function createApp(options: AppOptions): Server {
         const session = options.sessions.create(method === 'initialize' ? 'legacy' : 'modern', {
           onClose: async (reason) => {
             log(`transport closed (${reason})`, { scope: 'mcp', mcp: session.id });
-            // DELETE /mcp and idle expiry both land here: drop the exec
-            // sessions, their workers/serve handles and this session's tasks.
-            await options.gateway.destroyOwner(session.id);
-            options.tasks.clearSession(session.id);
+            // DELETE /mcp and idle expiry both land here: drop the transport's
+            // unbound exec sessions, their workers/serve handles and tasks.
+            // Bound clients keep their execution sessions across transports.
+            await options.gateway.destroyTransport(session.id);
+            options.tasks.clearOwner(session.id);
           },
         });
         transportId = session.id;
@@ -198,6 +198,18 @@ export function createApp(options: AppOptions): Server {
         }
         transportId = session.id;
       }
+
+      // A client that aborts the HTTP request closes the response before the
+      // server ends it; log it so cancellation behavior can be observed.
+      res.on('close', () => {
+        if (res.writableEnded) return;
+        log('response closed before completion', {
+          level: 'warn',
+          scope: 'mcp',
+          mcp: transportId,
+          method: method ?? 'unknown',
+        });
+      });
 
       const info = parseClientInfo(message);
       const authorization = req.headers.authorization ?? null;
@@ -246,12 +258,8 @@ export function createApp(options: AppOptions): Server {
         ...(options.reports === undefined ? {} : { reports: options.reports }),
       };
 
-      // Task mappings record the creating transport session here, so the
-      // DELETE cascade can find bound tasks whose owner is the binding id.
       const started = Date.now();
-      const response = await withTransportSession(transportId, () =>
-        options.dispatcher.handle(message, context),
-      );
+      const response = await options.dispatcher.handle(message, context);
       log(`mcp ${method ?? 'notification'} -> ${response === null ? 202 : 200}`, {
         scope: 'mcp',
         mcp: transportId,

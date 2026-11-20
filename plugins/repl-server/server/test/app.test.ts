@@ -8,7 +8,7 @@ import { createApp, type AppOptions, type McpContext } from '../src/app.ts';
 import { JsonRpcDispatcher } from '../src/mcp/jsonrpc.ts';
 import { createMethodTable } from '../src/mcp/methods.ts';
 import { TransportSessionRegistry } from '../src/sessions/transport.ts';
-import { McpTaskStore, ownerOf, TaskMethodError } from '../src/tasks/mcp-tasks.ts';
+import { McpTaskStore, ownerOf } from '../src/tasks/mcp-tasks.ts';
 import type { Catalog, ExecutionGateway } from '../src/ports.ts';
 
 const gateway: ExecutionGateway = {
@@ -18,6 +18,7 @@ const gateway: ExecutionGateway = {
   getTask: async () => null,
   cancelTask: async () => false,
   destroyOwner: async () => undefined,
+  destroyTransport: async () => undefined,
 };
 
 const catalog: Catalog = { snapshot: () => ({ revision: 1, tools: [] }) };
@@ -223,23 +224,16 @@ test('/health and /mcp reject a non-local Host header with 403', async (t) => {
   assert.equal(local.status, 200);
 });
 
-test('DELETE /mcp cascades execution sessions and task cleanup', async (t) => {
+test('DELETE /mcp destroys the transport scope', async (t) => {
   const destroyed: string[] = [];
-  const cleared: string[] = [];
-  const tasks = new McpTaskStore();
-  const clearSession = tasks.clearSession.bind(tasks);
-  tasks.clearSession = (sessionId: string): number => {
-    cleared.push(sessionId);
-    return clearSession(sessionId);
-  };
   const scopedGateway: ExecutionGateway = {
     ...gateway,
-    destroyOwner: async (owner: string) => {
-      destroyed.push(owner);
+    destroyTransport: async (transportId: string) => {
+      destroyed.push(transportId);
     },
   };
 
-  const { server, base } = await listen({ gateway: scopedGateway, tasks });
+  const { server, base } = await listen({ gateway: scopedGateway });
   t.after(() => server.close());
 
   const discover = await rpc(base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
@@ -250,31 +244,22 @@ test('DELETE /mcp cascades execution sessions and task cleanup', async (t) => {
   });
   assert.equal(deleted.status, 204);
   assert.deepEqual(destroyed, [session]);
-  assert.deepEqual(cleared, [session]);
 
   const afterDelete = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
   assert.equal(afterDelete.status, 404);
 });
 
-test('idle transport expiry runs the same cascade', async (t) => {
+test('idle transport expiry runs the same transport cascade', async (t) => {
   const destroyed: string[] = [];
-  const cleared: string[] = [];
-  const tasks = new McpTaskStore();
-  const clearSession = tasks.clearSession.bind(tasks);
-  tasks.clearSession = (sessionId: string): number => {
-    cleared.push(sessionId);
-    return clearSession(sessionId);
-  };
   const scopedGateway: ExecutionGateway = {
     ...gateway,
-    destroyOwner: async (owner: string) => {
-      destroyed.push(owner);
+    destroyTransport: async (transportId: string) => {
+      destroyed.push(transportId);
     },
   };
 
   const { server, base } = await listen({
     gateway: scopedGateway,
-    tasks,
     sessions: new TransportSessionRegistry({ idleMs: 10 }),
   });
   t.after(() => server.close());
@@ -286,10 +271,9 @@ test('idle transport expiry runs the same cascade', async (t) => {
   const expired = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, session);
   assert.equal(expired.status, 404);
   assert.deepEqual(destroyed, [session]);
-  assert.deepEqual(cleared, [session]);
 });
 
-test('DELETE /mcp clears only the bound tasks created through that transport session', async (t) => {
+test('DELETE /mcp keeps tasks owned by a binding', async (t) => {
   let next = 0;
   const tasks = new McpTaskStore({ idFactory: () => `t_${(next += 1)}` });
   const boundDispatcher = new JsonRpcDispatcher<McpContext>();
@@ -306,12 +290,15 @@ test('DELETE /mcp clears only the bound tasks created through that transport ses
   t.after(() => server.close());
 
   const auth = { authorization: 'Bearer client-token' };
-  const createTask = async (id: number): Promise<{ session: string; taskId: string }> => {
+  const createTask = async (
+    id: number,
+    headers: Record<string, string> = auth,
+  ): Promise<{ session: string; taskId: string }> => {
     const response = await rpc(
       base,
       { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'run_script', arguments: {} } },
       undefined,
-      auth,
+      headers,
     );
     const session = response.headers.get('mcp-session-id') ?? '';
     const body = (await response.json()) as { result: { taskId: string } };
@@ -328,8 +315,21 @@ test('DELETE /mcp clears only the bound tasks created through that transport ses
   });
   assert.equal(deleted.status, 204);
 
-  assert.throws(() => tasks.resolve('cb_bound', first.taskId), TaskMethodError);
+  // Both transports created tasks under the same binding; neither is dropped
+  // by DELETE /mcp, which only tears down unbound execution sessions.
+  assert.equal(tasks.resolve('cb_bound', first.taskId).evalTaskId, `ev_${first.session}`);
   assert.equal(tasks.resolve('cb_bound', second.taskId).evalTaskId, `ev_${second.session}`);
+
+  // An unbound task's owner is its transport, so that transport's DELETE
+  // removes the mapping.
+  const unbound = await createTask(3, {});
+  assert.equal(tasks.get(unbound.taskId)?.owner, unbound.session);
+  const unboundDeleted = await fetch(`${base}/mcp`, {
+    method: 'DELETE',
+    headers: { 'mcp-session-id': unbound.session },
+  });
+  assert.equal(unboundDeleted.status, 204);
+  assert.equal(tasks.get(unbound.taskId), undefined);
 });
 
 test('server/discover rejects an unsupported pinned protocol version over HTTP', async (t) => {

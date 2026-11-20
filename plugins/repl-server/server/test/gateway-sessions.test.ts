@@ -82,29 +82,54 @@ test('a missing workspace or a file path is WS_INVALID', async (t) => {
   assert.equal(gateway.stats().sessions, 0);
 });
 
-test('a fifth workspace for one MCP session is WS_LIMIT', async (t) => {
+test('workspaces per MCP session are not capped; owner and global quotas still apply', async (t) => {
   const gateway = createGateway(t, { workspaceFs: virtualFs });
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     const outcome = await gateway.runScript(request('return 1;', { workspace: `/ws/${index}` }));
     assert.equal(outcome.isError, false, outcome.content);
   }
-  await assert.rejects(
-    gateway.runScript(request('return 1;', { workspace: '/ws/4' })),
-    (error: unknown) =>
-      (error as { code?: string }).code === 'WS_LIMIT' &&
-      (error as { limit?: number }).limit === 4,
-  );
-  assert.equal(gateway.stats().sessions, 4);
+  assert.equal(gateway.stats().sessions, 5);
 
-  // Another MCP session has its own four-workspace budget.
-  const other = await gateway.runScript(
-    request('return 1;', { workspace: '/ws/4', identity: identity({ mcp: 'mcp_b' }) }),
+  const ownerCapped = createGateway(t, {
+    workspaceFs: virtualFs,
+    limits: { maxExecSessionsPerBinding: 4 },
+  });
+  for (let index = 0; index < 4; index += 1) {
+    const outcome = await ownerCapped.runScript(
+      request('return 1;', { workspace: `/owner/${index}` }),
+    );
+    assert.equal(outcome.isError, false, outcome.content);
+  }
+  await assert.rejects(
+    ownerCapped.runScript(request('return 1;', { workspace: '/owner/4' })),
+    (error: unknown) =>
+      (error as { code?: string }).code === 'CAPACITY_EXCEEDED' &&
+      (error as { resource?: string }).resource === 'exec_sessions_per_binding',
   );
-  assert.equal(other.isError, false, other.content);
+
+  const globallyCapped = createGateway(t, {
+    workspaceFs: virtualFs,
+    limits: { maxExecSessions: 4 },
+  });
+  for (let index = 0; index < 4; index += 1) {
+    const outcome = await globallyCapped.runScript(
+      request('return 1;', { workspace: `/global/${index}` }),
+    );
+    assert.equal(outcome.isError, false, outcome.content);
+  }
+  await assert.rejects(
+    globallyCapped.runScript(request('return 1;', { workspace: '/global/4' })),
+    (error: unknown) =>
+      (error as { code?: string }).code === 'CAPACITY_EXCEEDED' &&
+      (error as { resource?: string }).resource === 'exec_sessions',
+  );
 });
 
 test('per-binding and global execution-session quotas raise CAPACITY_EXCEEDED', async (t) => {
-  const gateway = createGateway(t, { workspaceFs: virtualFs });
+  const gateway = createGateway(t, {
+    workspaceFs: virtualFs,
+    limits: { maxExecSessionsPerBinding: 4 },
+  });
   for (let index = 0; index < 4; index += 1) {
     const outcome = await gateway.runScript(
       request('return 1;', {
@@ -141,7 +166,7 @@ test('per-binding and global execution-session quotas raise CAPACITY_EXCEEDED', 
   );
 });
 
-test('maxInFlightEvalsPerExecSession above 8 applies to new execution sessions', async (t) => {
+test('maxInFlightEvalsPerExecSession applies to new execution sessions', async (t) => {
   const hang = async (
     _call: unknown,
     _workspace?: string,
@@ -152,26 +177,32 @@ test('maxInFlightEvalsPerExecSession above 8 applies to new execution sessions',
       signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
     });
 
-  const dispatchNine = async (gateway: ExecGateway): Promise<void> => {
-    for (let index = 0; index < 9; index += 1) {
+  const dispatchUntilLimit = async (gateway: ExecGateway, limit: number): Promise<void> => {
+    for (let index = 0; index < limit; index += 1) {
       await gateway.dispatchScript(request(`await tools.Slow({ index: ${index} }); return ${index};`));
     }
     assert.equal(gateway.stats().sessions, 1);
-    assert.equal(gateway.stats().inFlightEvals, 9);
+    assert.equal(gateway.stats().inFlightEvals, limit);
+    await assert.rejects(
+      gateway.dispatchScript(request('return 1;')),
+      (error: unknown) => (error as { code?: string }).code === 'CAPACITY_EXCEEDED',
+    );
+    assert.equal(gateway.stats().inFlightEvals, limit);
   };
 
-  // Constructor path: the core default of 8 must not cap the configured quota.
-  await dispatchNine(
+  // Constructor path: a configured limit below the core default must apply.
+  await dispatchUntilLimit(
     createGateway(t, {
-      limits: { maxInFlightEvalsPerExecSession: 16, maxInFlightEvalsPerBinding: 16 },
+      limits: { maxInFlightEvalsPerExecSession: 4, maxInFlightEvalsPerBinding: 4 },
       callTool: hang,
     }),
+    4,
   );
 
   // Hot update path: a session created after updateLimits uses the new value.
   const updated = createGateway(t, { callTool: hang });
-  updated.updateLimits({ maxInFlightEvalsPerExecSession: 16, maxInFlightEvalsPerBinding: 16 });
-  await dispatchNine(updated);
+  updated.updateLimits({ maxInFlightEvalsPerExecSession: 4, maxInFlightEvalsPerBinding: 4 });
+  await dispatchUntilLimit(updated, 4);
 });
 
 test('different clients never share one JS context', async (t) => {

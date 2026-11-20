@@ -9,6 +9,8 @@ import {
   findByMarker,
   parsePsLine,
   parsePsRows,
+  parseResourceRows,
+  psResourceRows,
   psRow,
   sameStartTime,
   snapshotTree,
@@ -87,6 +89,24 @@ test('parses ps rows, including padded lstart days and commands with spaces', ()
   assert.equal(parsePsLine(' 10 20 30 not-a-start-time command'), null);
   // A row without a command is still a valid process row.
   assert.equal(parsePsLine('  10   1  10 Mon Nov 17 14:31:58 2026')?.command, '');
+});
+
+test('parses resource rows with rss in bytes and ps %cpu', () => {
+  const rows = parseResourceRows(
+    ['    1     0   1234  0.0', ' 48213   202  20480  1.5', '', 'pid ppid rss %cpu'].join('\n'),
+  );
+  assert.deepEqual(rows, [
+    { pid: 1, ppid: 0, rssBytes: 1234 * 1024, cpuPercent: 0 },
+    { pid: 48213, ppid: 202, rssBytes: 20480 * 1024, cpuPercent: 1.5 },
+  ]);
+  assert.deepEqual(parseResourceRows(' 10 1 not-a-number 1.0'), []);
+});
+
+test('psResourceRows includes the current process', () => {
+  const self = psResourceRows().find((row) => row.pid === process.pid);
+  assert.ok(self !== undefined, 'current process missing from ps output');
+  assert.ok(self.rssBytes > 0);
+  assert.ok(self.cpuPercent >= 0);
 });
 
 test('snapshotTree returns descendants only, sorted, and survives ppid cycles', () => {

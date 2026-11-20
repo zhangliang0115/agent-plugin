@@ -20,12 +20,25 @@ export interface ProcessRow {
   command: string;
 }
 
+/** One row of `ps -axo pid=,ppid=,rss=,%cpu=`. */
+export interface ResourceRow {
+  pid: number;
+  ppid: number;
+  /** Resident set size in bytes (`ps` reports KB; converted here). */
+  rssBytes: number;
+  /** `ps` `%cpu`, not an interval-instantaneous value. */
+  cpuPercent: number;
+}
+
 const PS_FIELDS = 'pid=,ppid=,pgid=,lstart=,command=';
+const PS_RESOURCE_FIELDS = 'pid=,ppid=,rss=,%cpu=';
 /** `ps` output is parsed, so force the C locale for stable weekday/month abbreviations. */
 const PS_ENV: NodeJS.ProcessEnv = { ...process.env, LC_ALL: 'C' };
 const WEEKDAYS = new Set(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
 const MONTHS = new Set(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
 const ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/;
+const RESOURCE_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([0-9]+(?:\.[0-9]+)?)\s*$/;
+const BYTES_PER_KB = 1024;
 
 interface PsResult {
   stdout: string;
@@ -103,6 +116,34 @@ export function parsePsRows(stdout: string): ProcessRow[] {
 /** Full process table snapshot. Throws when `ps` itself fails. */
 export function psRows(): ProcessRow[] {
   return psSnapshot(['-axo', PS_FIELDS]);
+}
+
+/** Parse the stdout of `ps -axo pid=,ppid=,rss=,%cpu=`. */
+export function parseResourceRows(stdout: string): ResourceRow[] {
+  const rows: ResourceRow[] = [];
+  for (const line of stdout.split('\n')) {
+    const match = RESOURCE_ROW_RE.exec(line);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const rssKb = Number(match[3]);
+    const cpuPercent = Number(match[4]);
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
+    if (!Number.isSafeInteger(rssKb) || !Number.isFinite(cpuPercent)) continue;
+    rows.push({ pid, ppid, rssBytes: rssKb * BYTES_PER_KB, cpuPercent });
+  }
+  return rows;
+}
+
+/** Process table with rss and `%cpu`. Throws when `ps` itself fails. */
+export function psResourceRows(): ResourceRow[] {
+  const args = ['-axo', PS_RESOURCE_FIELDS];
+  const result = runPs(args);
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || 'no stderr';
+    throw new Error(`ps ${args.join(' ')} failed (status ${result.status ?? 'signal'}): ${detail}`);
+  }
+  return parseResourceRows(result.stdout);
 }
 
 /** Like {@link psRows}, but with each process's environment appended to its command (`ps -E`). */
