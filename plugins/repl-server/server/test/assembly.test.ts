@@ -488,7 +488,9 @@ test('overview capacity reflects the REPL_CAPACITY_* limits', async (t) => {
       };
       assert.deepEqual(body.capacity, {
         maxExecSessions: 3,
+        maxExecSessionsPerBinding: 64,
         maxInFlightEvalsPerExecSession: 5,
+        maxInFlightEvalsPerBinding: 256,
         maxServeProcesses: 64,
         maxWorkers: 64,
         maxInFlightCallsPerBindingPerServer: 64,

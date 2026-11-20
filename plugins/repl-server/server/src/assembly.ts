@@ -842,7 +842,9 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       return {
         capacity: {
           maxExecSessions: limits.maxExecSessions,
+          maxExecSessionsPerBinding: limits.maxExecSessionsPerBinding,
           maxInFlightEvalsPerExecSession: limits.maxInFlightEvalsPerExecSession,
+          maxInFlightEvalsPerBinding: limits.maxInFlightEvalsPerBinding,
           // Cold keys report what the live components enforce, not the raw row.
           maxServeProcesses: serveRuntime.maxProcesses,
           maxWorkers: limits.maxWorkers,
