@@ -372,7 +372,7 @@ test('search_tools returns JSON items from the catalog snapshot', async () => {
 
   const overview = asCallResult(await callTool('search_tools', {}, h.ctx));
   const items = parseText(overview) as Array<{ name: string }>;
-  assert.deepEqual(items.map((item) => item.name), ['pg']);
+  assert.deepEqual(items.map((item) => item.name), ['__official__', 'pg']);
 });
 
 test('omitted arguments are treated as an empty object', async () => {
@@ -380,7 +380,7 @@ test('omitted arguments are treated as an empty object', async () => {
   const result = asCallResult(await callTool('search_tools', undefined, h.ctx));
   assert.equal(result.isError, false);
   const items = parseText(result) as Array<{ name: string }>;
-  assert.deepEqual(items.map((item) => item.name), ['pg']);
+  assert.deepEqual(items.map((item) => item.name), ['__official__', 'pg']);
 });
 
 test('search_tools and describe_tools report validation failures as isError JSON', async () => {

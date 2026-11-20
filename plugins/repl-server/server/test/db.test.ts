@@ -17,7 +17,15 @@ import {
   updateServer,
 } from '../src/db/servers.ts';
 import { DbNotFoundError, DbValidationError } from '../src/db/schema.ts';
-import { deleteTool, getTool, hashToolSchema, listTools, patchTool, upsertTool } from '../src/db/tools.ts';
+import {
+  countToolsByServer,
+  deleteTool,
+  getTool,
+  hashToolSchema,
+  listTools,
+  patchTool,
+  upsertTool,
+} from '../src/db/tools.ts';
 import type { BindingQuota } from '../src/db/clients.ts';
 import {
   WorkspaceError,
@@ -233,6 +241,19 @@ test('server writes bump meta.revision and servers.revision independently', (t) 
   const removed = deleteServer(db, 'github');
   assert.deepEqual(removed, { deleted: true, revision: 6 });
   assert.equal(getRevision(db), 6);
+});
+
+test('countToolsByServer aggregates total and enabled rows per server', (t) => {
+  const { db } = fixture(t);
+  createServer(db, { id: 'pg', label: 'PG', transport: 'stdio', command: 'npx' });
+  createServer(db, { id: 'gh', label: 'GH', transport: 'stdio', command: 'npx' });
+  upsertTool(db, 'pg', { name: 'query', inputSchema: { type: 'object' } });
+  upsertTool(db, 'pg', { name: 'insert', inputSchema: { type: 'object' } });
+  patchTool(db, 'pg', 'insert', { enabled: false });
+
+  const counts = countToolsByServer(db);
+  assert.deepEqual(counts.get('pg'), { total: 2, enabled: 1 });
+  assert.equal(counts.has('gh'), false, 'servers without tool rows are absent');
 });
 
 test('failed writes roll back the revision and seed servers are immutable', (t) => {

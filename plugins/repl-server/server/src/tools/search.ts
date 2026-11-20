@@ -36,6 +36,9 @@ export interface SearchToolItem {
 
 export const SEARCH_DEFAULT_MAX = 10;
 
+/** Pseudo server id used by the overview to group the official bare-name tools. */
+export const OFFICIAL_TOOL_GROUP = '__official__';
+
 /** Locale-independent ordering keeps tools/list and search results stable across machines. */
 function compareNames(left: string, right: string): number {
   if (left < right) return -1;
@@ -69,7 +72,11 @@ export function isToolVisible(tool: CatalogTool, visibility: ToolVisibility = {}
 
 function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
   if (input.server !== undefined) {
-    if (tool.kind !== 'mcp' || tool.server !== input.server) return false;
+    if (input.server === OFFICIAL_TOOL_GROUP) {
+      if (tool.kind !== 'builtin') return false;
+    } else if (tool.kind !== 'mcp' || tool.server !== input.server) {
+      return false;
+    }
   }
   if (input.category !== undefined && tool.category !== input.category) return false;
   if (input.tags !== undefined && input.tags.length > 0) {
@@ -158,9 +165,23 @@ export function searchTools(snapshot: CatalogSnapshot, input: SearchToolsInput):
       }
       servers.set(tool.server, summary);
     }
-    return [...servers.entries()]
+    const items: SearchToolItem[] = [];
+    const builtins = tools.filter((tool) => tool.kind === 'builtin');
+    if (builtins.length > 0) {
+      const item: SearchToolItem = {
+        name: OFFICIAL_TOOL_GROUP,
+        kind: 'builtin',
+        toolCount: builtins.length,
+        description: `${builtins.length} tool${builtins.length === 1 ? '' : 's'}; call tools.<tool>(args)`,
+        summary: 'Official Claude Code tools',
+      };
+      const tags = new Set<string>();
+      for (const tool of builtins) for (const tag of tool.tags ?? []) tags.add(tag);
+      if (tags.size > 0) item.tags = [...tags].sort((left, right) => compareNames(left, right));
+      items.push(item);
+    }
+    const serverItems = [...servers.entries()]
       .sort(([left], [right]) => compareNames(left, right))
-      .slice(0, limit)
       .map(([server, summary]) => {
         const item: SearchToolItem = {
           name: server,
@@ -176,6 +197,8 @@ export function searchTools(snapshot: CatalogSnapshot, input: SearchToolsInput):
         }
         return item;
       });
+    items.push(...serverItems);
+    return items.slice(0, limit);
   }
 
   const terms = query

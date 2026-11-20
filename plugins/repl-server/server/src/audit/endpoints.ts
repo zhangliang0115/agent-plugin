@@ -34,6 +34,7 @@ import {
   InvalidAuditFilterError,
   InvalidCursorError,
   listExecSessions,
+  listParam,
   matchesFilter,
   normalizeFilter,
   parseAuditEvent,
@@ -315,6 +316,63 @@ async function readProtocolFrames(
   };
 }
 
+type FrameStatusFilter = 'ok' | 'error' | 'none';
+const FRAME_STATUSES: ReadonlySet<string> = new Set(['ok', 'error', 'none']);
+
+function frameStatusList(
+  params: URLSearchParams,
+  name: string,
+): FrameStatusFilter[] | undefined {
+  const values = listParam(params, name);
+  if (values === undefined) return undefined;
+  for (const value of values) {
+    if (!FRAME_STATUSES.has(value)) {
+      throw new InvalidAuditFilterError(`${name} must be one of ok, error, none`, { [name]: value });
+    }
+  }
+  return values as FrameStatusFilter[];
+}
+
+/** `params.name` of a `tools/call` request; other methods have no tool. */
+function pairToolName(pair: ProtocolFramePair): string | null {
+  if (pair.method !== 'tools/call') return null;
+  const params = pair.request?.['params'];
+  if (typeof params !== 'object' || params === null) return null;
+  const name = (params as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name !== '' ? name : null;
+}
+
+/** JSON-RPC outcome: no response, error response, or success. */
+function pairProtocol(pair: ProtocolFramePair): FrameStatusFilter {
+  if (pair.response === null) return 'none';
+  return pair.ok === false ? 'error' : 'ok';
+}
+
+/** Tool-level outcome from `result.isError`; non-tool requests have none. */
+function pairResult(pair: ProtocolFramePair): FrameStatusFilter {
+  if (pair.method !== 'tools/call') return 'none';
+  const result = pair.response?.['result'];
+  if (typeof result !== 'object' || result === null) return 'none';
+  const isError = (result as { isError?: unknown }).isError;
+  if (typeof isError !== 'boolean') return 'none';
+  return isError ? 'error' : 'ok';
+}
+
+function matchesPairFilters(
+  pair: ProtocolFramePair,
+  tools: readonly string[] | undefined,
+  protocols: readonly FrameStatusFilter[] | undefined,
+  results: readonly FrameStatusFilter[] | undefined,
+): boolean {
+  if (tools !== undefined) {
+    const name = pairToolName(pair);
+    if (name === null || !tools.includes(name)) return false;
+  }
+  if (protocols !== undefined && !protocols.includes(pairProtocol(pair))) return false;
+  if (results !== undefined && !results.includes(pairResult(pair))) return false;
+  return true;
+}
+
 /** GET /admin/api/audit/frames?mcp=&id=&detail=summary|full */
 export async function auditFramesEndpoint(
   options: AuditEndpointsOptions,
@@ -330,12 +388,16 @@ export async function auditFramesEndpoint(
       to: param(request.params, 'to'),
       mcp: param(request.params, 'mcp'),
       id: param(request.params, 'id'),
-      binding: param(request.params, 'binding'),
+      binding: listParam(request.params, 'binding'),
       client: param(request.params, 'client'),
-      clientName: param(request.params, 'clientName'),
-      clientVersion: param(request.params, 'clientVersion'),
-      method: param(request.params, 'method'),
+      clientName: listParam(request.params, 'clientName'),
+      clientVersion: listParam(request.params, 'clientVersion'),
+      method: listParam(request.params, 'method'),
     });
+    // Tool and outcome live on the paired request/response, not on a single line.
+    const tools = listParam(request.params, 'tool');
+    const protocols = frameStatusList(request.params, 'protocol');
+    const results = frameStatusList(request.params, 'result');
     const pageSize = options.framePageSize ?? 200;
     const pageMax = options.frameMaxPageSize ?? 1000;
     const scanMaxLines = options.frameScanMaxLines ?? AUDIT_FRAME_SCAN_MAX_LINES;
@@ -346,8 +408,12 @@ export async function auditFramesEndpoint(
       { from: filter.from, to: filter.to },
       scanMaxLines,
     );
-    // Pairing needs the response frame, so the page is cut after pairing.
-    const page = frames.slice(0, limit).map((pair) => {
+    // Pairing needs the response frame, so the page is cut after pairing and
+    // after the pair-level filters.
+    const matched = frames.filter((pair) =>
+      matchesPairFilters(pair, tools, protocols, results),
+    );
+    const page = matched.slice(0, limit).map((pair) => {
       if (detail === 'full') return pair;
       return {
         ...pair,
@@ -358,7 +424,7 @@ export async function auditFramesEndpoint(
     return jsonResult(200, {
       detail,
       frames: page,
-      hasMore: frames.length > limit,
+      hasMore: matched.length > limit,
       droppedFrames,
       truncated,
     });

@@ -634,6 +634,30 @@ test('GET /servers lists records with runtime state; unknown routes yield null',
   assert.equal(server['state'], 'ready');
 });
 
+test('GET /servers carries per-server tool counts when wired', async () => {
+  const env = testEnv();
+  await addServer(env.serverStore, { id: 'pg' });
+  await addServer(env.serverStore, { id: 'gh' });
+  const handler = createAdminServersHandler({
+    servers: env.serverStore,
+    pool: env.pool,
+    toolCounts: () => new Map([['pg', { total: 5, enabled: 3 }]]),
+  });
+
+  const listed = await call(handler, makeRequest('GET', '/servers'));
+  const servers = bodyOf(listed)['servers'] as Array<Record<string, unknown>>;
+  const pg = servers.find((server) => server['id'] === 'pg');
+  const gh = servers.find((server) => server['id'] === 'gh');
+  assert.equal(pg?.['toolCount'], 5);
+  assert.equal(pg?.['enabledToolCount'], 3);
+  assert.equal(gh?.['toolCount'], undefined, 'servers without counts omit the fields');
+
+  const detail = await call(handler, makeRequest('GET', '/servers/pg'));
+  const server = bodyOf(detail)['server'] as Record<string, unknown>;
+  assert.equal(server['toolCount'], 5);
+  assert.equal(server['enabledToolCount'], 3);
+});
+
 test('POST /servers resolves envKeys/headerKeys to $secret references', async () => {
   const env = testEnv();
   const handler = createServerHandler(env);

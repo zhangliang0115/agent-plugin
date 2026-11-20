@@ -6,6 +6,7 @@ import {
   isAsyncResponse,
   isProtocolFrame,
   requestRunIds,
+  toolCallOutcome,
 } from '../src/lib/request-detail.ts';
 
 test('isProtocolFrame recognizes only the two protocol directions', () => {
@@ -53,4 +54,36 @@ test('eventWindow drops the upper bound for async evals', () => {
   assert.deepEqual(eventWindow('2026-11-20T10:00:00.000Z', '2026-11-20T10:00:00.500Z', true), {
     from: '2026-11-20T09:59:58.000Z',
   });
+});
+
+test('toolCallOutcome separates protocol success from execution failure', () => {
+  const text = (value: string, isError: boolean) => ({
+    result: { content: [{ type: 'text', text: value }], isError },
+    ok: true,
+  });
+  assert.deepEqual(toolCallOutcome(text('ok', false)), { ok: true });
+  assert.deepEqual(
+    toolCallOutcome(
+      text(
+        '<repl-output eval="0"><error>CAPACITY_EXCEEDED: exec_sessions_per_binding quota exceeded</error></repl-output>',
+        true,
+      ),
+    ),
+    {
+      ok: false,
+      code: 'CAPACITY_EXCEEDED',
+      message: 'CAPACITY_EXCEEDED: exec_sessions_per_binding quota exceeded',
+    },
+  );
+  assert.deepEqual(
+    toolCallOutcome(text('{"ok":false,"error":{"code":"UNKNOWN_TOOL","message":"nope"}}', true)),
+    {
+      ok: false,
+      code: 'UNKNOWN_TOOL',
+      message: '{"ok":false,"error":{"code":"UNKNOWN_TOOL","message":"nope"}}',
+    },
+  );
+  assert.equal(toolCallOutcome({ error: { code: 'INTERNAL' } }), null, 'JSON-RPC errors are not tool results');
+  assert.equal(toolCallOutcome(null), null);
+  assert.equal(toolCallOutcome({ result: {} }), null, 'no isError means no tool result');
 });

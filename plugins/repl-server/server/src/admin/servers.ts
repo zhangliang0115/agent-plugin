@@ -28,6 +28,7 @@ import {
   type ToolDiscoveryConfig,
 } from '../discovery/types.ts';
 import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID } from '../db/servers.ts';
+import type { ServerToolCounts } from '../db/tools.ts';
 import { systemClock, type Clock, type OfficialToolsSync } from '../ports.ts';
 import { isSecretRef } from '../secrets/resolve.ts';
 
@@ -522,6 +523,9 @@ export interface ServerView
   toolDiscovery?: ToolDiscoveryConfig | null;
   state: string;
   lastError?: string;
+  /** Stored tool rows; present when the caller wired `toolCounts`. */
+  toolCount?: number;
+  enabledToolCount?: number;
 }
 
 /**
@@ -567,6 +571,8 @@ export interface AdminServersDeps {
   secrets?: AdminSecrets;
   operations?: OperationLauncher;
   clock?: Clock;
+  /** Per-server stored tool counts for the list column (`{enabled}/{total}`). */
+  toolCounts?: () => ReadonlyMap<string, ServerToolCounts>;
   /** `POST /servers/:id/test` budget; docs freeze 10s. */
   testTimeoutMs?: number;
   /**
@@ -1099,7 +1105,11 @@ function secretRefs(values: Record<string, SecretValue>): Record<string, string>
 }
 
 /** Projects a record into the value-free admin view. */
-function viewServer(record: ServerRecord, runtime: ServerRuntimeState | null): ServerView {
+function viewServer(
+  record: ServerRecord,
+  runtime: ServerRuntimeState | null,
+  toolCounts?: ServerToolCounts,
+): ServerView {
   const fallback = record.enabled
     ? record.transport === 'builtin'
       ? 'ready'
@@ -1135,6 +1145,10 @@ function viewServer(record: ServerRecord, runtime: ServerRuntimeState | null): S
     state: runtime?.state ?? fallback,
   };
   if (runtime?.lastError !== undefined) view.lastError = runtime.lastError;
+  if (toolCounts !== undefined) {
+    view.toolCount = toolCounts.total;
+    view.enabledToolCount = toolCounts.enabled;
+  }
   return view;
 }
 
@@ -1181,8 +1195,11 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
 
   async function listServers(): Promise<AdminResponse> {
     const [records, revision] = await Promise.all([deps.servers.list(), deps.servers.revision()]);
+    const counts = deps.toolCounts?.();
     const servers = await Promise.all(
-      records.map(async (record) => viewServer(record, await deps.pool.state(record.id))),
+      records.map(async (record) =>
+        viewServer(record, await deps.pool.state(record.id), counts?.get(record.id)),
+      ),
     );
     return adminJson(200, { servers, revision });
   }
@@ -1195,7 +1212,7 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
       });
     }
     return adminJson(200, {
-      server: viewServer(record, await deps.pool.state(id)),
+      server: viewServer(record, await deps.pool.state(id), deps.toolCounts?.().get(id)),
       revision: await deps.servers.revision(),
     });
   }

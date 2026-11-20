@@ -6,7 +6,6 @@ import {
   Col,
   Drawer,
   Empty,
-  Input,
   Row,
   Select,
   Space,
@@ -31,12 +30,14 @@ import {
   type StreamState,
 } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
+import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
 import {
   eventWindow,
   isAsyncResponse,
   isProtocolFrame,
   requestRunIds,
+  toolCallOutcome,
 } from '../../lib/request-detail.ts';
 
 const { Text } = Typography;
@@ -68,11 +69,31 @@ interface AuditEvent {
   [key: string]: unknown;
 }
 
+type FrameProtocolChoice = 'ok' | 'error' | 'none';
+type FrameResultChoice = 'ok' | 'error';
+
 interface RequestFilters {
   range: string;
-  clientName: string;
-  binding: string;
-  method: string;
+  clientNames: string[];
+  clientVersions: string[];
+  bindings: string[];
+  methods: string[];
+  tools: string[];
+  protocols: FrameProtocolChoice[];
+  results: FrameResultChoice[];
+}
+
+interface FilterOptions {
+  clients: string[];
+  versions: string[];
+  bindings: Array<{ value: string; label: string }>;
+  methods: string[];
+  tools: string[];
+}
+
+interface ClientsResponse {
+  clients: Array<{ id: string; label: string }>;
+  sessions: Array<{ clientName: string; clientVersion: string; bindingId: string | null }>;
 }
 
 const RANGE_OPTIONS = [
@@ -85,9 +106,32 @@ const RANGE_OPTIONS = [
 
 const DEFAULT_FILTERS: RequestFilters = {
   range: '60',
-  clientName: '',
-  binding: '',
-  method: '',
+  clientNames: [],
+  clientVersions: [],
+  bindings: [],
+  methods: [],
+  tools: [],
+  protocols: [],
+  results: [],
+};
+
+const PROTOCOL_OPTIONS: Array<{ value: FrameProtocolChoice; label: string }> = [
+  { value: 'ok', label: '成功' },
+  { value: 'error', label: '失败' },
+  { value: 'none', label: '无响应' },
+];
+
+const RESULT_OPTIONS: Array<{ value: FrameResultChoice; label: string }> = [
+  { value: 'ok', label: '成功' },
+  { value: 'error', label: '失败' },
+];
+
+const EMPTY_OPTIONS: FilterOptions = {
+  clients: [],
+  versions: [],
+  bindings: [],
+  methods: [],
+  tools: [],
 };
 
 const STREAM_LABELS: Record<StreamState, string> = {
@@ -101,6 +145,7 @@ const STREAM_LABELS: Record<StreamState, string> = {
 export function RequestsPage(): React.ReactElement {
   const api = useApi();
   const [filters, setFilters] = useState<RequestFilters>(DEFAULT_FILTERS);
+  const [options, setOptions] = useState<FilterOptions>(EMPTY_OPTIONS);
   const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +161,29 @@ export function RequestsPage(): React.ReactElement {
   const eventTicketRef = useRef(0);
 
   useEffect(() => {
+    let alive = true;
+    void api
+      .get<ClientsResponse>('/clients')
+      .then((response) => {
+        if (!alive) return;
+        rememberOptions({
+          clients: (response.sessions ?? []).map((session) => session.clientName),
+          versions: (response.sessions ?? []).map((session) => session.clientVersion),
+          bindings: (response.clients ?? []).map((binding) => ({
+            value: binding.id,
+            label: binding.label === binding.id ? binding.id : `${binding.label} (${binding.id})`,
+          })),
+        });
+      })
+      .catch(() => {
+        // Dropdowns still fill from the frames that load below.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
     filtersRef.current = filters;
   }, [filters]);
 
@@ -125,16 +193,18 @@ export function RequestsPage(): React.ReactElement {
       setError(null);
       try {
         const from = new Date(Date.now() - Number(next.range) * 60_000).toISOString();
+        const query = new URLSearchParams({ detail: 'full', from, limit: '200' });
+        for (const value of next.clientNames) query.append('clientName', value);
+        for (const value of next.clientVersions) query.append('clientVersion', value);
+        for (const value of next.bindings) query.append('binding', value);
+        for (const value of next.methods) query.append('method', value);
+        for (const value of next.tools) query.append('tool', value);
+        for (const value of next.protocols) query.append('protocol', value);
+        for (const value of next.results) query.append('result', value);
         const response = await api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
-          query: {
-            detail: 'full',
-            from,
-            clientName: next.clientName.trim() === '' ? undefined : next.clientName.trim(),
-            binding: next.binding.trim() === '' ? undefined : next.binding.trim(),
-            method: next.method.trim() === '' ? undefined : next.method.trim(),
-            limit: 200,
-          },
+          query,
         });
+        rememberOptionsFromFrames(response.frames);
         // The endpoint returns oldest-first; the table shows the newest request first.
         setFrames({ ...response, frames: [...response.frames].reverse() });
       } catch (failure) {
@@ -186,6 +256,57 @@ export function RequestsPage(): React.ReactElement {
     const next = { ...filters, ...patch };
     setFilters(next);
     void load(next);
+  }
+
+  function resetFilters(): void {
+    setFilters(DEFAULT_FILTERS);
+    void load(DEFAULT_FILTERS);
+  }
+
+  /** Options only grow during the session, so selecting one value never hides the others. */
+  function rememberOptions(delta: Partial<FilterOptions>): void {
+    setOptions((previous) => {
+      const clients = mergeValues(previous.clients, delta.clients ?? []);
+      const versions = mergeValues(previous.versions, delta.versions ?? []);
+      const methods = mergeValues(previous.methods, delta.methods ?? []);
+      const tools = mergeValues(previous.tools, delta.tools ?? []);
+      const bindings = mergeBindings(previous.bindings, delta.bindings ?? []);
+      if (
+        clients === previous.clients
+        && versions === previous.versions
+        && methods === previous.methods
+        && tools === previous.tools
+        && bindings === previous.bindings
+      ) {
+        return previous;
+      }
+      return { clients, versions, bindings, methods, tools };
+    });
+  }
+
+  function rememberOptionsFromFrames(list: readonly ProtocolFramePair[]): void {
+    const delta: FilterOptions = {
+      clients: [],
+      versions: [],
+      bindings: [],
+      methods: [],
+      tools: [],
+    };
+    for (const pair of list) {
+      const frame = pair.request ?? pair.response;
+      if (frame !== null) {
+        const client = text(frame, 'clientName');
+        if (client !== null) delta.clients.push(client);
+        const version = text(frame, 'clientVersion');
+        if (version !== null) delta.versions.push(version);
+        const binding = text(frame, 'binding');
+        if (binding !== null) delta.bindings.push({ value: binding, label: binding });
+      }
+      if (pair.method !== null && pair.method !== undefined) delta.methods.push(pair.method);
+      const tool = requestToolName(pair);
+      if (tool !== null) delta.tools.push(tool);
+    }
+    rememberOptions(delta);
   }
 
   async function openRequest(pair: ProtocolFramePair): Promise<void> {
@@ -243,21 +364,21 @@ export function RequestsPage(): React.ReactElement {
     {
       title: '方法',
       key: 'method',
-      width: 180,
+      width: 150,
       ellipsis: true,
       render: (_value, pair) => <span className="mono">{pair.method ?? '—'}</span>,
     },
     {
-      title: 'id',
-      key: 'id',
-      width: 110,
+      title: '工具',
+      key: 'tool',
+      width: 160,
       ellipsis: true,
-      render: (_value, pair) => <span className="mono">{pair.id ?? '—'}</span>,
+      render: (_value, pair) => <span className="mono">{requestToolName(pair) ?? '—'}</span>,
     },
     {
-      title: '状态',
+      title: '协议状态',
       key: 'status',
-      width: 92,
+      width: 104,
       render: (_value, pair) =>
         pair.response === null ? (
           <Tag color="gold" bordered={false}>
@@ -268,6 +389,13 @@ export function RequestsPage(): React.ReactElement {
             {stateLabel(pair.ok === false ? 'error' : 'ok')}
           </Tag>
         ),
+    },
+    {
+      title: '执行结果',
+      key: 'toolResult',
+      width: 200,
+      ellipsis: true,
+      render: (_value, pair) => <ExecutionResultCell pair={pair} />,
     },
     {
       title: '耗时',
@@ -334,32 +462,78 @@ export function RequestsPage(): React.ReactElement {
               onChange={(value) => update({ range: value })}
             />
           </Space>
-          <Input
+          <Select
+            mode="multiple"
             allowClear
-            style={{ width: 160 }}
-            placeholder="客户端名称"
-            value={filters.clientName}
-            onChange={(event) => setFilters({ ...filters, clientName: event.target.value })}
-            onPressEnter={() => void load(filters)}
-          />
-          <Input
-            allowClear
-            style={{ width: 200 }}
-            placeholder="binding"
-            value={filters.binding}
-            onChange={(event) => setFilters({ ...filters, binding: event.target.value })}
-            onPressEnter={() => void load(filters)}
-          />
-          <Input
-            allowClear
+            maxTagCount="responsive"
+            placeholder="客户端"
             style={{ width: 180 }}
-            placeholder="方法，如 tools/call"
-            value={filters.method}
-            onChange={(event) => setFilters({ ...filters, method: event.target.value })}
-            onPressEnter={() => void load(filters)}
+            value={filters.clientNames}
+            options={listOptions(options.clients)}
+            onChange={(value) => update({ clientNames: value })}
           />
-          <Button onClick={() => void load(filters)} loading={loading}>
-            查询
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="版本"
+            style={{ width: 140 }}
+            value={filters.clientVersions}
+            options={listOptions(options.versions)}
+            onChange={(value) => update({ clientVersions: value })}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="binding"
+            style={{ width: 200 }}
+            value={filters.bindings}
+            options={options.bindings}
+            onChange={(value) => update({ bindings: value })}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="方法"
+            style={{ width: 180 }}
+            value={filters.methods}
+            options={listOptions(options.methods)}
+            onChange={(value) => update({ methods: value })}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="工具"
+            style={{ width: 180 }}
+            value={filters.tools}
+            options={listOptions(options.tools)}
+            onChange={(value) => update({ tools: value })}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="协议状态"
+            style={{ width: 170 }}
+            value={filters.protocols}
+            options={PROTOCOL_OPTIONS}
+            onChange={(value) => update({ protocols: value })}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            maxTagCount="responsive"
+            placeholder="执行结果"
+            style={{ width: 160 }}
+            value={filters.results}
+            options={RESULT_OPTIONS}
+            onChange={(value) => update({ results: value })}
+          />
+          <Button onClick={resetFilters} loading={loading}>
+            清空筛选
           </Button>
         </Space>
       </Card>
@@ -377,7 +551,7 @@ export function RequestsPage(): React.ReactElement {
           columns={columns}
           loading={loading}
           pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1_000 }}
+          scroll={{ x: 1_200 }}
           onRow={(pair) => ({
             className: selected === pair ? 'row-clickable row-selected' : 'row-clickable',
             onClick: () => void openRequest(pair),
@@ -489,6 +663,26 @@ export function RequestsPage(): React.ReactElement {
   );
 }
 
+function ExecutionResultCell({ pair }: { pair: ProtocolFramePair }): React.ReactElement {
+  const outcome = pair.method === 'tools/call' ? toolCallOutcome(pair.response) : null;
+  if (outcome === null) return <span className="muted">—</span>;
+  if (outcome.ok) {
+    return (
+      <Tag color="green" bordered={false}>
+        成功
+      </Tag>
+    );
+  }
+  return (
+    <span title={outcome.message}>
+      <Tag color="red" bordered={false}>
+        失败
+      </Tag>
+      {outcome.code === undefined ? null : <span className="mono muted">{outcome.code}</span>}
+    </span>
+  );
+}
+
 const eventColumns: TableProps<AuditEvent>['columns'] = [
   {
     title: '时间',
@@ -560,6 +754,15 @@ function eventStatusTag(event: AuditEvent): React.ReactElement {
       {stateLabel(status)}
     </Tag>
   );
+}
+
+/** `params.name` of a `tools/call` request; other methods have no tool. */
+function requestToolName(pair: ProtocolFramePair): string | null {
+  if (pair.method !== 'tools/call') return null;
+  const params = pair.request?.['params'];
+  if (typeof params !== 'object' || params === null) return null;
+  const name = (params as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name !== '' ? name : null;
 }
 
 function timeOf(event: AuditEvent): number {

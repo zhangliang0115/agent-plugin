@@ -71,20 +71,28 @@ export interface AuditFilterInput {
   /** Alias accepted from already-normalized filters. */
   events?: string[];
   client?: string;
-  clientName?: string;
-  clientVersion?: string;
-  binding?: string;
+  clientName?: string | string[];
+  /** Alias accepted from already-normalized filters. */
+  clientNames?: string[];
+  clientVersion?: string | string[];
+  clientVersions?: string[];
+  binding?: string | string[];
+  bindings?: string[];
   exec?: string;
   evalId?: number | string;
   taskId?: string;
-  tool?: string;
-  server?: string;
-  status?: string;
+  tool?: string | string[];
+  tools?: string[];
+  server?: string | string[];
+  servers?: string[];
+  status?: string | string[];
+  statuses?: string[];
   minMs?: number | string;
   minQueueMs?: number | string;
   mcp?: string;
   id?: string | number;
-  method?: string;
+  method?: string | string[];
+  methods?: string[];
   /** Eval correlation id shared by `eval_start`/`eval_end`/tool events. */
   runId?: string;
 }
@@ -96,19 +104,26 @@ export interface AuditFilter {
   events?: string[];
   client?: string;
   clientName?: string;
+  clientNames?: string[];
   clientVersion?: string;
+  clientVersions?: string[];
   binding?: string;
+  bindings?: string[];
   exec?: string;
   evalId?: number;
   taskId?: string;
   tool?: string;
+  tools?: string[];
   server?: string;
+  servers?: string[];
   status?: AuditStatus;
+  statuses?: AuditStatus[];
   minMs?: number;
   minQueueMs?: number;
   mcp?: string;
   id?: string;
   method?: string;
+  methods?: string[];
   runId?: string;
 }
 
@@ -144,6 +159,34 @@ function optionalText(value: string | undefined): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
+/** Comma/repeat friendly list input, shared by the multi-value filters. */
+function listValues(value: string | string[] | undefined): string[] {
+  if (value === undefined) return [];
+  const raw = Array.isArray(value) ? value : [value];
+  return raw
+    .flatMap((entry) => entry.split(','))
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function combinedList(value: string | string[] | undefined, alias?: string[]): string[] {
+  return [...listValues(value), ...listValues(alias)];
+}
+
+/** One value stays in the legacy singular field; several use the array field. */
+function setListFilter<T extends string>(
+  filter: AuditFilter,
+  singular: keyof AuditFilter,
+  plural: keyof AuditFilter,
+  values: T[],
+): void {
+  if (values.length === 1) {
+    (filter as Record<string, unknown>)[singular as string] = values[0];
+  } else if (values.length > 1) {
+    (filter as Record<string, unknown>)[plural as string] = values;
+  }
+}
+
 /** Validates and normalizes filter input. `evalId` requires `exec`. */
 export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
   const filter: AuditFilter = {};
@@ -170,24 +213,20 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
   }
   const client = optionalText(input.client);
   if (client !== undefined) filter.client = client;
-  const clientName = optionalText(input.clientName);
-  if (clientName !== undefined) filter.clientName = clientName;
-  const clientVersion = optionalText(input.clientVersion);
-  if (clientVersion !== undefined) filter.clientVersion = clientVersion;
-  const binding = optionalText(input.binding);
-  if (binding !== undefined) filter.binding = binding;
+  setListFilter(filter, 'clientName', 'clientNames',
+    combinedList(input.clientName, input.clientNames));
+  setListFilter(filter, 'clientVersion', 'clientVersions',
+    combinedList(input.clientVersion, input.clientVersions));
+  setListFilter(filter, 'binding', 'bindings', combinedList(input.binding, input.bindings));
   const exec = optionalText(input.exec);
   if (exec !== undefined) filter.exec = exec;
   const taskId = optionalText(input.taskId);
   if (taskId !== undefined) filter.taskId = taskId;
-  const tool = optionalText(input.tool);
-  if (tool !== undefined) filter.tool = tool;
-  const server = optionalText(input.server);
-  if (server !== undefined) filter.server = server;
+  setListFilter(filter, 'tool', 'tools', combinedList(input.tool, input.tools));
+  setListFilter(filter, 'server', 'servers', combinedList(input.server, input.servers));
   const mcp = optionalText(input.mcp);
   if (mcp !== undefined) filter.mcp = mcp;
-  const method = optionalText(input.method);
-  if (method !== undefined) filter.method = method;
+  setListFilter(filter, 'method', 'methods', combinedList(input.method, input.methods));
   const runId = optionalText(input.runId);
   if (runId !== undefined) filter.runId = runId;
   if (input.id !== undefined) {
@@ -202,15 +241,13 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
       });
     }
   }
-  if (input.status !== undefined) {
-    const status = optionalText(input.status);
-    if (status !== undefined) {
-      if (!(AUDIT_STATUSES as readonly string[]).includes(status)) {
-        throw new InvalidAuditFilterError(`status must be one of ${AUDIT_STATUSES.join(', ')}`, { status });
-      }
-      filter.status = status as AuditStatus;
+  const statuses = combinedList(input.status, input.statuses);
+  for (const status of statuses) {
+    if (!(AUDIT_STATUSES as readonly string[]).includes(status)) {
+      throw new InvalidAuditFilterError(`status must be one of ${AUDIT_STATUSES.join(', ')}`, { status });
     }
   }
+  setListFilter(filter, 'status', 'statuses', statuses as AuditStatus[]);
   if (input.minMs !== undefined) filter.minMs = parseIntegerValue('minMs', input.minMs, 0);
   if (input.minQueueMs !== undefined) {
     filter.minQueueMs = parseIntegerValue('minQueueMs', input.minQueueMs, 0);
@@ -220,6 +257,13 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
 
 function firstParam(params: URLSearchParams, name: string): string | undefined {
   return optionalText(params.get(name) ?? undefined);
+}
+
+/** Every value of a repeatable param; undefined when absent. */
+export function listParam(params: URLSearchParams, name: string): string[] | undefined {
+  const values = params.getAll(name).flatMap((entry) => entry.split(','));
+  const cleaned = values.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  return cleaned.length === 0 ? undefined : cleaned;
 }
 
 export type AuditFilterLike = AuditFilter | AuditFilterInput;
@@ -241,20 +285,20 @@ export function parseAuditQueryParams(params: URLSearchParams): AuditFilter {
   assign('from', firstParam(params, 'from'));
   assign('to', firstParam(params, 'to'));
   assign('client', firstParam(params, 'client'));
-  assign('clientName', firstParam(params, 'clientName'));
-  assign('clientVersion', firstParam(params, 'clientVersion'));
-  assign('binding', firstParam(params, 'binding'));
+  assign('clientName', listParam(params, 'clientName'));
+  assign('clientVersion', listParam(params, 'clientVersion'));
+  assign('binding', listParam(params, 'binding'));
   assign('exec', firstParam(params, 'exec'));
   assign('evalId', firstParam(params, 'evalId'));
   assign('taskId', firstParam(params, 'taskId'));
-  assign('tool', firstParam(params, 'tool'));
-  assign('server', firstParam(params, 'server'));
-  assign('status', firstParam(params, 'status'));
+  assign('tool', listParam(params, 'tool'));
+  assign('server', listParam(params, 'server'));
+  assign('status', listParam(params, 'status'));
   assign('minMs', firstParam(params, 'minMs'));
   assign('minQueueMs', firstParam(params, 'minQueueMs'));
   assign('mcp', firstParam(params, 'mcp'));
   assign('id', firstParam(params, 'id'));
-  assign('method', firstParam(params, 'method'));
+  assign('method', listParam(params, 'method'));
   assign('runId', firstParam(params, 'runId'));
   const events = params.getAll('event');
   if (events.length > 0) input.event = events;
@@ -490,10 +534,29 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
   if (filter.events !== undefined && !filter.events.includes(event.event)) return false;
   if (filter.client !== undefined && event.client !== filter.client) return false;
   if (filter.clientName !== undefined && event.clientName !== filter.clientName) return false;
+  if (
+    filter.clientNames !== undefined
+    && (typeof event.clientName !== 'string' || !filter.clientNames.includes(event.clientName))
+  ) {
+    return false;
+  }
   if (filter.clientVersion !== undefined && event.clientVersion !== filter.clientVersion) {
     return false;
   }
+  if (
+    filter.clientVersions !== undefined
+    && (typeof event.clientVersion !== 'string'
+      || !filter.clientVersions.includes(event.clientVersion))
+  ) {
+    return false;
+  }
   if (filter.binding !== undefined && event.binding !== filter.binding) return false;
+  if (
+    filter.bindings !== undefined
+    && (typeof event.binding !== 'string' || !filter.bindings.includes(event.binding))
+  ) {
+    return false;
+  }
   if (filter.exec !== undefined && event.exec !== filter.exec) return false;
   if (filter.evalId !== undefined && Number(event.evalId) !== filter.evalId) return false;
   if (
@@ -504,6 +567,12 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
     return false;
   }
   if (filter.tool !== undefined && event.tool !== filter.tool) return false;
+  if (
+    filter.tools !== undefined
+    && (typeof event.tool !== 'string' || !filter.tools.includes(event.tool))
+  ) {
+    return false;
+  }
   // ai_run records the target server as `serverId` (design 08 §2.4).
   if (
     filter.server !== undefined &&
@@ -512,7 +581,14 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
   ) {
     return false;
   }
+  if (filter.servers !== undefined) {
+    const matches =
+      (typeof event.server === 'string' && filter.servers.includes(event.server))
+      || (typeof event.serverId === 'string' && filter.servers.includes(event.serverId));
+    if (!matches) return false;
+  }
   if (filter.status !== undefined && eventStatus(event) !== filter.status) return false;
+  if (filter.statuses !== undefined && !filter.statuses.includes(eventStatus(event))) return false;
   if (filter.minMs !== undefined) {
     if (typeof event.ms !== 'number' || event.ms < filter.minMs) return false;
   }
@@ -522,6 +598,12 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
   if (filter.mcp !== undefined && event.mcp !== filter.mcp) return false;
   if (filter.id !== undefined && String(event.id) !== filter.id) return false;
   if (filter.method !== undefined && event.method !== filter.method) return false;
+  if (
+    filter.methods !== undefined
+    && (typeof event.method !== 'string' || !filter.methods.includes(event.method))
+  ) {
+    return false;
+  }
   if (filter.runId !== undefined && event.runId !== filter.runId) return false;
   return true;
 }
@@ -883,14 +965,20 @@ interface StatsWorkerFilter {
   events: string[] | null;
   client?: string;
   clientName?: string;
+  clientNames?: string[];
   clientVersion?: string;
+  clientVersions?: string[];
   binding?: string;
+  bindings?: string[];
   exec?: string;
   evalId?: number;
   taskId?: string;
   tool?: string;
+  tools?: string[];
   server?: string;
+  servers?: string[];
   status?: AuditStatus;
+  statuses?: AuditStatus[];
   minMs?: number;
   minQueueMs?: number;
 }
@@ -970,14 +1058,24 @@ const STATS_WORKER_SOURCE = [
   '  if (filter.events !== null && filter.events.indexOf(event.event) === -1) return false;',
   '  if (filter.client !== undefined && event.client !== filter.client) return false;',
   '  if (filter.clientName !== undefined && event.clientName !== filter.clientName) return false;',
+  '  if (filter.clientNames !== undefined && (typeof event.clientName !== "string" || filter.clientNames.indexOf(event.clientName) === -1)) return false;',
   '  if (filter.clientVersion !== undefined && event.clientVersion !== filter.clientVersion) return false;',
+  '  if (filter.clientVersions !== undefined && (typeof event.clientVersion !== "string" || filter.clientVersions.indexOf(event.clientVersion) === -1)) return false;',
   '  if (filter.binding !== undefined && event.binding !== filter.binding) return false;',
+  '  if (filter.bindings !== undefined && (typeof event.binding !== "string" || filter.bindings.indexOf(event.binding) === -1)) return false;',
   '  if (filter.exec !== undefined && event.exec !== filter.exec) return false;',
   '  if (filter.evalId !== undefined && Number(event.evalId) !== filter.evalId) return false;',
   '  if (filter.taskId !== undefined && event.evalTaskId !== filter.taskId && event.taskId !== filter.taskId) return false;',
   '  if (filter.tool !== undefined && event.tool !== filter.tool) return false;',
+  '  if (filter.tools !== undefined && (typeof event.tool !== "string" || filter.tools.indexOf(event.tool) === -1)) return false;',
   '  if (filter.server !== undefined && event.server !== filter.server && event.serverId !== filter.server) return false;',
+  '  if (filter.servers !== undefined) {',
+  '    const byServer = typeof event.server === "string" && filter.servers.indexOf(event.server) !== -1;',
+  '    const byServerId = typeof event.serverId === "string" && filter.servers.indexOf(event.serverId) !== -1;',
+  '    if (!byServer && !byServerId) return false;',
+  '  }',
   '  if (filter.status !== undefined && statusOf(event) !== filter.status) return false;',
+  '  if (filter.statuses !== undefined && filter.statuses.indexOf(statusOf(event)) === -1) return false;',
   '  if (filter.minMs !== undefined) {',
   '    if (typeof event.ms !== "number" || event.ms < filter.minMs) return false;',
   '  }',
@@ -1102,14 +1200,20 @@ function statsWorkerFilter(filter: AuditFilter): StatsWorkerFilter {
   };
   if (filter.client !== undefined) out.client = filter.client;
   if (filter.clientName !== undefined) out.clientName = filter.clientName;
+  if (filter.clientNames !== undefined) out.clientNames = filter.clientNames;
   if (filter.clientVersion !== undefined) out.clientVersion = filter.clientVersion;
+  if (filter.clientVersions !== undefined) out.clientVersions = filter.clientVersions;
   if (filter.binding !== undefined) out.binding = filter.binding;
+  if (filter.bindings !== undefined) out.bindings = filter.bindings;
   if (filter.exec !== undefined) out.exec = filter.exec;
   if (filter.evalId !== undefined) out.evalId = filter.evalId;
   if (filter.taskId !== undefined) out.taskId = filter.taskId;
   if (filter.tool !== undefined) out.tool = filter.tool;
+  if (filter.tools !== undefined) out.tools = filter.tools;
   if (filter.server !== undefined) out.server = filter.server;
+  if (filter.servers !== undefined) out.servers = filter.servers;
   if (filter.status !== undefined) out.status = filter.status;
+  if (filter.statuses !== undefined) out.statuses = filter.statuses;
   if (filter.minMs !== undefined) out.minMs = filter.minMs;
   if (filter.minQueueMs !== undefined) out.minQueueMs = filter.minQueueMs;
   return out;

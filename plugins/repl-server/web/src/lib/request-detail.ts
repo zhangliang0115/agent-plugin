@@ -63,6 +63,47 @@ export function eventWindow(
   };
 }
 
+export interface ToolCallOutcome {
+  ok: boolean;
+  /** Leading error code, e.g. `CAPACITY_EXCEEDED`, when the text looks like one. */
+  code?: string;
+  /** Full error text for the tooltip. */
+  message?: string;
+}
+
+/**
+ * Result of one `tools/call`. A JSON-RPC success still carries `isError: true`
+ * for execution failures (quota, unknown tool, script errors), which is the
+ * state Kiro shows as a failed call; the protocol status alone cannot tell.
+ */
+export function toolCallOutcome(response: unknown): ToolCallOutcome | null {
+  if (typeof response !== 'object' || response === null) return null;
+  if ((response as { error?: unknown }).error !== undefined) return null;
+  const result = (response as { result?: unknown }).result;
+  if (typeof result !== 'object' || result === null) return null;
+  const isError = (result as { isError?: unknown }).isError;
+  if (typeof isError !== 'boolean') return null;
+  if (!isError) return { ok: true };
+  return { ok: false, ...toolErrorDetail(responseText(response) ?? '') };
+}
+
+function toolErrorDetail(text: string): Pick<ToolCallOutcome, 'code' | 'message'> {
+  const envelope = /<error>([\s\S]*?)<\/error>/u.exec(text);
+  const raw = (envelope?.[1] ?? text).trim();
+  if (raw === '') return {};
+  try {
+    const parsed = JSON.parse(raw) as { error?: { code?: unknown } };
+    if (typeof parsed.error?.code === 'string') {
+      return { code: parsed.error.code, message: raw };
+    }
+  } catch {
+    // Not JSON: `run_script` failures use the `<repl-output><error>` envelope.
+  }
+  const head = raw.split('\n')[0]?.split(':')[0]?.trim() ?? '';
+  const code = /^[A-Za-z_][A-Za-z0-9_]*$/u.test(head) && head.length <= 48 ? head : undefined;
+  return code === undefined ? { message: raw } : { code, message: raw };
+}
+
 function responseText(response: unknown): string | null {
   if (typeof response !== 'object' || response === null) return null;
   const result = (response as { result?: unknown }).result;

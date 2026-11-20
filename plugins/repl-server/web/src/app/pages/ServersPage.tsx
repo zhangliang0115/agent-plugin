@@ -88,6 +88,8 @@ interface ServerView {
   revision: number;
   state: string;
   lastError?: string;
+  toolCount?: number;
+  enabledToolCount?: number;
   updatedAt?: string;
   createdAt?: string;
 }
@@ -274,10 +276,20 @@ export function ServersPage(): React.ReactElement {
       render: (value: string) => <StateTag state={value} />,
     },
     {
-      title: '密钥',
-      key: 'secrets',
-      width: 150,
-      render: (_value: unknown, server: ServerView) => <SecretNameTags server={server} />,
+      title: '工具',
+      key: 'tools',
+      width: 100,
+      render: (_value: unknown, server: ServerView) =>
+        server.toolCount === undefined ? (
+          <span className="muted">—</span>
+        ) : (
+          <span
+            className="mono"
+            title={`启用 ${server.enabledToolCount ?? 0} / 共 ${server.toolCount}`}
+          >
+            {server.enabledToolCount ?? 0}/{server.toolCount}
+          </span>
+        ),
     },
     {
       title: '启用',
@@ -1622,31 +1634,6 @@ function aiErrorText(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function secretNames(server: ServerView): string[] {
-  return [
-    ...new Set([
-      ...Object.values(server.envSecrets ?? {}),
-      ...Object.values(server.headerSecrets ?? {}),
-      ...(server.secretArgs ?? []).map((entry) => entry.secret),
-    ]),
-  ];
-}
-
-function SecretNameTags({ server }: { server: ServerView }): React.ReactElement {
-  const names = secretNames(server);
-  if (names.length === 0) return <span className="muted">—</span>;
-  return (
-    <Space size={[4, 4]} wrap>
-      {names.slice(0, 2).map((name) => (
-        <Tag key={name} bordered={false} className="mono">
-          {name}
-        </Tag>
-      ))}
-      {names.length > 2 ? <span className="muted">+{names.length - 2}</span> : null}
-    </Space>
-  );
 }
 
 function secretRefLabels(server: ServerView): string[] {

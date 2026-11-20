@@ -36,7 +36,7 @@ export const INSTRUCTIONS = [
   '- Built-in tool failures return { error }; MCP tool failures throw. Check exitCode explicitly.',
   '- Return a short result; use log() only for needed output.',
   '',
-  "Visible MCP servers are listed in run_script's description.",
+  "Visible built-in tools and MCP servers are listed in run_script's description.",
 ].join('\n');
 
 export interface ServerInfo {

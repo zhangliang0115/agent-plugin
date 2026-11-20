@@ -43,7 +43,7 @@ import {
 import { openStateDb, migrate } from './db/migrate.ts';
 import { findBindingByToken, getClientBinding } from './db/clients.ts';
 import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
-import { upsertTool } from './db/tools.ts';
+import { countToolsByServer, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
 import { ExecGateway, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
@@ -635,6 +635,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       servers: adminServerStore,
       pool: poolControl,
       operations,
+      toolCounts: () => countToolsByServer(db),
       official: officialSync,
       onToolsRefreshed: (id) => {
         ai.onServerMutated(id);
@@ -726,16 +727,24 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       ...new Set(visibleTools.flatMap((tool) => tool.tags ?? [])),
     ].sort();
 
+    // Empty when official sync never ran or the tools are disabled by policy,
+    // which keeps the description's built-in block out of unsupported hosts.
+    const builtinNames = visibleTools
+      .filter((tool) => tool.kind === 'builtin')
+      .map((tool) => tool.name);
     return {
       servers,
       visibility,
       categories,
       tags,
-      runScriptDescription: buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers),
+      runScriptDescription: buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers, builtinNames),
       searchToolsDefinition: buildSearchToolsDefinition(
         categories,
         tags,
-        servers.map((server) => server.id),
+        [
+          ...servers.map((server) => server.id),
+          ...(builtinNames.length > 0 ? ['__official__'] : []),
+        ],
       ),
     };
   };

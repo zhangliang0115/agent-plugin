@@ -85,6 +85,31 @@ export function listTools(db: DatabaseSync, serverId: string): ToolRecord[] {
   return rows.map(toTool);
 }
 
+/** Stored tool counts per server; used by the admin server list. */
+export interface ServerToolCounts {
+  total: number;
+  enabled: number;
+}
+
+export function countToolsByServer(db: DatabaseSync): Map<string, ServerToolCounts> {
+  const rows = db
+    .prepare(
+      'SELECT server_id, COUNT(*) AS total, SUM(enabled) AS enabled FROM tools GROUP BY server_id',
+    )
+    .all();
+  const counts = new Map<string, ServerToolCounts>();
+  for (const rawRow of rows) {
+    const row = rawRow as Record<string, unknown>;
+    const serverId = readText(row, 'server_id');
+    if (serverId === null) continue;
+    counts.set(serverId, {
+      total: Number(row['total'] ?? 0),
+      enabled: Number(row['enabled'] ?? 0),
+    });
+  }
+  return counts;
+}
+
 export function getTool(db: DatabaseSync, serverId: string, name: string): ToolRecord | null {
   const row = db.prepare('SELECT * FROM tools WHERE server_id = ? AND name = ?').get(serverId, name);
   return row ? toTool(row) : null;

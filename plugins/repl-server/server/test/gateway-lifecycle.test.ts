@@ -131,6 +131,8 @@ test('eval and tool audits carry the request id and a shared runId', async (t) =
   }
   assert.equal(toolCall?.['exec'], start?.['exec']);
   assert.equal(typeof toolCall?.['exec'], 'string');
+  assert.equal(toolCall?.['server'], '__official__');
+  assert.equal(toolResult?.['server'], '__official__');
 });
 
 test('a serve idle for 15 minutes is released while the session stays', async (t) => {

@@ -33,9 +33,11 @@ import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
 import {
   aiRunKindLabel,
   aiRunTriggerLabel,
+  AUDIT_EVENT_NAMES,
   eventLabel,
   eventSubject,
 } from '../../lib/audit-labels.ts';
+import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
 import {
   formatDuration,
   formatId,
@@ -58,6 +60,18 @@ interface AuditQueryResponse {
   hasMore: boolean;
 }
 
+type StatsGroupBy = 'server' | 'tool' | 'client' | 'status';
+
+interface AuditStatsGroup {
+  key: string;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  p50: number | null;
+  p95: number | null;
+  queueAvgMs: number | null;
+}
+
 interface AuditStats {
   snapshotId: string;
   computedAt: string;
@@ -70,22 +84,41 @@ interface AuditStats {
   p95: number | null;
   queueAvgMs: number | null;
   scannedRows?: number;
+  groupBy?: StatsGroupBy | null;
+  groups?: AuditStatsGroup[];
 }
 
 interface AuditFilters {
   from: string;
   to: string;
-  event: string;
-  clientName: string;
-  clientVersion: string;
-  binding: string;
-  tool: string;
-  server: string;
-  status: string;
+  events: string[];
+  clientNames: string[];
+  clientVersions: string[];
+  bindings: string[];
+  tools: string[];
+  servers: string[];
+  statuses: string[];
   minMs: string;
   live: boolean;
   /** Preset minutes as a string (`'60'`); empty means a custom from/to range. */
   range: string;
+}
+
+interface FilterOptions {
+  clients: string[];
+  versions: string[];
+  bindings: Array<{ value: string; label: string }>;
+  tools: string[];
+  servers: Array<{ value: string; label: string }>;
+}
+
+interface ClientsResponse {
+  clients: Array<{ id: string; label: string }>;
+  sessions: Array<{ clientName: string; clientVersion: string }>;
+}
+
+interface ServersResponse {
+  servers: Array<{ id: string; label: string }>;
 }
 
 const MAX_EVENTS = 5_000;
@@ -96,6 +129,14 @@ const STATS_EVERY_TICKS = 5;
 const SLOW_MS = 1_000;
 const DEFAULT_RANGE = '60';
 
+const GROUP_OPTIONS: Array<{ value: '' | StatsGroupBy; label: string }> = [
+  { value: '', label: '不分组' },
+  { value: 'server', label: '按来源（server）' },
+  { value: 'tool', label: '按工具' },
+  { value: 'client', label: '按客户端' },
+  { value: 'status', label: '按状态' },
+];
+
 const RANGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '15', label: '最近 15 分钟' },
   { value: '60', label: '最近 1 小时' },
@@ -105,22 +146,21 @@ const RANGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '自定义时间' },
 ];
 
-const EVENT_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: '', label: '全部事件' },
-  { value: 'tool_call', label: '工具调用' },
-  { value: 'tool_result', label: '工具结果' },
-  { value: 'tool_denied', label: '工具拒绝' },
-  { value: 'eval_start', label: '执行开始' },
-  { value: 'eval_end', label: '执行结束' },
-  { value: 'exec_start', label: '会话开始' },
-  { value: 'exec_end', label: '会话结束' },
-  { value: 'ai_run', label: 'AI 运行' },
-];
+const EVENT_OPTIONS: Array<{ value: string; label: string }> = AUDIT_EVENT_NAMES.map(
+  (value) => ({ value, label: eventLabel(value) }),
+);
 
-const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: '', label: '全部状态' },
-  ...(['ok', 'error', 'timeout'] as const).map((value) => ({ value, label: stateLabel(value) })),
-];
+const STATUS_OPTIONS: Array<{ value: string; label: string }> = (
+  ['ok', 'error', 'timeout'] as const
+).map((value) => ({ value, label: stateLabel(value) }));
+
+const EMPTY_FILTER_OPTIONS: FilterOptions = {
+  clients: [],
+  versions: [],
+  bindings: [],
+  tools: [],
+  servers: [],
+};
 
 
 export function AuditPage(): React.ReactElement {
@@ -141,11 +181,53 @@ export function AuditPage(): React.ReactElement {
   const [notice, setNotice] = useState<string | null>(null);
   const [stats, setStats] = useState<AuditStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [groupBy, setGroupBy] = useState<'' | StatsGroupBy>('');
   const [streamState, setStreamState] = useState<StreamState>('closed');
   const [selected, setSelected] = useState<AuditEvent | null>(null);
+  const [filterOptions, setFilterOptions] = useState<FilterOptions>(EMPTY_FILTER_OPTIONS);
 
   const aliveRef = useRef(true);
   const appliedRef = useRef<AuditFilters>(applied);
+
+  useEffect(() => {
+    let alive = true;
+    void Promise.allSettled([
+      api.get<ClientsResponse>('/clients'),
+      api.get<ServersResponse>('/servers'),
+    ]).then(([clients, servers]) => {
+      if (!alive) return;
+      const delta: Partial<FilterOptions> = {};
+      if (clients.status === 'fulfilled') {
+        delta.clients = (clients.value.sessions ?? []).map((session) => session.clientName);
+        delta.versions = (clients.value.sessions ?? []).map((session) => session.clientVersion);
+        delta.bindings = (clients.value.clients ?? []).map((binding) => ({
+          value: binding.id,
+          label: binding.label === binding.id ? binding.id : `${binding.label} (${binding.id})`,
+        }));
+      }
+      if (servers.status === 'fulfilled') {
+        delta.servers = (servers.value.servers ?? []).map((server) => ({
+          value: server.id,
+          label: server.label === server.id ? server.id : `${server.label} (${server.id})`,
+        }));
+      }
+      rememberFilterOptions(delta);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  // Tool options accumulate from every loaded page; a filter change never shrinks them.
+  useEffect(() => {
+    if (events.length === 0) return;
+    const tools: string[] = [];
+    for (const event of events) {
+      const tool = eventText(event, 'tool');
+      if (tool !== null) tools.push(tool);
+    }
+    rememberFilterOptions({ tools });
+  }, [events]);
   const eventsRef = useRef<AuditEvent[]>([]);
   const seenRef = useRef<Set<string>>(new Set());
   const pendingRef = useRef<AuditEvent[]>([]);
@@ -154,6 +236,7 @@ export function AuditPage(): React.ReactElement {
   const revokeTimerRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
   const statsTokenRef = useRef(0);
+  const groupByRef = useRef<'' | StatsGroupBy>('');
   const streamOpenRef = useRef(false);
   const loadingRef = useRef(true);
   const pollTicksRef = useRef(0);
@@ -256,7 +339,12 @@ export function AuditPage(): React.ReactElement {
     async (filters: AuditFilters): Promise<void> => {
       const token = ++statsTokenRef.current;
       try {
-        const next = await api.get<AuditStats>('/audit/stats', { query: filterQuery(filters) });
+        const next = await api.get<AuditStats>('/audit/stats', {
+          query: {
+            ...filterQuery(filters),
+            groupBy: groupByRef.current === '' ? undefined : groupByRef.current,
+          },
+        });
         if (!aliveRef.current || token !== statsTokenRef.current) return;
         setStats(next);
         setStatsError(null);
@@ -268,6 +356,12 @@ export function AuditPage(): React.ReactElement {
     },
     [api],
   );
+
+  function changeGroupBy(value: '' | StatsGroupBy): void {
+    groupByRef.current = value;
+    setGroupBy(value);
+    void loadStats(appliedRef.current);
+  }
 
   const refreshFromScratch = useCallback((): void => {
     const token = ++loadTokenRef.current;
@@ -419,6 +513,26 @@ export function AuditPage(): React.ReactElement {
 
   function applyDraft(): void {
     commitFilters({ ...draft });
+  }
+
+  function rememberFilterOptions(delta: Partial<FilterOptions>): void {
+    setFilterOptions((previous) => {
+      const clients = mergeValues(previous.clients, delta.clients ?? []);
+      const versions = mergeValues(previous.versions, delta.versions ?? []);
+      const tools = mergeValues(previous.tools, delta.tools ?? []);
+      const bindings = mergeBindings(previous.bindings, delta.bindings ?? []);
+      const servers = mergeBindings(previous.servers, delta.servers ?? []);
+      if (
+        clients === previous.clients
+        && versions === previous.versions
+        && tools === previous.tools
+        && bindings === previous.bindings
+        && servers === previous.servers
+      ) {
+        return previous;
+      }
+      return { clients, versions, bindings, tools, servers };
+    });
   }
 
   function clearFilters(): void {
@@ -678,6 +792,79 @@ export function AuditPage(): React.ReactElement {
       )}
 
       <Card
+        size="small"
+        title="分组统计"
+        extra={
+          <Select
+            size="small"
+            style={{ width: 170 }}
+            value={groupBy}
+            options={GROUP_OPTIONS}
+            onChange={(value) => changeGroupBy(value)}
+          />
+        }
+      >
+        {groupBy === '' ? (
+          <Text type="secondary" style={{ fontSize: 11.5 }}>
+            选择分组维度：按来源看官方内置工具与各 MCP server 的调用量，按工具看具体工具。统计口径是
+            tool_result 事件。
+          </Text>
+        ) : (
+          <Table<AuditStatsGroup>
+            size="small"
+            rowKey="key"
+            loading={stats === null}
+            dataSource={stats?.groups ?? []}
+            pagination={false}
+            columns={[
+              {
+                title: '分组',
+                dataIndex: 'key',
+                ellipsis: true,
+                render: (value: string) => <span className="mono">{groupLabel(value)}</span>,
+              },
+              {
+                title: '调用量',
+                dataIndex: 'calls',
+                width: 100,
+                align: 'right',
+                render: (value: number) => formatNumber(value),
+              },
+              {
+                title: '错误率',
+                dataIndex: 'errorRate',
+                width: 100,
+                align: 'right',
+                render: (value: number) => formatPercent(value),
+              },
+              {
+                title: 'p50',
+                dataIndex: 'p50',
+                width: 90,
+                align: 'right',
+                render: (value: number | null) => formatDuration(value),
+              },
+              {
+                title: 'p95',
+                dataIndex: 'p95',
+                width: 90,
+                align: 'right',
+                render: (value: number | null) => formatDuration(value),
+              },
+              {
+                title: '排队均值',
+                dataIndex: 'queueAvgMs',
+                width: 110,
+                align: 'right',
+                render: (value: number | null) => formatDuration(value),
+              },
+            ]}
+            locale={{ emptyText: '当前筛选没有 tool_result 事件' }}
+          />
+        )}
+      </Card>
+
+      <Card
         title="筛选"
         extra={
           <Space>
@@ -730,66 +917,86 @@ export function AuditPage(): React.ReactElement {
             </Field>
             <Field label="事件类型">
               <Select
-                value={draft.event}
-                style={{ width: 150 }}
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.events}
+                style={{ width: 230 }}
                 options={EVENT_OPTIONS}
-                onChange={(value) => setDraft({ ...draft, event: value })}
+                onChange={(value) => setDraft({ ...draft, events: value })}
               />
             </Field>
             <Field label="状态">
               <Select
-                value={draft.status}
-                style={{ width: 120 }}
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.statuses}
+                style={{ width: 170 }}
                 options={STATUS_OPTIONS}
-                onChange={(value) => setDraft({ ...draft, status: value })}
+                onChange={(value) => setDraft({ ...draft, statuses: value })}
               />
             </Field>
-            <Field label="搜索工具">
-              <Input
+            <Field label="工具">
+              <Select
+                mode="multiple"
                 allowClear
-                value={draft.tool}
-                placeholder="工具名（精确匹配）"
-                style={{ width: 220 }}
-                onChange={(event) => setDraft({ ...draft, tool: event.target.value })}
-                onPressEnter={applyDraft}
+                maxTagCount="responsive"
+                value={draft.tools}
+                placeholder="工具名"
+                style={{ width: 230 }}
+                options={listOptions(filterOptions.tools)}
+                onChange={(value) => setDraft({ ...draft, tools: value })}
               />
             </Field>
           </Space>
           <Space wrap size={[12, 10]}>
             <Field label="客户端名称">
-              <Input
-                value={draft.clientName}
-                placeholder="claude-code"
-                style={{ width: 150 }}
-                onChange={(event) => setDraft({ ...draft, clientName: event.target.value })}
-                onPressEnter={applyDraft}
+              <Select
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.clientNames}
+                placeholder="客户端"
+                style={{ width: 170 }}
+                options={listOptions(filterOptions.clients)}
+                onChange={(value) => setDraft({ ...draft, clientNames: value })}
               />
             </Field>
             <Field label="客户端版本">
-              <Input
-                value={draft.clientVersion}
-                placeholder="2.1.327"
-                style={{ width: 130 }}
-                onChange={(event) => setDraft({ ...draft, clientVersion: event.target.value })}
-                onPressEnter={applyDraft}
+              <Select
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.clientVersions}
+                placeholder="版本"
+                style={{ width: 140 }}
+                options={listOptions(filterOptions.versions)}
+                onChange={(value) => setDraft({ ...draft, clientVersions: value })}
               />
             </Field>
             <Field label="绑定（binding）">
-              <Input
-                value={draft.binding}
-                placeholder="cb_…"
-                style={{ width: 150 }}
-                onChange={(event) => setDraft({ ...draft, binding: event.target.value })}
-                onPressEnter={applyDraft}
+              <Select
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.bindings}
+                placeholder="binding"
+                style={{ width: 210 }}
+                options={filterOptions.bindings}
+                onChange={(value) => setDraft({ ...draft, bindings: value })}
               />
             </Field>
             <Field label="服务端（server）">
-              <Input
-                value={draft.server}
-                placeholder="server id"
-                style={{ width: 150 }}
-                onChange={(event) => setDraft({ ...draft, server: event.target.value })}
-                onPressEnter={applyDraft}
+              <Select
+                mode="multiple"
+                allowClear
+                maxTagCount="responsive"
+                value={draft.servers}
+                placeholder="server"
+                style={{ width: 200 }}
+                options={filterOptions.servers}
+                onChange={(value) => setDraft({ ...draft, servers: value })}
               />
             </Field>
             <Field label="最短耗时（ms）">
@@ -1044,13 +1251,13 @@ function defaultAuditFilters(now: number = Date.now()): AuditFilters {
   return {
     from: toDateTimeLocal(now - Number(DEFAULT_RANGE) * 60_000),
     to: '',
-    event: '',
-    clientName: '',
-    clientVersion: '',
-    binding: '',
-    tool: '',
-    server: '',
-    status: '',
+    events: [],
+    clientNames: [],
+    clientVersions: [],
+    bindings: [],
+    tools: [],
+    servers: [],
+    statuses: [],
     minMs: '',
     live: true,
     range: DEFAULT_RANGE,
@@ -1089,16 +1296,30 @@ function readFiltersFromHash(): AuditFilters {
   const legacyClient = params.get('client');
   const legacyParts = legacyClient === null ? { name: '', version: '' } : splitClientFilter(legacyClient);
 
+  const list = (name: string): string[] =>
+    params
+      .getAll(name)
+      .flatMap((value) => value.split(','))
+      .map((value) => value.trim())
+      .filter((value) => value !== '');
+  const clientNames = list('clientName');
+  const clientVersions = list('clientVersion');
+
   return {
     from,
     to,
-    event: pickOption(params.get('event'), EVENT_OPTIONS),
-    clientName: params.get('clientName') ?? legacyParts.name,
-    clientVersion: params.get('clientVersion') ?? legacyParts.version,
-    binding: params.get('binding') ?? '',
-    tool: params.get('tool') ?? '',
-    server: params.get('server') ?? '',
-    status: pickOption(params.get('status'), STATUS_OPTIONS),
+    events: list('event'),
+    clientNames: clientNames.length > 0 || legacyParts.name === '' ? clientNames : [legacyParts.name],
+    clientVersions:
+      clientVersions.length > 0 || legacyParts.version === ''
+        ? clientVersions
+        : [legacyParts.version],
+    bindings: list('binding'),
+    tools: list('tool'),
+    servers: list('server'),
+    statuses: list('status').filter((value) =>
+      STATUS_OPTIONS.some((option) => option.value === value),
+    ),
     minMs: pickMinMs(params.get('minMs')),
     live: params.get('live') !== '0',
     range: rangeValue,
@@ -1111,18 +1332,22 @@ function writeFiltersToHash(filters: AuditFilters): void {
   if (filters.range !== '') params.set('range', filters.range);
   if (filters.from !== '') params.set('from', filters.from);
   if (filters.to !== '') params.set('to', filters.to);
-  if (filters.event !== '') params.set('event', filters.event);
-  if (filters.clientName !== '') params.set('clientName', filters.clientName);
-  if (filters.clientVersion !== '') params.set('clientVersion', filters.clientVersion);
-  if (filters.binding !== '') params.set('binding', filters.binding);
-  if (filters.tool !== '') params.set('tool', filters.tool);
-  if (filters.server !== '') params.set('server', filters.server);
-  if (filters.status !== '') params.set('status', filters.status);
+  setListParam(params, 'event', filters.events);
+  setListParam(params, 'clientName', filters.clientNames);
+  setListParam(params, 'clientVersion', filters.clientVersions);
+  setListParam(params, 'binding', filters.bindings);
+  setListParam(params, 'tool', filters.tools);
+  setListParam(params, 'server', filters.servers);
+  setListParam(params, 'status', filters.statuses);
   if (filters.minMs !== '') params.set('minMs', filters.minMs);
   params.set('live', filters.live ? '1' : '0');
   const next = `#/audit?${params.toString()}`;
   if (window.location.hash === next) return;
   window.history.replaceState(null, '', next);
+}
+
+function setListParam(params: URLSearchParams, name: string, values: readonly string[]): void {
+  if (values.length > 0) params.set(name, values.join(','));
 }
 
 function isPresetRange(value: string): boolean {
@@ -1134,13 +1359,6 @@ function isDateTimeLocal(value: string): boolean {
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(value) &&
     parseTime(value) !== null
   );
-}
-
-function pickOption(
-  value: string | null,
-  entries: ReadonlyArray<{ value: string }>,
-): string {
-  return value !== null && entries.some((entry) => entry.value === value) ? value : '';
 }
 
 function pickMinMs(value: string | null): string {
@@ -1172,15 +1390,19 @@ function filterQuery(filters: AuditFilters): Record<string, string | number | un
   return {
     from: toIso(filters.from),
     to: toIso(filters.to),
-    event: emptyToUndefined(filters.event),
-    clientName: emptyToUndefined(filters.clientName),
-    clientVersion: emptyToUndefined(filters.clientVersion),
-    binding: emptyToUndefined(filters.binding),
-    tool: emptyToUndefined(filters.tool),
-    server: emptyToUndefined(filters.server),
-    status: emptyToUndefined(filters.status),
+    event: joinFilter(filters.events),
+    clientName: joinFilter(filters.clientNames),
+    clientVersion: joinFilter(filters.clientVersions),
+    binding: joinFilter(filters.bindings),
+    tool: joinFilter(filters.tools),
+    server: joinFilter(filters.servers),
+    status: joinFilter(filters.statuses),
     minMs: emptyToUndefined(filters.minMs),
   };
+}
+
+function joinFilter(values: readonly string[]): string | undefined {
+  return values.length === 0 ? undefined : values.join(',');
 }
 
 function toIso(value: string): string | undefined {
@@ -1324,27 +1546,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** The stream is unfiltered; keep only rows that match the applied form filters. */
 function matchesFilters(event: AuditEvent, filters: AuditFilters): boolean {
-  if (filters.event !== '' && event.event !== filters.event) return false;
+  if (filters.events.length > 0 && !filters.events.includes(event.event ?? '')) return false;
   const time = parseEventTime(event);
   const from = parseTime(filters.from);
   const to = parseTime(filters.to);
   if (from !== null && (time === null || time < from)) return false;
   if (to !== null && (time === null || time > to)) return false;
-  const clientName = filters.clientName.trim();
-  if (clientName !== '' && eventClientParts(event).name !== clientName) return false;
-  const clientVersion = filters.clientVersion.trim();
-  if (clientVersion !== '' && eventClientParts(event).version !== clientVersion) return false;
-  const binding = filters.binding.trim();
-  if (binding !== '' && eventText(event, 'binding') !== binding) return false;
-  const tool = filters.tool.trim();
-  if (tool !== '' && eventText(event, 'tool') !== tool) return false;
-  const server = filters.server.trim();
-  if (server !== '') {
+  if (filters.clientNames.length > 0 && !filters.clientNames.includes(eventClientParts(event).name)) {
+    return false;
+  }
+  if (
+    filters.clientVersions.length > 0
+    && !filters.clientVersions.includes(eventClientParts(event).version)
+  ) {
+    return false;
+  }
+  if (filters.bindings.length > 0) {
+    const binding = eventText(event, 'binding');
+    if (binding === null || !filters.bindings.includes(binding)) return false;
+  }
+  if (filters.tools.length > 0) {
+    const tool = eventText(event, 'tool');
+    if (tool === null || !filters.tools.includes(tool)) return false;
+  }
+  if (filters.servers.length > 0) {
     // `ai_run` carries no `server`; the server-side filter also accepts `serverId`.
     const serverId = eventText(event, 'server') ?? eventText(event, 'serverId');
-    if (serverId !== server) return false;
+    if (serverId === null || !filters.servers.includes(serverId)) return false;
   }
-  if (filters.status !== '' && (eventStatus(event) || 'ok') !== filters.status) return false;
+  if (
+    filters.statuses.length > 0
+    && !filters.statuses.includes(eventStatus(event) || 'ok')
+  ) {
+    return false;
+  }
   const minMs = filters.minMs.trim();
   if (minMs !== '') {
     const minimum = Number(minMs);
@@ -1406,6 +1641,13 @@ function eventKey(event: AuditEvent): string {
 
 function exportStamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function groupLabel(key: string): string {
+  if (key === '__official__') return '官方工具（内置）';
+  if (key === '__builtin__') return '协议工具（repl）';
+  if (key === 'unknown') return '未知';
+  return key;
 }
 
 function failureText(error: unknown): string {

@@ -382,6 +382,46 @@ test('queryAudit applies event, exec/evalId, tool and status filters', async (t)
   }));
 });
 
+test('multi-value filters accept repeated and comma-separated params', async (t) => {
+  const { dir } = await createFixture(t);
+  const parsed = parseAuditQueryParams(
+    new URLSearchParams([
+      ['clientName', 'claude-code,other'],
+      ['clientName', 'third'],
+      ['clientVersion', '2.1.327'],
+      ['binding', 'cb_1'],
+      ['binding', 'cb_2'],
+      ['tool', 'Bash'],
+      ['tool', 'Read'],
+      ['server', 'serve,mcp:pg'],
+      ['method', 'tools/call'],
+      ['method', 'tools/list'],
+      ['status', 'ok'],
+      ['status', 'error'],
+    ]),
+  );
+  assert.deepEqual(parsed.clientNames, ['claude-code', 'other', 'third']);
+  assert.equal(parsed.clientVersion, '2.1.327');
+  assert.deepEqual(parsed.bindings, ['cb_1', 'cb_2']);
+  assert.deepEqual(parsed.tools, ['Bash', 'Read']);
+  assert.deepEqual(parsed.servers, ['serve', 'mcp:pg']);
+  assert.deepEqual(parsed.methods, ['tools/call', 'tools/list']);
+  assert.deepEqual(parsed.statuses, ['ok', 'error']);
+
+  const byTools = await queryAudit(dir, normalizeFilter({ tool: ['Bash', 'Read'] }), { limit: 100 });
+  assert.ok(byTools.events.length > 0);
+  assert.ok(byTools.events.every((event) => event.tool === 'Bash' || event.tool === 'Read'));
+
+  const statuses = await queryAudit(dir, normalizeFilter({ status: ['ok', 'error'] }), { limit: 100 });
+  const errorsOnly = await queryAudit(dir, normalizeFilter({ status: 'error' }), { limit: 100 });
+  assert.ok(statuses.events.length > errorsOnly.events.length);
+
+  assert.throws(
+    () => normalizeFilter({ status: ['ok', 'nope'] }),
+    InvalidAuditFilterError,
+  );
+});
+
 test('listAuditFiles filters by UTC day and sorted order', async (t) => {
   const { dir } = await createFixture(t);
   const all = await listAuditFiles(dir, 'audit');
@@ -546,6 +586,20 @@ test('stats aggregate tool results in a worker thread', async (t) => {
   assert.equal(errorsOnly.calls, 1);
   assert.equal(errorsOnly.errors, 1);
   assert.equal(errorsOnly.p50, 200);
+
+  const bothStatuses = await computeAuditStats(
+    dir,
+    normalizeFilter({ status: ['ok', 'error'] }),
+    { cacheTtlMs: 0 },
+  );
+  assert.equal(bothStatuses.calls, 3, 'multi-value status reaches the stats worker');
+
+  const bothTools = await computeAuditStats(
+    dir,
+    normalizeFilter({ tool: ['Bash', 'Read'] }),
+    { cacheTtlMs: 0 },
+  );
+  assert.equal(bothTools.calls, 3, 'multi-value tool reaches the stats worker');
 });
 
 test('stats groupBy tool/server/status produces ordered buckets', async (t) => {
@@ -727,6 +781,76 @@ test('frames endpoint pairs requests/responses and strips detail by default', as
     params: new URLSearchParams({ detail: 'raw' }),
   });
   assert.equal(badDetail.status, 400);
+});
+
+test('frames endpoint filters by tool, protocol status and execution result', async (t) => {
+  const { dir } = await createFixture(t);
+  const at = (offset: number): string => new Date(DAY_18 + 100 + offset).toISOString();
+  const common = { v: 1, ...IDENTITY };
+  const extra = [
+    { ...common, ts: at(0), event: 'proto_in', id: 2, method: 'tools/call', params: { name: 'search_tools' } },
+    {
+      ...common,
+      ts: at(10),
+      event: 'proto_out',
+      id: 2,
+      method: 'tools/call',
+      ok: true,
+      result: { content: [], isError: true },
+    },
+    { ...common, ts: at(20), event: 'proto_in', id: 3, method: 'tools/list' },
+    {
+      ...common,
+      ts: at(21),
+      event: 'proto_out',
+      id: 3,
+      method: 'tools/list',
+      ok: false,
+      error: { code: -32600, message: 'bad request' },
+    },
+    { ...common, ts: at(30), event: 'proto_in', id: 4, method: 'tools/call', params: { name: 'run_script' } },
+  ];
+  await writeFile(
+    join(dir, 'protocol-2026-11-18.jsonl'),
+    `${extra.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    { encoding: 'utf8', flag: 'a' },
+  );
+  const endpoints = createAuditEndpoints({ dir });
+
+  const byTool = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ tool: 'search_tools' }),
+  });
+  const toolFrames = bodyOf(byTool).frames as Array<Record<string, unknown>>;
+  assert.equal(toolFrames.length, 1);
+  assert.equal(toolFrames[0]?.id, 2);
+
+  const protocolError = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ protocol: 'error' }),
+  });
+  const errorFrames = bodyOf(protocolError).frames as Array<Record<string, unknown>>;
+  assert.deepEqual(errorFrames.map((frame) => frame.id), [3]);
+
+  const resultError = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ result: 'error' }),
+  });
+  const resultFrames = bodyOf(resultError).frames as Array<Record<string, unknown>>;
+  assert.deepEqual(resultFrames.map((frame) => frame.id), [2]);
+
+  const unresolved = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ protocol: 'none', tool: 'run_script' }),
+  });
+  const pendingFrames = bodyOf(unresolved).frames as Array<Record<string, unknown>>;
+  assert.deepEqual(pendingFrames.map((frame) => frame.id), [4]);
+
+  const bad = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ protocol: 'maybe' }),
+  });
+  assert.equal(bad.status, 400);
 });
 
 test('export endpoint enforces the row ceiling and streams JSONL otherwise', async (t) => {

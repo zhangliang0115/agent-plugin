@@ -139,6 +139,36 @@ test('run_script description says when no server is visible', () => {
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, []);
   assert.ok(description.includes('No MCP servers are visible to this client.'));
   assert.ok(description.includes('Find: search_tools'));
+  assert.ok(!description.includes('## Built-in tools'), 'an empty builtin list adds no section');
+});
+
+test('run_script description lists visible builtin tools by bare name', () => {
+  const servers = visible(
+    [server({ id: 'pg', category: 'database' })],
+    [tool('pg', 'query')],
+  );
+  const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers, [
+    'Write',
+    'Read',
+    'Bash',
+  ]);
+
+  assert.match(description, /## Built-in tools \(call by bare name\)/);
+  assert.match(description, /Bash, Read, Write/, 'names are sorted');
+  assert.match(description, /Call: tools\.<name>\(args\)/);
+  assert.match(description, /## MCP servers/);
+  assert.match(description, /pg {2}\[database\] {2}1 tools/);
+});
+
+test('over-budget builtin names are counted, not silently dropped', () => {
+  const names = Array.from({ length: 300 }, (_unused, index) => `long_tool_${String(index).padStart(3, '0')}`);
+  const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, [], names);
+  const bytes = Buffer.byteLength(description, 'utf8');
+  assert.ok(bytes <= DESCRIPTION_MAX_BYTES, `description is ${bytes} bytes`);
+  assert.ok(description.includes('long_tool_000'));
+  assert.ok(!description.includes('long_tool_299'));
+  assert.match(description, /… \(\+\d+ more via search_tools\)/);
+  assert.ok(description.includes('Args: describe_tools({ names })'), 'guidance survives');
 });
 
 test('over-budget server lists are truncated from the tail and guidance survives', () => {
@@ -164,7 +194,7 @@ test('over-budget server lists are truncated from the tail and guidance survives
 
 test('instructions stay short and point at run_script for the server list', () => {
   assert.ok([...INSTRUCTIONS].length <= 1_200, `instructions are ${[...INSTRUCTIONS].length} chars`);
-  assert.ok(INSTRUCTIONS.includes("Visible MCP servers are listed in run_script's description."));
+  assert.ok(INSTRUCTIONS.includes("Visible built-in tools and MCP servers are listed in run_script's description."));
   assert.ok(INSTRUCTIONS.includes('Do not guess tool names. Unknown names fail.'));
   assert.ok(!INSTRUCTIONS.includes('30000'));
   assert.ok(!INSTRUCTIONS.includes('50000'));

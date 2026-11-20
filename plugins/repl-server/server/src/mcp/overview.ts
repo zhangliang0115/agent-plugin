@@ -45,6 +45,9 @@ export interface VisibleServerInput {
 export const DESCRIPTION_MAX_BYTES = 2048;
 
 const NO_SERVERS = 'No MCP servers are visible to this client.';
+const BUILTIN_HEADER = '\n\n## Built-in tools (call by bare name)\n\n';
+const BUILTIN_CALL = '\nCall: tools.<name>(args)';
+const MCP_HEADER = '\n\n## MCP servers (server id, category, visible tool count)\n\n';
 const FIXED_GUIDANCE = [
   'Call: tools.mcp.<server>.<tool>(args)',
   'Find: search_tools({ query, server?, category?, tags? })',
@@ -129,41 +132,91 @@ export function formatServerLine(server: McpServerOverview): string {
 }
 
 /**
+ * `## Built-in tools` block: every visible official tool name, packed left to
+ * right within `budget` bytes. A dropped tail is counted, not silent.
+ */
+function builtinBlock(names: readonly string[], budget: number): string {
+  if (names.length === 0) return '';
+  const fixed = Buffer.byteLength(BUILTIN_HEADER, 'utf8') + Buffer.byteLength(BUILTIN_CALL, 'utf8');
+  if (fixed >= budget) return '';
+
+  const unique = [...new Set(names)].sort();
+  let left = budget - fixed;
+  const kept: string[] = [];
+  for (const name of unique) {
+    const cost = Buffer.byteLength(name, 'utf8') + (kept.length === 0 ? 0 : 2);
+    if (cost > left) break;
+    kept.push(name);
+    left -= cost;
+  }
+  if (kept.length === 0) return '';
+
+  let list = kept.join(', ');
+  let dropped = unique.length - kept.length;
+  // Make room for the count note rather than dropping the tail silently.
+  while (dropped > 0) {
+    const note = ` … (+${dropped} more via search_tools)`;
+    if (Buffer.byteLength(note, 'utf8') <= left) {
+      list += note;
+      break;
+    }
+    const removed = kept.pop();
+    if (removed === undefined) break;
+    left += Buffer.byteLength(removed, 'utf8') + (kept.length === 0 ? 0 : 2);
+    list = kept.join(', ');
+    dropped = unique.length - kept.length;
+  }
+  return `${BUILTIN_HEADER}${list}${BUILTIN_CALL}`;
+}
+
+/**
  * Builds the session-specific `run_script.description`.
  *
- * The static rules in `base` are never truncated. Server lines are appended
- * from the head of the list and dropped from the tail once the UTF-8 budget is
- * spent; the `Call`/`Find`/`Args` guidance is reserved up front so it always
- * survives truncation. With no visible servers the section says so instead of
- * staying empty.
+ * The static rules in `base` are never truncated. Built-in tools come first
+ * (they are always callable and few), then MCP server lines; both are dropped
+ * from the tail once the UTF-8 budget is spent. The `Call`/`Find`/`Args`
+ * guidance is reserved up front so it always survives truncation. With no
+ * visible servers the section says so instead of staying empty. An empty
+ * `builtinNames` (official sync unavailable, tools disabled by policy, or the
+ * caller has no tag permission) omits the block entirely.
  */
 export function buildRunScriptDescription(
   base: string,
   servers: readonly McpServerOverview[],
+  builtinNames: readonly string[] = [],
 ): string {
-  const header = '\n\n## MCP servers (server id, category, visible tool count)\n\n';
   const suffix = `\n\n${FIXED_GUIDANCE}`;
-  const budget = DESCRIPTION_MAX_BYTES
+  let budget = DESCRIPTION_MAX_BYTES
     - Buffer.byteLength(base, 'utf8')
-    - Buffer.byteLength(header, 'utf8')
     - Buffer.byteLength(suffix, 'utf8');
-  // The fixed core and guidance are reserved first; only the server lines are optional.
+  // The fixed core and guidance are reserved first; everything after is optional.
   if (budget <= 0) return `${base}${suffix}`;
 
-  const lines = servers.length === 0 ? [NO_SERVERS] : servers.map(formatServerLine);
-  const kept: string[] = [];
-  let used = 0;
-  for (const line of lines) {
-    const cost = Buffer.byteLength(line, 'utf8') + (kept.length === 0 ? 0 : 1);
-    if (used + cost > budget) break;
-    kept.push(line);
-    used += cost;
-  }
-  if (kept.length === 0) {
-    // A visible list that cannot fit is reported, not rendered as an empty section.
-    const note = servers.length === 0 ? NO_SERVERS : '(server list omitted: description budget)';
-    if (Buffer.byteLength(note, 'utf8') <= budget) kept.push(note);
+  let description = base;
+  const builtins = builtinBlock(builtinNames, budget);
+  if (builtins !== '') {
+    description += builtins;
+    budget -= Buffer.byteLength(builtins, 'utf8');
   }
 
-  return `${base}${header}${kept.join('\n')}${suffix}`;
+  const headerCost = Buffer.byteLength(MCP_HEADER, 'utf8');
+  if (budget > headerCost) {
+    const lines = servers.length === 0 ? [NO_SERVERS] : servers.map(formatServerLine);
+    const kept: string[] = [];
+    let used = 0;
+    for (const line of lines) {
+      const cost = Buffer.byteLength(line, 'utf8') + (kept.length === 0 ? 0 : 1);
+      if (used + cost > budget - headerCost) break;
+      kept.push(line);
+      used += cost;
+    }
+    if (kept.length === 0) {
+      // A visible list that cannot fit is reported, not rendered as an empty section.
+      const note = servers.length === 0 ? NO_SERVERS : '(server list omitted: description budget)';
+      if (Buffer.byteLength(note, 'utf8') <= budget - headerCost) kept.push(note);
+    }
+    if (kept.length > 0) description += `${MCP_HEADER}${kept.join('\n')}`;
+  }
+
+  return `${description}${suffix}`;
 }

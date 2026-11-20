@@ -394,6 +394,14 @@ test('search_tools returns the server overview for an empty query', () => {
   const items = searchTools(SNAPSHOT, { query: '   ' });
   assert.deepEqual(items, [
     {
+      name: '__official__',
+      kind: 'builtin',
+      toolCount: 1,
+      description: '1 tool; call tools.<tool>(args)',
+      summary: 'Official Claude Code tools',
+      tags: ['files', 'read'],
+    },
+    {
       name: 'github',
       kind: 'mcp',
       server: 'github',
@@ -414,6 +422,17 @@ test('search_tools returns the server overview for an empty query', () => {
       tags: ['db', 'read', 'write'],
     },
   ]);
+});
+
+test('an empty query with server __official__ lists the bare builtin names', () => {
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: '', server: '__official__' }).map((item) => item.name),
+    ['Read'],
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: '', server: 'pg' }).map((item) => item.name),
+    ['pg.insert_row', 'pg.query'],
+  );
 });
 
 test('search_tools visibility: allowedServers hides MCP tools but not builtins', () => {
@@ -437,9 +456,14 @@ test('search_tools visibility: allowedTags is any-of over every tool', () => {
   assert.deepEqual(names(['nope']), []);
 
   assert.deepEqual(
-    searchTools(SNAPSHOT, { query: '', allowedServers: [] }),
+    searchTools(SNAPSHOT, { query: '', allowedServers: [] }).map((item) => item.name),
+    ['__official__'],
+    'allowedServers hides MCP servers but the official group stays',
+  );
+  assert.deepEqual(
+    searchTools(SNAPSHOT, { query: '', allowedTags: [] }),
     [],
-    'the overview is empty without visible MCP servers',
+    'an empty tag allow list hides every tool, official included',
   );
 });
 
@@ -539,7 +563,7 @@ test('dynamic search_tools schema carries the visible server, category and tag e
     default: 10,
   });
   assert.match(definition.description, /empty query without server returns the server overview/i);
-  assert.match(definition.description, /empty query with server returns that server's tools/i);
+  assert.match(definition.description, /empty query with server \(including __official__\) returns that group's tools/i);
   assert.match(definition.description, /tool names, effective tags and descriptions/i);
   assert.match(definition.description, /only narrow/i);
   assert.match(definition.description, /all-of/);

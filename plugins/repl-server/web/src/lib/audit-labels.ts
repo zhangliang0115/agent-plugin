@@ -24,6 +24,9 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   alert_test: '告警测试',
 };
 
+/** Every event name with a Chinese label; dropdown options use this order. */
+export const AUDIT_EVENT_NAMES: readonly string[] = Object.keys(EVENT_LABELS);
+
 const AI_RUN_KIND_LABELS: Readonly<Record<string, string>> = {
   annotate: '生成标注',
   propose: '生成配置草稿',

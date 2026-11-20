@@ -214,6 +214,13 @@ function canonicalToolName(call: ToolCallRequest): string {
   return call.server === undefined ? call.tool : `${call.server}.${call.tool}`;
 }
 
+/** Catalog server id for the official Claude Code tools; their calls carry no `server`. */
+const OFFICIAL_TOOL_SERVER = '__official__';
+
+function toolServer(call: ToolCallRequest): string {
+  return call.server ?? OFFICIAL_TOOL_SERVER;
+}
+
 /** Correlation fields shared by the tool events of one eval. */
 function runFields(runtime: SessionRuntime, evalId: number): Record<string, unknown> {
   const runId = runtime.runIds.get(evalId);
@@ -699,6 +706,7 @@ export class ExecGateway implements ExecutionGateway {
           event: 'tool_denied',
           evalId: call.evalId,
           tool: name,
+          server: toolServer(call),
           workspace: runtime.record.workspace,
           ...runFields(runtime, call.evalId),
         });
@@ -741,6 +749,7 @@ export class ExecGateway implements ExecutionGateway {
       event: 'tool_call',
       evalId: call.evalId,
       tool: name,
+      server: toolServer(call),
       workspace: runtime.record.workspace,
       ...runFields(runtime, call.evalId),
     });
@@ -749,6 +758,7 @@ export class ExecGateway implements ExecutionGateway {
         event: 'tool_result',
         evalId: call.evalId,
         tool: name,
+        server: toolServer(call),
         ok,
         durMs: this.now() - started,
         ...runFields(runtime, call.evalId),
