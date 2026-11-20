@@ -101,6 +101,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
+- 结果顶层带 `ttlMs: 0`、`cacheScope: "private"`：2026-07-28 的列表结果必须带缓存提示；工具可见性按 binding 与目录变化，不做客户端缓存
 
 **方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。不支持 resources/prompts/logging/subscriptions；未知方法 `-32601`；批量请求不支持。
 
