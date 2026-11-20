@@ -172,7 +172,7 @@ test('GET /ai/config returns defaults and prompt versions', async (t) => {
   assert.equal(response.ai.claudeBin, null);
   assert.equal(response.ai.effectiveClaudeBin, 'claude');
   assert.equal(response.ai.claudeBinSource, 'default');
-  assert.deepEqual(response.prompts, { propose: 7, annotate: 7 });
+  assert.deepEqual(response.prompts, { propose: 9, annotate: 9 });
   assert.equal(response.revision, 0);
 });
 
@@ -270,7 +270,7 @@ test('propose previews a draft without writing servers or revision', async (t) =
   assert.match(response.proposalId ?? '', /^prop_[0-9a-f]+$/);
   assert.equal((response.server as { id: string }).id, 'github');
   assert.equal(response.idConflict, false);
-  assert.equal(response.meta.promptVersion, 7);
+  assert.equal(response.meta.promptVersion, 9);
   assert.ok(typeof response.meta.expiresAt === 'string');
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'github'), null);

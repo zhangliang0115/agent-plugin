@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { authorizeAdminRequest, isAllowedHost } from '../auth/tokens.ts';
@@ -17,7 +18,7 @@ export interface AdminHttpOptions {
   session?: AdminSession;
   /** SSE streams; authenticated by the same gate as `/admin/api/*`. */
   sse?: { events?: EventHub; audit?: EventHub };
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 const MAX_BODY_BYTES = 1 << 20;
@@ -129,7 +130,7 @@ async function dispatch(
       send(res, response.status, response.body, { ...extraHeaders, ...response.headers });
       return true;
     } catch (error) {
-      options.log?.(`repl-server: admin handler failed: ${(error as Error).message}`);
+      options.log?.(`admin handler failed: ${(error as Error).message}`, { level: 'error', scope: 'admin' });
       const response = errorResponse(error);
       send(res, response.status, response.body, { ...extraHeaders, ...response.headers });
       return true;

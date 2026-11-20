@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
-import { TagPillEditor } from '../components/PillEditors.tsx';
+import { CategoryPillEditor, TagPillEditor } from '../components/PillEditors.tsx';
 import { ToolSchemaDoc } from '../components/ToolSchemaDoc.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
@@ -171,6 +171,13 @@ const CONCURRENCY_OPTIONS = [
   { value: 'parallel', label: 'parallel（读锁）' },
   { value: 'serial', label: 'serial（写锁）' },
   { value: 'exclusive', label: 'exclusive（全局独占）' },
+];
+
+/** Pill labels for the inline concurrency editor; keys are the API values. */
+const CONCURRENCY_DICTIONARY = [
+  { key: 'parallel', zh: '并行', en: 'parallel（读锁）' },
+  { key: 'serial', zh: '串行', en: 'serial（写锁）' },
+  { key: 'exclusive', zh: '独占', en: 'exclusive（全局独占）' },
 ];
 
 export function ToolsPage({ serverId }: { serverId?: string | null }): React.ReactElement {
@@ -317,7 +324,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '工具',
         dataIndex: 'name',
-        width: 220,
+        width: 200,
         render: (value: string, tool: ToolRecord) => (
           <div>
             {tool.displayName !== null && tool.displayName !== value ? <div>{tool.displayName}</div> : null}
@@ -328,7 +335,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '来源',
         dataIndex: 'discoveredVia',
-        width: 80,
+        width: 72,
         render: (value: 'static' | 'search' | undefined) => (
           <Tag bordered={false} color={value === 'search' ? 'blue' : 'default'}>
             {value === 'search' ? 'search' : 'static'}
@@ -358,17 +365,17 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '并发',
         dataIndex: 'concurrency',
-        width: 110,
+        width: 100,
         render: (value: ToolConcurrency, tool: ToolRecord) => (
           <div onClick={(event) => event.stopPropagation()}>
-            <Select
-              size="small"
-              style={{ width: '100%' }}
+            <CategoryPillEditor
+              noun="并发"
+              allowClear={false}
+              dictionary={CONCURRENCY_DICTIONARY}
               value={value}
-              options={CONCURRENCY_OPTIONS}
-              loading={(inlinePending[inlineKey(tool, 'concurrency')] ?? 0) > 0}
-              onChange={(next: ToolConcurrency) =>
-                void patchInline(tool, { concurrency: next }, 'concurrency')
+              disabled={(inlinePending[inlineKey(tool, 'concurrency')] ?? 0) > 0}
+              onChange={(next) =>
+                void patchInline(tool, { concurrency: next as ToolConcurrency }, 'concurrency')
               }
             />
           </div>
@@ -377,7 +384,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '标签（含继承）',
         dataIndex: 'tags',
-        width: 300,
+        width: 260,
         render: (value: string[], tool: ToolRecord) => (
           <TagPillEditor
             dictionary={tagDefinitions}
@@ -391,7 +398,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '暴露',
-        width: 90,
+        width: 84,
         render: (_value: unknown, tool: ToolRecord) => {
           if (tool.effective === undefined) {
             return tool.stale ? <Tag color="gold">stale</Tag> : <span className="muted">—</span>;
@@ -405,7 +412,6 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '描述',
-        width: 280,
         ellipsis: true,
         render: (_value: unknown, tool: ToolRecord) => {
           const text = tool.effective?.description ?? tool.description ?? '';
@@ -418,7 +424,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '操作',
-        width: 120,
+        width: 140,
         render: (_value: unknown, tool: ToolRecord) => (
           <Space size={0}>
             <Button size="small" type="link" icon={<BookOutlined />} onClick={() => setDocTool(tool)}>
@@ -893,7 +899,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             dataSource={filtered}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1280 }}
+            tableLayout="fixed"
             locale={{
               emptyText: (
                 <Empty
@@ -911,11 +917,12 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       </Card>
 
       <Drawer
+        placement="left"
         forceRender
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={editingTool === null ? '编辑工具' : `编辑 ${editingTool.serverId}/${editingTool.name}`}
-        width={520}
+        width={580}
         extra={
           <Space>
             <Button onClick={() => setEditorOpen(false)}>取消</Button>
@@ -960,20 +967,22 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       </Drawer>
 
       <Drawer
+        placement="left"
         open={docTool !== null}
         onClose={() => setDocTool(null)}
         title={docTool === null ? '工具说明' : `工具说明 · ${docTool.serverId}/${docTool.name}`}
-        width={820}
+        width={960}
       >
         {docTool === null ? null : <ToolSchemaDoc tool={docTool} />}
       </Drawer>
 
       <Drawer
+        placement="left"
         forceRender
         open={discoverOpen}
         onClose={() => setDiscoverOpen(false)}
         title={selectedId === null ? '扫描懒加载工具' : `扫描懒加载工具 · ${selectedId}`}
-        width={760}
+        width={860}
         extra={
           <Space>
             <Button onClick={() => setDiscoverOpen(false)}>关闭</Button>

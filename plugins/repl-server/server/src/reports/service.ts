@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /** The single write pipeline shared by the MCP tool and the admin API (06 §3.3). @module */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -105,7 +106,7 @@ export interface ReportServiceDeps {
   audit?: ReportAuditSink;
   clock?: Clock;
   limits?: Partial<ReportLimits>;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 export interface ValidatedReport {
@@ -228,7 +229,7 @@ export function createReportService(deps: ReportServiceDeps): ReportService {
     try {
       deps.audit.write({ ts: nowIso(), ...fields });
     } catch (error) {
-      log(`repl-server: report audit write failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`report audit write failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'reports' });
     }
   }
 
@@ -237,7 +238,7 @@ export function createReportService(deps: ReportServiceDeps): ReportService {
     try {
       deps.alerts.kick();
     } catch (error) {
-      log(`repl-server: alert kick failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`alert kick failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'reports' });
     }
   }
 

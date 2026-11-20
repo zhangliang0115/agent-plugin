@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ProcessLedger, newId, type PoolEntry, type ToolCallRequest } from '@zhangliang0115/repl-server-core';
 
+import { createLog, type LogFn } from './log.ts';
 import { createAdminOverviewHandler } from './admin/overview.ts';
 import { createAdminClientsHandler, type McpSessionRecord, type SessionRegistry } from './admin/clients.ts';
 import { createAdminDiscoverHandler } from './admin/discover.ts';
@@ -87,7 +88,7 @@ export interface AssemblyOptions {
   transportIdleMs?: number;
   /** Test seam: background lifecycle sweep interval; defaults to 60 seconds. */
   sweepIntervalMs?: number;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 export interface Assembly {
@@ -133,7 +134,7 @@ const SWEEP_INTERVAL_MS = 60_000;
  */
 function closeServer(
   server: Server,
-  log: (line: string) => void,
+  log: LogFn,
   timeoutMs = SERVER_CLOSE_TIMEOUT_MS,
 ): Promise<void> {
   server.closeIdleConnections();
@@ -149,7 +150,11 @@ function closeServer(
     timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      log(`repl-server: server.close did not finish within ${timeoutMs}ms; continuing shutdown`);
+      log(`server.close did not finish within ${timeoutMs}ms; continuing shutdown`, {
+        level: 'warn',
+        scope: 'server',
+        timeoutMs,
+      });
       resolve();
     }, timeoutMs);
     timer.unref?.();
@@ -158,23 +163,28 @@ function closeServer(
 }
 
 /** Seeds the protocol tool rows the admin page shows under `__builtin__`. */
-function applyBuiltinSeed(db: ReturnType<typeof openStateDb>, log: (line: string) => void): void {
+function applyBuiltinSeed(db: ReturnType<typeof openStateDb>, log: LogFn): void {
   try {
     const seeded = seedBuiltinTools(db);
     if (seeded.inserted > 0 || seeded.filled > 0) {
-      log(
-        `repl-server: __builtin__ tools seeded (inserted ${seeded.inserted}, filled ${seeded.filled})`,
-      );
+      log(`__builtin__ tools seeded (inserted ${seeded.inserted}, filled ${seeded.filled})`, {
+        scope: 'server',
+        inserted: seeded.inserted,
+        filled: seeded.filled,
+      });
     }
   } catch (error) {
     // The protocol surface does not depend on these rows; keep booting.
-    log(`repl-server: __builtin__ tool seed failed: ${(error as Error).message}`);
+    log(`__builtin__ tool seed failed: ${(error as Error).message}`, {
+      level: 'error',
+      scope: 'server',
+    });
   }
 }
 
 /** Wires SQLite, catalog, gateway, MCP methods, admin routes and the HTTP app. */
 export async function assemble(options: AssemblyOptions = {}): Promise<Assembly> {
-  const log = options.log ?? ((line: string) => console.error(line));
+  const log = options.log ?? createLog((line) => console.error(line));
   const root = options.root ?? process.env['AGENTS_HOME'];
   const clock = systemClock;
 
@@ -196,7 +206,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     dir: join(dataDir, 'audit'),
     log,
     // Full frames keep redacted request/response payloads for the request view;
-    // each payload is bounded to 256 KiB by the recorder.
+    // each payload is bounded to 1 MiB by the recorder.
     frameMode: 'full',
     onEvent: (event) => {
       auditHub.publish('audit', event);
@@ -313,7 +323,13 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       catalog.refreshServer(serverId);
       void aiService?.onToolsIndexed(serverId);
     },
-    onStderr: (serverId, chunk) => log(`[pool ${serverId}] stderr ${chunk.length} bytes`),
+    onStderr: (serverId, chunk) =>
+      log(`stderr ${chunk.length} bytes`, {
+        level: 'warn',
+        scope: 'pool',
+        server: serverId,
+        bytes: chunk.length,
+      }),
     log,
   });
   const poolControl = poolRuntime.control;
@@ -470,6 +486,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
 
   const gateway = new ExecGateway({
     catalog,
+    log,
     clock,
     limits: bootCapacity,
     serve: {
@@ -598,7 +615,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       serveRuntime.updateLimits({ maxProcesses: limits.maxServeProcesses });
     } catch (error) {
       // The write already committed; a bad stored value must not fail the PATCH.
-      log(`repl-server: capacity settings were not applied: ${(error as Error).message}`);
+      log(`capacity settings were not applied: ${(error as Error).message}`, {
+        level: 'warn',
+        scope: 'server',
+      });
     }
   };
   const settingsWithHooks: SettingsStore = {
@@ -618,7 +638,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       official: officialSync,
       onToolsRefreshed: (id) => {
         ai.onServerMutated(id);
-        void ai.onToolsIndexed(id, { explicit: true });
+        void ai.onToolsIndexed(id);
       },
     }),
     createAdminToolsHandler({
@@ -832,7 +852,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
 
   // Registers every configured server; only `eager` ones connect now (design 03 §4).
   await poolRuntime.preload().catch((error: unknown) => {
-    log(`repl-server: pool preload failed: ${(error as Error).message}`);
+    log(`pool preload failed: ${(error as Error).message}`, { level: 'error', scope: 'pool' });
   });
   publishPoolState();
   alertDispatcher.start();
@@ -849,11 +869,14 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         try {
           await sessions.sweep();
         } catch (error) {
-          log(`repl-server: transport sweep failed: ${(error as Error).message}`);
+          log(`transport sweep failed: ${(error as Error).message}`, {
+            level: 'error',
+            scope: 'server',
+          });
         }
         return await gateway.sweepIdle();
       } catch (error) {
-        log(`repl-server: idle sweep failed: ${(error as Error).message}`);
+        log(`idle sweep failed: ${(error as Error).message}`, { level: 'error', scope: 'exec' });
         return null;
       }
     })();
@@ -905,7 +928,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         try {
           await closableAi.close?.();
         } catch (error) {
-          log(`repl-server: ai service close failed: ${(error as Error).message}`);
+          log(`ai service close failed: ${(error as Error).message}`, {
+            level: 'error',
+            scope: 'ai',
+          });
         }
         await audit.close();
         db.close();

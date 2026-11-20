@@ -4,8 +4,10 @@ import test from 'node:test';
 
 import { AdminApiError } from '../src/admin/servers.ts';
 import {
+  DEFAULT_TAG_DICTIONARY,
   appendTagDictionary,
   createAdminTagsHandler,
+  isLockedTagKey,
   parseTagDictionary,
   readTagDictionary,
 } from '../src/admin/tags.ts';
@@ -141,24 +143,75 @@ test('appendTagDictionary adds only unknown keys and keeps existing labels', () 
   ]);
 });
 
-test('PUT /tags and GET agree when the submitted dictionary is the old default', async () => {
+test('every built-in tag key is locked, custom keys are not', () => {
+  for (const tag of DEFAULT_TAG_DICTIONARY) {
+    assert.equal(isLockedTagKey(tag.key), true, tag.key);
+  }
+  assert.equal(isLockedTagKey('env.qa'), true);
+  assert.equal(isLockedTagKey('sentry'), false);
+  assert.equal(isLockedTagKey('kimi'), false);
+});
+
+test('PUT /tags refuses to drop or relabel system-managed tags', async () => {
   const store = memoryStore({}, 1);
   const handler = createAdminTagsHandler({ settings: store });
+  const current = (await handler({ method: 'GET', path: '/tags' }))?.body as {
+    tags: Array<{ key: string; zh: string; en: string }>;
+  };
+
+  const dropped = await handler({
+    method: 'PUT',
+    path: '/tags',
+    headers: { 'if-match': '"1"' },
+    body: { tags: current.tags.filter((tag) => tag.key !== 'official') },
+  });
+  assert.equal(dropped?.status, 422);
+  assert.match(
+    String((dropped?.body as { error?: { message?: string } }).error?.message),
+    /system-managed/,
+  );
+
+  const relabelled = await handler({
+    method: 'PUT',
+    path: '/tags',
+    headers: { 'if-match': '"1"' },
+    body: {
+      tags: current.tags.map((tag) =>
+        tag.key === 'env.prod' ? { ...tag, zh: 'Prod' } : tag,
+      ),
+    },
+  });
+  assert.equal(relabelled?.status, 422);
+
+  const droppedBuiltin = await handler({
+    method: 'PUT',
+    path: '/tags',
+    headers: { 'if-match': '"1"' },
+    body: { tags: current.tags.filter((tag) => tag.key !== 'read') },
+  });
+  assert.equal(droppedBuiltin?.status, 422);
+});
+
+test('PUT /tags accepts the effective dictionary verbatim', async () => {
+  const store = memoryStore({}, 1);
+  const handler = createAdminTagsHandler({ settings: store });
+  const current = (await handler({ method: 'GET', path: '/tags' }))?.body as {
+    tags: Array<{ key: string; zh: string; en: string }>;
+    revision: number;
+  };
+
   const put = await handler({
     method: 'PUT',
     path: '/tags',
     headers: { 'if-match': '"1"' },
-    body: { tags: LEGACY_TAG_DEFAULT },
+    body: { tags: current.tags },
   });
   assert.equal(put?.status, 200);
   assert.equal((put?.body as { tags: unknown[] }).tags.length, 26);
-
-  const get = await handler({ method: 'GET', path: '/tags' });
-  assert.deepEqual(get?.body, put?.body);
   assert.deepEqual(
     (await store.read()).settings['tagDictionary'],
-    LEGACY_TAG_DEFAULT,
-    'the submission is stored verbatim and upgraded on read',
+    current.tags,
+    'the submission is stored verbatim',
   );
 });
 
@@ -187,10 +240,22 @@ test('an explicitly saved empty dictionary stays empty', async () => {
 });
 
 test('PUT /tags replaces the dictionary and preserves other settings', async () => {
-  const store = memoryStore({ capacity: { maxWorkers: 4 } }, 7);
+  const store = memoryStore(
+    {
+      capacity: { maxWorkers: 4 },
+      tagDictionary: [
+        { key: 'official', zh: '官方', en: 'Official' },
+        { key: 'builtin', zh: '内置', en: 'Built-in' },
+        { key: 'db', zh: '数据库', en: 'Database' },
+      ],
+    },
+    7,
+  );
   const handler = createAdminTagsHandler({ settings: store });
   const body = {
     tags: [
+      { key: 'official', zh: '官方', en: 'Official' },
+      { key: 'builtin', zh: '内置', en: 'Built-in' },
       { key: 'db', zh: '数据库', en: 'Database' },
       { key: 'sql.read', zh: '只读查询', en: 'Read-only query' },
     ],

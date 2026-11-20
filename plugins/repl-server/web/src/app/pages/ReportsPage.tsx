@@ -1,10 +1,11 @@
-/** Reports page: list + detail side by side; create and alert actions stay in place. */
-import { App as AntApp, Button, Card, Col, Descriptions, Drawer, Form, Input, Row, Select, Space, Table, Typography } from 'antd';
+/** Reports page: list with a detail drawer; create and alert actions stay in place. */
+import { App as AntApp, Button, Card, Descriptions, Drawer, Form, Input, Select, Space, Spin, Table, Typography } from 'antd';
 import { ReloadOutlined, PlusOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader, StateTag, stateLabel } from '../components/common.tsx';
+import { JsonView } from '../components/JsonView.tsx';
 import { ApiError } from '../../lib/api.ts';
 import { formatTimestamp } from '../../lib/format.ts';
 
@@ -76,8 +77,9 @@ export function ReportsPage(): React.ReactElement {
       const response = await api.get<{ items?: ReportView[] }>('/reports', { query });
       const items = Array.isArray(response.items) ? response.items : [];
       setReports(items);
+      // The list no longer opens the first row; the drawer is closed until a row is clicked.
       setSelectedId((current) =>
-        current !== null && items.some((item) => item.id === current) ? current : items[0]?.id ?? null,
+        current !== null && items.some((item) => item.id === current) ? current : null,
       );
     } catch (error) {
       message.error(failureText(error));
@@ -109,6 +111,7 @@ export function ReportsPage(): React.ReactElement {
       return;
     }
     let cancelled = false;
+    setDetail(null);
     setDetailLoading(true);
     void api
       .get<{ report: ReportView }>(`/reports/${encodeURIComponent(selectedId)}`)
@@ -216,7 +219,7 @@ export function ReportsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="报告"
-        description="问题报告与告警投递。列表常驻，详情在右侧；正文与 context 不进入告警消息。"
+        description="问题报告与告警投递。点击一行在抽屉里查看详情；正文与 context 不进入告警消息。"
         actions={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => void load()}>
@@ -228,107 +231,107 @@ export function ReportsPage(): React.ReactElement {
           </Space>
         }
       />
-      <Row gutter={16} align="top">
-        <Col xs={24} xl={14}>
-          <Card
-            title="问题报告"
-            extra={
-              <Space wrap>
-                <Select
-                  value={status}
-                  style={{ width: 120 }}
-                  onChange={(value) => setStatus(value)}
-                  options={STATUS_OPTIONS}
-                />
-                <Select
-                  value={severity}
-                  style={{ width: 130 }}
-                  onChange={(value) => setSeverity(value)}
-                  options={[{ value: '', label: '全部严重级' }, ...SEVERITY_OPTIONS]}
-                />
-              </Space>
-            }
-          >
-            <Table
-              size="small"
-              rowKey="id"
-              loading={loading}
-              dataSource={reports}
-              columns={columns}
-              pagination={false}
-              scroll={{ y: 'calc(100vh - 260px)' }}
-              rowClassName={(record) => (record.id === selectedId ? 'row-selected' : '')}
-              onRow={(record) => ({ onClick: () => setSelectedId(record.id) })}
-              locale={{ emptyText: '还没有问题报告' }}
+      <Card
+        title="问题报告"
+        extra={
+          <Space wrap>
+            <Select
+              value={status}
+              style={{ width: 120 }}
+              onChange={(value) => setStatus(value)}
+              options={STATUS_OPTIONS}
             />
-          </Card>
-        </Col>
-        <Col xs={24} xl={10}>
-          <Card
-            title={detail === null ? '报告详情' : detail.title}
-            loading={detailLoading}
-            extra={detail === null ? null : <StateTag state={detail.status} />}
-            className="detail-card"
-          >
-            {detail === null ? (
-              <Typography.Paragraph type="secondary">从左侧选择一条报告。</Typography.Paragraph>
-            ) : (
-              <Space direction="vertical" size={14} style={{ width: '100%' }}>
-                <Descriptions column={2} size="small">
-                  <Descriptions.Item label="严重级">
-                    <StateTag state={detail.severity} />
-                  </Descriptions.Item>
-                  <Descriptions.Item label="告警">
-                    <StateTag state={detail.alertState} />
-                  </Descriptions.Item>
-                  <Descriptions.Item label="来源">{detail.source === 'mcp' ? 'MCP' : '管理端'}</Descriptions.Item>
-                  <Descriptions.Item label="客户端名称">
-                    <span className="mono">{detail.clientName || detail.client || '—'}</span>
-                  </Descriptions.Item>
-                  {detail.clientVersion === undefined || detail.clientVersion === '' ? null : (
-                    <Descriptions.Item label="客户端版本">
-                      <span className="mono">{detail.clientVersion}</span>
-                    </Descriptions.Item>
-                  )}
-                  <Descriptions.Item label="binding">
-                    <span className="mono">{detail.binding ?? '—'}</span>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="送达">
-                    {detail.alertedAt === null ? '—' : formatTimestamp(detail.alertedAt)}
-                  </Descriptions.Item>
-                </Descriptions>
-                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-                  {detail.detail ?? ''}
-                </Typography.Paragraph>
-                {detail.context === undefined ? null : (
-                  <pre className="code-block">{JSON.stringify(detail.context, null, 2)}</pre>
-                )}
-                {detail.alertError === null ? null : (
-                  <Typography.Text type="danger">{detail.alertError}</Typography.Text>
-                )}
-                <Space wrap>
-                  {detail.status === 'open' ? <Button onClick={() => void changeStatus('ack')}>确认</Button> : null}
-                  {detail.status !== 'open' ? <Button onClick={() => void changeStatus('open')}>重新打开</Button> : null}
-                  {detail.status !== 'closed' ? (
-                    <Button type="primary" onClick={() => void changeStatus('closed')}>
-                      关闭
-                    </Button>
-                  ) : null}
-                  {['failed', 'skipped', 'no_webhook'].includes(detail.alertState) ? (
-                    <Button onClick={() => void retryAlert()}>重发告警</Button>
-                  ) : null}
-                </Space>
-              </Space>
-            )}
-          </Card>
-        </Col>
-      </Row>
+            <Select
+              value={severity}
+              style={{ width: 130 }}
+              onChange={(value) => setSeverity(value)}
+              options={[{ value: '', label: '全部严重级' }, ...SEVERITY_OPTIONS]}
+            />
+          </Space>
+        }
+      >
+        <Table
+          size="small"
+          rowKey="id"
+          loading={loading}
+          dataSource={reports}
+          columns={columns}
+          pagination={false}
+          scroll={{ y: 'calc(100vh - 260px)' }}
+          rowClassName={(record) => (record.id === selectedId ? 'row-selected' : '')}
+          onRow={(record) => ({ onClick: () => setSelectedId(record.id) })}
+          locale={{ emptyText: '还没有问题报告' }}
+        />
+      </Card>
 
       <Drawer
+        placement="left"
+        open={selectedId !== null}
+        onClose={() => setSelectedId(null)}
+        width={800}
+        title={detail === null ? '报告详情' : detail.title}
+        extra={detail === null ? null : <StateTag state={detail.status} />}
+      >
+        {detailLoading ? (
+          <Spin />
+        ) : detail === null ? (
+          <Typography.Paragraph type="secondary">没有读取到报告详情。</Typography.Paragraph>
+        ) : (
+          <Space direction="vertical" size={14} style={{ width: '100%' }}>
+            <Descriptions column={2} size="small">
+              <Descriptions.Item label="严重级">
+                <StateTag state={detail.severity} />
+              </Descriptions.Item>
+              <Descriptions.Item label="告警">
+                <StateTag state={detail.alertState} />
+              </Descriptions.Item>
+              <Descriptions.Item label="来源">{detail.source === 'mcp' ? 'MCP' : '管理端'}</Descriptions.Item>
+              <Descriptions.Item label="客户端名称">
+                <span className="mono">{detail.clientName || detail.client || '—'}</span>
+              </Descriptions.Item>
+              {detail.clientVersion === undefined || detail.clientVersion === '' ? null : (
+                <Descriptions.Item label="客户端版本">
+                  <span className="mono">{detail.clientVersion}</span>
+                </Descriptions.Item>
+              )}
+              <Descriptions.Item label="binding">
+                <span className="mono">{detail.binding ?? '—'}</span>
+              </Descriptions.Item>
+              <Descriptions.Item label="送达">
+                {detail.alertedAt === null ? '—' : formatTimestamp(detail.alertedAt)}
+              </Descriptions.Item>
+            </Descriptions>
+            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+              {detail.detail ?? ''}
+            </Typography.Paragraph>
+            {detail.context === undefined ? null : (
+              <JsonView value={detail.context} maxHeight={320} />
+            )}
+            {detail.alertError === null ? null : (
+              <Typography.Text type="danger">{detail.alertError}</Typography.Text>
+            )}
+            <Space wrap>
+              {detail.status === 'open' ? <Button onClick={() => void changeStatus('ack')}>确认</Button> : null}
+              {detail.status !== 'open' ? <Button onClick={() => void changeStatus('open')}>重新打开</Button> : null}
+              {detail.status !== 'closed' ? (
+                <Button type="primary" onClick={() => void changeStatus('closed')}>
+                  关闭
+                </Button>
+              ) : null}
+              {['failed', 'skipped', 'no_webhook'].includes(detail.alertState) ? (
+                <Button onClick={() => void retryAlert()}>重发告警</Button>
+              ) : null}
+            </Space>
+          </Space>
+        )}
+      </Drawer>
+
+      <Drawer
+        placement="left"
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         title="新建问题报告"
-        width={460}
+        width={520}
         extra={
           <Space>
             <Button onClick={() => setCreateOpen(false)}>取消</Button>

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
+import { referencedNames, type ReferencedServer } from '../../lib/secrets.ts';
 
 interface SecretStatus {
   name: string;
@@ -22,11 +23,12 @@ const SECRET_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u;
 
 export function SecretsPage(): React.ReactElement {
   const api = useApi();
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [form] = Form.useForm<SecretFormValues>();
   const [secrets, setSecrets] = useState<SecretStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [pruning, setPruning] = useState(false);
   const [revealing, setRevealing] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<{ name: string; value: string } | null>(null);
 
@@ -66,6 +68,74 @@ export function SecretsPage(): React.ReactElement {
     }
   }
 
+  function remove(name: string): void {
+    modal.confirm({
+      title: `删除密钥 ${name}？`,
+      content: '如果仍被 server 引用，删除后该 server 连接会失败（缺失密钥）。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await api.delete(`/secrets/${encodeURIComponent(name)}`);
+          if (revealed?.name === name) setRevealed(null);
+          message.success(`已删除密钥 ${name}。`);
+          await load();
+        } catch (error) {
+          message.error(failureText(error));
+          throw error;
+        }
+      },
+    });
+  }
+
+  async function prune(): Promise<void> {
+    setPruning(true);
+    try {
+      const [serversResponse, alertsResponse] = await Promise.all([
+        api.get<{ servers?: ReferencedServer[] }>('/servers'),
+        api
+          .get<{ webhook?: { secretName?: string } }>('/alerts/config')
+          .catch(() => ({ webhook: undefined })),
+      ]);
+      const referenced = referencedNames(serversResponse.servers ?? []);
+      const webhook = alertsResponse.webhook?.secretName;
+      if (typeof webhook === 'string' && webhook !== '') referenced.add(webhook);
+      const orphans = secrets
+        .filter((secret) => secret.configured && !referenced.has(secret.name))
+        .map((secret) => secret.name);
+      if (orphans.length === 0) {
+        message.info('没有未被任何 server 或告警引用的密钥。');
+        return;
+      }
+      const preview = orphans.slice(0, 10).join('\n');
+      const more = orphans.length > 10 ? `\n…另有 ${orphans.length - 10} 个` : '';
+      modal.confirm({
+        title: `删除 ${orphans.length} 个未引用的密钥？`,
+        content: <span className="mono" style={{ whiteSpace: 'pre-wrap' }}>{preview}{more}</span>,
+        okText: '删除',
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          let failed = 0;
+          for (const name of orphans) {
+            try {
+              await api.delete(`/secrets/${encodeURIComponent(name)}`);
+            } catch {
+              failed += 1;
+            }
+          }
+          if (failed === 0) message.success(`已删除 ${orphans.length} 个未引用的密钥。`);
+          else message.warning(`已删除 ${orphans.length - failed} 个，${failed} 个删除失败。`);
+          if (revealed !== null && orphans.includes(revealed.name)) setRevealed(null);
+          await load();
+        },
+      });
+    } catch (error) {
+      message.error(failureText(error));
+    } finally {
+      setPruning(false);
+    }
+  }
+
   async function submit(values: SecretFormValues): Promise<void> {
     const name = values.name.trim();
     setSaving(true);
@@ -99,7 +169,7 @@ export function SecretsPage(): React.ReactElement {
     },
     {
       title: '操作',
-      width: 190,
+      width: 260,
       render: (_value, record) => (
         <Space size={4}>
           <Button
@@ -113,6 +183,9 @@ export function SecretsPage(): React.ReactElement {
           <Button size="small" onClick={() => rotate(record.name)}>
             写入/轮换
           </Button>
+          <Button size="small" danger disabled={!record.configured} onClick={() => remove(record.name)}>
+            删除
+          </Button>
         </Space>
       ),
     },
@@ -124,7 +197,7 @@ export function SecretsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="密钥"
-        description="写入 env / header 引用的密钥值。列表只返回键名与是否已设置；点击“查看”会单独请求一次明文，响应不缓存，关闭窗口即从页面移除。"
+        description="写入 env / header 引用的密钥值。列表只返回键名与是否已设置；点击“查看”会单独请求一次明文，响应不缓存，关闭窗口即从页面移除。删除只按你确认的范围执行，server 删除不会自动清理它导入的密钥。"
         actions={
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
@@ -155,12 +228,17 @@ export function SecretsPage(): React.ReactElement {
         </Form>
       </Card>
       <Card
-        title="已声明的密钥"
+        title="密钥"
         size="small"
         extra={
-          <span className="muted">
-            {secrets.length} 个键名 · {configured} 个已设置
-          </span>
+          <Space size={10}>
+            <span className="muted">
+              {secrets.length} 个键名 · {configured} 个已设置
+            </span>
+            <Button size="small" loading={pruning} onClick={() => void prune()}>
+              清理未引用
+            </Button>
+          </Space>
         }
       >
         <Table<SecretStatus>

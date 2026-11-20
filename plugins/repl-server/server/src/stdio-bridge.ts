@@ -1,3 +1,4 @@
+import type { LogFn } from './log.ts';
 // hook-allow: forwards JSON-RPC to the local repl-server daemon only
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
@@ -6,7 +7,7 @@ export interface StdioBridgeOptions {
   url: string;
   token?: string;
   tokenFile?: string;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 /** Newline-delimited JSON-RPC on stdin/stdout, forwarded to the HTTP /mcp endpoint. */
@@ -35,7 +36,7 @@ export async function runStdioBridge(options: StdioBridgeOptions): Promise<numbe
           const text = await response.text();
           if (text !== '') process.stdout.write(`${text}\n`);
         } catch (error) {
-          options.log?.(`repl-server bridge: ${(error as Error).message}`);
+          options.log?.(`bridge failed: ${(error as Error).message}`, { level: 'error', scope: 'stdio' });
           process.stdout.write(
             `${JSON.stringify({
               jsonrpc: '2.0',

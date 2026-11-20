@@ -579,11 +579,12 @@ export function ClientsPage(): React.ReactElement {
       </Card>
 
       <Drawer
+        placement="left"
         forceRender
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={editing === null ? '新建客户端绑定' : `编辑 ${editing.id}`}
-        width={560}
+        width={600}
         extra={
           <Space>
             <Button onClick={() => setEditorOpen(false)}>取消</Button>

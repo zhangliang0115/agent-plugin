@@ -74,6 +74,13 @@ export const DEFAULT_TAG_DICTIONARY: readonly TagDefinition[] = Object.freeze([
   { key: 'computer-use', zh: 'Computer Use', en: 'Computer Use' },
 ]);
 
+/** Built-in tags: every shipped default key plus the `env.*` namespace. Never editable or removable. */
+const LOCKED_TAG_KEYS: ReadonlySet<string> = new Set(DEFAULT_TAG_DICTIONARY.map((tag) => tag.key));
+
+export function isLockedTagKey(key: string): boolean {
+  return key.startsWith('env.') || LOCKED_TAG_KEYS.has(key);
+}
+
 /** The 15-entry default from before categories and tags diverged. */
 const LEGACY_DEFAULT_DICTIONARY: readonly TagDefinition[] = [
   { key: 'official', zh: '官方', en: 'Official' },
@@ -217,6 +224,19 @@ export function createAdminTagsHandler(deps: AdminTagsDeps): AdminHandler {
       const tags = parseTagDictionary(requireObjectBody(request)['tags']);
       const current = await deps.settings.read();
       assertRevision(current.revision, expected);
+      // System-managed keys that exist today must survive the full replacement
+      // unchanged; otherwise a replace could silently drop provenance tags.
+      for (const entry of readTagDictionary(current.settings)) {
+        if (!isLockedTagKey(entry.key)) continue;
+        const next = tags.find((tag) => tag.key === entry.key);
+        if (next === undefined || next.zh !== entry.zh || next.en !== entry.en) {
+          throw new AdminApiError(
+            422,
+            'INVALID_TAGS',
+            `tag ${entry.key} is system-managed and cannot be edited or removed`,
+          );
+        }
+      }
       const next: StoredSettings = { ...current.settings, [SETTING_KEY]: tags };
       const { revision } = await deps.settings.replace(next, expected);
       return adminJson(200, { tags: readTagDictionary(next), revision });

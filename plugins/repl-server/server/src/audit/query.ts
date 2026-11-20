@@ -85,6 +85,8 @@ export interface AuditFilterInput {
   mcp?: string;
   id?: string | number;
   method?: string;
+  /** Eval correlation id shared by `eval_start`/`eval_end`/tool events. */
+  runId?: string;
 }
 
 /** Normalized filter; timestamps are epoch milliseconds. */
@@ -107,6 +109,7 @@ export interface AuditFilter {
   mcp?: string;
   id?: string;
   method?: string;
+  runId?: string;
 }
 
 function parseTimestampValue(value: string | number | Date): number {
@@ -185,6 +188,8 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
   if (mcp !== undefined) filter.mcp = mcp;
   const method = optionalText(input.method);
   if (method !== undefined) filter.method = method;
+  const runId = optionalText(input.runId);
+  if (runId !== undefined) filter.runId = runId;
   if (input.id !== undefined) {
     const id = String(input.id).trim();
     if (id !== '') filter.id = id;
@@ -250,6 +255,7 @@ export function parseAuditQueryParams(params: URLSearchParams): AuditFilter {
   assign('mcp', firstParam(params, 'mcp'));
   assign('id', firstParam(params, 'id'));
   assign('method', firstParam(params, 'method'));
+  assign('runId', firstParam(params, 'runId'));
   const events = params.getAll('event');
   if (events.length > 0) input.event = events;
   return normalizeFilter(input);
@@ -516,6 +522,7 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
   if (filter.mcp !== undefined && event.mcp !== filter.mcp) return false;
   if (filter.id !== undefined && String(event.id) !== filter.id) return false;
   if (filter.method !== undefined && event.method !== filter.method) return false;
+  if (filter.runId !== undefined && event.runId !== filter.runId) return false;
   return true;
 }
 

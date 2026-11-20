@@ -27,6 +27,8 @@ export interface ToolCallContext {
   gateway: ExecutionGateway;
   catalog: Catalog;
   tasks: McpTaskStore;
+  /** JSON-RPC id of the enclosing `tools/call`; stamped into eval audits. */
+  requestId?: string | number | null;
   /** True when this request declared `io.modelcontextprotocol/tasks`. */
   tasksDeclared?: boolean;
   /** Wired by assembly; absent in focused tests, which makes report_problem fail closed. */
@@ -151,6 +153,7 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
     ...(args.timeout === undefined ? {} : { timeoutMs: args.timeout }),
     async: mode !== 'sync',
     identity: ctx.identity,
+    ...(ctx.requestId === undefined || ctx.requestId === null ? {} : { requestId: ctx.requestId }),
   };
   if (args.workspace !== undefined) request.workspace = args.workspace;
   if (args.visibleTools !== undefined) request.visibleTools = args.visibleTools;

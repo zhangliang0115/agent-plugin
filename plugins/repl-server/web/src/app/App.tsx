@@ -117,7 +117,7 @@ export function App(): React.ReactElement {
         label: '监控',
         children: [
           { key: '/overview', icon: <DashboardOutlined />, label: '概览' },
-          { key: '/audit', icon: <AlertOutlined />, label: '审计' },
+          { key: '/audit', icon: <AlertOutlined />, label: '事件' },
           { key: '/requests', icon: <FileSearchOutlined />, label: '请求记录' },
           { key: '/reports', icon: <AppstoreOutlined />, label: '报告' },
         ],
@@ -181,7 +181,7 @@ export function App(): React.ReactElement {
                     : route.path === '/overview'
                       ? '监控 / 概览'
                       : route.path === '/audit'
-                        ? '监控 / 审计'
+                        ? '监控 / 事件'
                         : route.path === '/requests'
                           ? '监控 / 请求记录'
                           : '监控 / 报告'}

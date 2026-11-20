@@ -19,7 +19,7 @@ export const AI_PROMPT_MAX_BYTES = 64 * 1024;
 
 export const AI_PROPOSAL_TTL_MS = 10 * 60_000;
 export const AI_PROPOSAL_MAX = 50;
-export const AI_ANNOTATION_TTL_MS = 30 * 60_000;
+export const AI_ANNOTATION_TTL_MS = 24 * 60 * 60_000;
 export const AI_ANNOTATION_MAX = 20;
 export const AI_AUTO_MIN_INTERVAL_MS = 60_000;
 

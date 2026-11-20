@@ -10,17 +10,22 @@ import {
 } from '../../lib/dictionary.ts';
 import { tagColor, tagLabel, type TagDefinition } from './TagPicker.tsx';
 
-/** Single-select category pill; a pick applies and closes immediately. */
+/** Single-select pill; a pick applies and closes immediately. */
 export function CategoryPillEditor({
   value,
   dictionary,
   onChange,
   disabled = false,
+  noun = '分类',
+  allowClear = true,
 }: {
   value?: string | null;
   dictionary: readonly DictionaryEntry[];
   onChange: (next: string) => void;
   disabled?: boolean;
+  /** Wording for the empty/clear/search labels, e.g. `并发`. */
+  noun?: string;
+  allowClear?: boolean;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -53,7 +58,7 @@ export function CategoryPillEditor({
             size="small"
             allowClear
             prefix={<SearchOutlined />}
-            placeholder="搜索分类"
+            placeholder={`搜索${noun}`}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -68,13 +73,15 @@ export function CategoryPillEditor({
                 {option.label}
               </button>
             ))}
-            {options.length === 0 ? <p className="pill-empty">没有匹配的分类</p> : null}
+            {options.length === 0 ? <p className="pill-empty">{`没有匹配的${noun}`}</p> : null}
           </div>
-          <div className="pill-popover-foot">
-            <Button size="small" disabled={current === ''} onClick={() => choose('')}>
-              清除分类
-            </Button>
-          </div>
+          {allowClear ? (
+            <div className="pill-popover-foot">
+              <Button size="small" disabled={current === ''} onClick={() => choose('')}>
+                清除{noun}
+              </Button>
+            </div>
+          ) : null}
         </div>
       }
     >
@@ -83,7 +90,7 @@ export function CategoryPillEditor({
         tabIndex={disabled ? -1 : 0}
         aria-disabled={disabled || undefined}
         className={`tag-editor${disabled ? ' tag-editor-disabled' : ''}`}
-        title={disabled ? '正在保存…' : current === '' ? '选择分类' : current}
+        title={disabled ? '正在保存…' : current === '' ? `选择${noun}` : current}
         color={current === '' ? undefined : 'blue'}
         bordered={current === ''}
         onClick={(event) => event.stopPropagation()}
@@ -94,7 +101,7 @@ export function CategoryPillEditor({
           }
         }}
       >
-        {current === '' ? '设置分类' : dictionaryLabel(dictionary, current)}
+        {current === '' ? `设置${noun}` : dictionaryLabel(dictionary, current)}
         <DownOutlined className="tag-editor-caret" />
       </Tag>
     </Popover>

@@ -1,5 +1,6 @@
+import { createLog, type LogFn } from '../log.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   DEFAULT_TASK_CAPACITY,
@@ -151,6 +152,8 @@ export interface ExecGatewayOptions {
   outputLimits?: Partial<OutputLimits>;
   /** Task table injection; defaults to a private store using `ttlMs`. */
   taskStore?: TaskStore;
+  /** Structured log sink; defaults to `console.warn` for the few diagnostics here. */
+  log?: LogFn;
 }
 
 /** The narrowing carried by one `run_script` call into the eval it starts. */
@@ -181,6 +184,8 @@ interface EvalDispatchContext {
   readonly binding: string | null;
   /** Absolute epoch-ms deadline, used as the L1 upper bound; absent when the eval has none. */
   readonly deadline?: number;
+  /** Correlation id shared by the eval events and every tool call inside this eval. */
+  readonly runId?: string;
 }
 
 /** One execution session plus the per-eval context of the evals running in it. */
@@ -191,6 +196,8 @@ interface SessionRuntime {
   /** Binding id of the client that owns each running eval; `null` when unbound. */
   readonly bindings: Map<number, string | null>;
   readonly deadlines: Map<number, number>;
+  /** Correlation id of each running eval, stamped into its tool events. */
+  readonly runIds: Map<number, string>;
   readonly media: Map<number, EvalMedia>;
   /** Set once the idle sweep hibernated this runtime; reset when the next eval begins. */
   hibernated: boolean;
@@ -205,6 +212,12 @@ interface TaskLink {
 
 function canonicalToolName(call: ToolCallRequest): string {
   return call.server === undefined ? call.tool : `${call.server}.${call.tool}`;
+}
+
+/** Correlation fields shared by the tool events of one eval. */
+function runFields(runtime: SessionRuntime, evalId: number): Record<string, unknown> {
+  const runId = runtime.runIds.get(evalId);
+  return { exec: runtime.record.id, ...(runId === undefined ? {} : { runId }) };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,6 +247,7 @@ function filteredExecutor(
         runtime.filters.set(options.evalId, resolve(pending.filter));
       }
       runtime.bindings.set(options.evalId, pending?.binding ?? null);
+      if (pending?.runId !== undefined) runtime.runIds.set(options.evalId, pending.runId);
       // `runEval` has already registered the eval, so its authoritative deadline
       // is available here; the dispatch-time estimate is only a fallback.
       const deadline = runtime.session.activeEvals.get(options.evalId)?.deadline ?? pending?.deadline;
@@ -243,6 +257,7 @@ function filteredExecutor(
         runtime.filters.delete(options.evalId);
         runtime.bindings.delete(options.evalId);
         runtime.deadlines.delete(options.evalId);
+        runtime.runIds.delete(options.evalId);
       };
       void outcome.then(clear, clear);
       return outcome;
@@ -405,6 +420,7 @@ export class ExecGateway implements ExecutionGateway {
   private readonly callTool: ExecGatewayOptions['callTool'];
   private readonly catalog: ExecGatewayOptions['catalog'];
   private readonly serve: ExecGatewayOptions['serve'];
+  private readonly log: LogFn;
   private readonly audit: ((event: Record<string, unknown> & { event: string }) => void) | undefined;
   private readonly onSessionClosed:
     | ((workspace: string, session?: ClosedExecutionSession) => Promise<void> | void)
@@ -435,6 +451,7 @@ export class ExecGateway implements ExecutionGateway {
     this.callTool = options.callTool;
     this.catalog = options.catalog;
     this.serve = options.serve;
+    this.log = options.log ?? createLog((line) => console.warn(line));
     this.audit = options.onAudit;
     this.onSessionClosed = options.onSessionClosed;
     this.now = options.now ?? (() => Date.now());
@@ -530,6 +547,7 @@ export class ExecGateway implements ExecutionGateway {
       filters: new Map(),
       bindings: new Map(),
       deadlines: new Map(),
+      runIds: new Map(),
       media: new Map(),
       hibernated: false,
       serveReleased: false,
@@ -578,6 +596,7 @@ export class ExecGateway implements ExecutionGateway {
     request: ScriptRequest,
     filter: PendingEvalFilter | undefined,
     deadline: number | undefined,
+    runId: string,
     run: () => Promise<T>,
   ): Promise<T> {
     return this.evalScope.run(
@@ -585,6 +604,7 @@ export class ExecGateway implements ExecutionGateway {
         filter,
         binding: request.identity.binding,
         ...(deadline === undefined ? {} : { deadline }),
+        runId,
       },
       run,
     );
@@ -619,7 +639,7 @@ export class ExecGateway implements ExecutionGateway {
         const known = new Set(snapshot.tools.map((tool) => tool.name));
         const unknown = [...pending.visible].filter((name) => !known.has(name));
         if (unknown.length > 0) {
-          console.warn(`repl-server: visibleTools names are not in the catalog: ${unknown.join(', ')}`);
+          this.log(`visibleTools names are not in the catalog: ${unknown.join(', ')}`, { level: 'warn', scope: 'exec' });
         }
       }
     }
@@ -675,7 +695,13 @@ export class ExecGateway implements ExecutionGateway {
     if (filter !== undefined) {
       const hiddenByNames = filter.visible !== undefined && !filter.visible.has(name);
       if (hiddenByNames || filter.excludedByTag.has(name)) {
-        this.emitAudit({ event: 'tool_denied', evalId: call.evalId, tool: name, workspace: runtime.record.workspace });
+        this.emitAudit({
+          event: 'tool_denied',
+          evalId: call.evalId,
+          tool: name,
+          workspace: runtime.record.workspace,
+          ...runFields(runtime, call.evalId),
+        });
         throw new ReplError('TOOL_NOT_VISIBLE', `${name} is not visible in this call`);
       }
     }
@@ -711,7 +737,13 @@ export class ExecGateway implements ExecutionGateway {
       signal.removeEventListener('abort', forwardAbort);
     };
 
-    this.emitAudit({ event: 'tool_call', evalId: call.evalId, tool: name, workspace: runtime.record.workspace });
+    this.emitAudit({
+      event: 'tool_call',
+      evalId: call.evalId,
+      tool: name,
+      workspace: runtime.record.workspace,
+      ...runFields(runtime, call.evalId),
+    });
     const finish = (ok: boolean, error?: unknown): void => {
       this.emitAudit({
         event: 'tool_result',
@@ -719,6 +751,7 @@ export class ExecGateway implements ExecutionGateway {
         tool: name,
         ok,
         durMs: this.now() - started,
+        ...runFields(runtime, call.evalId),
         ...(error === undefined ? {} : { error: { message: (error as Error).message ?? String(error) } }),
       });
     };
@@ -774,13 +807,16 @@ export class ExecGateway implements ExecutionGateway {
     request: ScriptRequest,
     exec: ExecSessionRecord<SessionRuntime, unknown>,
     mode: 'sync' | 'async',
+    runId: string,
   ): void {
     this.emitAudit({
       event: 'eval_start',
       exec: exec.id,
+      runId,
       mode,
       workspace: exec.workspace,
       ...this.identityFields(request),
+      ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
       codeBytes: Buffer.byteLength(request.code, 'utf8'),
       codeSha256: createHash('sha256').update(request.code, 'utf8').digest('hex'),
       codePrefix: request.code.slice(0, 200),
@@ -791,10 +827,12 @@ export class ExecGateway implements ExecutionGateway {
     request: ScriptRequest,
     exec: ExecSessionRecord<SessionRuntime, unknown>,
     settlement: EvalSettlement,
+    runId: string,
   ): void {
     this.emitAudit({
       event: 'eval_end',
       exec: exec.id,
+      runId,
       evalId: settlement.evalId,
       workspace: exec.workspace,
       ...this.identityFields(request),
@@ -818,14 +856,15 @@ export class ExecGateway implements ExecutionGateway {
       const filter = this.filterFor(request);
       const timeoutMs = this.evalTimeoutFor(request);
       const deadline = timeoutMs === undefined ? undefined : this.now() + timeoutMs;
-      this.emitEvalStart(request, record, 'sync');
-      const settlement = await this.withEvalContext(request, filter, deadline, () =>
+      const runId = randomUUID();
+      this.emitEvalStart(request, record, 'sync', runId);
+      const settlement = await this.withEvalContext(request, filter, deadline, runId, () =>
         runEval(runtime.session, request.code, {
           async: false,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
         }),
       );
-      this.emitEvalEnd(request, record, settlement);
+      this.emitEvalEnd(request, record, settlement, runId);
       const media = this.mediaOfSettlement(runtime, settlement);
       return outcomeOf(settlement, media, this.outputLimits);
     } finally {
@@ -852,15 +891,16 @@ export class ExecGateway implements ExecutionGateway {
       const created = this.tasks.create(0, owner);
       taskId = created;
       this.taskLinks.set(created, { sessionId: record.id, owner });
-      this.emitEvalStart(request, record, 'async');
+      const runId = randomUUID();
+      this.emitEvalStart(request, record, 'async', runId);
 
       const onSettled = (settled: EvalSettlement): void => {
         this.finishTask(created, runtime, settled);
-        this.emitEvalEnd(request, record, settled);
+        this.emitEvalEnd(request, record, settled, runId);
         release();
       };
 
-      const receipt = await this.withEvalContext(request, filter, deadline, () =>
+      const receipt = await this.withEvalContext(request, filter, deadline, runId, () =>
         runEval(runtime.session, request.code, {
           async: true,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),

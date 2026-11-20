@@ -44,6 +44,8 @@ export interface ScriptRequest {
   visibleTools?: string[];
   excludeTags?: string[];
   identity: RequestIdentity;
+  /** JSON-RPC id of the `tools/call` that started this eval; stamped into `eval_start`. */
+  requestId?: string | number;
 }
 
 export interface ScriptOutcome {

@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * Third-party MCP pool runtime.
  *
@@ -153,7 +154,7 @@ export interface PoolRuntimeOptions {
   onStderr?: (serverId: string, chunk: string) => void;
   ledger?: ProcessLedger;
   audit?: AuditSink;
-  log?: (line: string) => void;
+  log?: LogFn;
   clock?: Clock;
   random?: () => number;
   connectTimeoutMs?: number;
@@ -705,7 +706,7 @@ class PoolRuntimeImpl implements PoolRuntime {
         }
       } catch (error) {
         // A single broken server must not stop the rest from loading.
-        this.options.log?.(`pool preload skipped ${record.id}: ${messageOf(error)}`);
+        this.options.log?.(`pool preload skipped: ${messageOf(error)}`, { level: 'warn', scope: 'pool', server: record.id });
       }
     }
   }
@@ -740,7 +741,7 @@ class PoolRuntimeImpl implements PoolRuntime {
       ...(options.log !== undefined
         ? {
             onFailure: (serverId: string, error: unknown) => {
-              options.log?.(`pool health check failed for ${serverId}: ${messageOf(error)}`);
+              options.log?.(`pool health check failed: ${messageOf(error)}`, { level: 'warn', scope: 'pool', server: serverId });
             },
           }
         : {}),

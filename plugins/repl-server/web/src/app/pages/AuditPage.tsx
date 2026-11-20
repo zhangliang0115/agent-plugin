@@ -1,4 +1,4 @@
-/** Audit page: filters, live call table, JSONL export and a frame drawer. */
+/** Audit page: filters, live event table, JSONL export and an event drawer. */
 import {
   Alert,
   App as AntApp,
@@ -15,7 +15,6 @@ import {
   Row,
   Select,
   Space,
-  Spin,
   Statistic,
   Switch,
   Table,
@@ -29,15 +28,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
-import { FrameColumn } from '../components/FramePayload.tsx';
-import { ApiError, framesTruncatedNotice, type EventStream, type FramesResponse, type StreamState } from '../../lib/api.ts';
+import { JsonView } from '../components/JsonView.tsx';
+import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
+import {
+  aiRunKindLabel,
+  aiRunTriggerLabel,
+  eventLabel,
+  eventSubject,
+} from '../../lib/audit-labels.ts';
 import {
   formatDuration,
   formatId,
-  formatJson,
   formatNumber,
   formatPercent,
-  formatTime,
   formatTimestamp,
 } from '../../lib/format.ts';
 
@@ -69,16 +72,6 @@ interface AuditStats {
   scannedRows?: number;
 }
 
-interface ProtocolFramePair {
-  mcp: string;
-  id: string | number | null;
-  method: string | null;
-  request: AuditEvent | null;
-  response: AuditEvent | null;
-  durMs?: number;
-  ok?: boolean;
-}
-
 interface AuditFilters {
   from: string;
   to: string;
@@ -101,7 +94,6 @@ const PAGE_SIZE = 400;
 const POLL_MS = 2_000;
 const STATS_EVERY_TICKS = 5;
 const SLOW_MS = 1_000;
-const FRAME_LIMIT = 20;
 const DEFAULT_RANGE = '60';
 
 const RANGE_OPTIONS: Array<{ value: string; label: string }> = [
@@ -151,9 +143,6 @@ export function AuditPage(): React.ReactElement {
   const [statsError, setStatsError] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>('closed');
   const [selected, setSelected] = useState<AuditEvent | null>(null);
-  const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
-  const [framesLoading, setFramesLoading] = useState(false);
-  const [framesError, setFramesError] = useState<string | null>(null);
 
   const aliveRef = useRef(true);
   const appliedRef = useRef<AuditFilters>(applied);
@@ -165,7 +154,6 @@ export function AuditPage(): React.ReactElement {
   const revokeTimerRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
   const statsTokenRef = useRef(0);
-  const frameTokenRef = useRef(0);
   const streamOpenRef = useRef(false);
   const loadingRef = useRef(true);
   const pollTicksRef = useRef(0);
@@ -512,64 +500,11 @@ export function AuditPage(): React.ReactElement {
   }
 
   function closeDrawer(): void {
-    frameTokenRef.current += 1;
     setSelected(null);
-    setFrames(null);
-    setFramesError(null);
-    setFramesLoading(false);
   }
 
   function openEvent(event: AuditEvent): void {
     setSelected(event);
-    setFrames(null);
-    setFramesError(null);
-    setFramesLoading(true);
-    const ticket = ++frameTokenRef.current;
-    void loadFrames(event, ticket);
-  }
-
-  async function loadFrames(event: AuditEvent, ticket: number): Promise<void> {
-    const mcp = eventText(event, 'mcp');
-    const idValue = event['rpcId'] ?? event['requestId'] ?? event['id'];
-    const id =
-      typeof idValue === 'string' || typeof idValue === 'number' ? idValue : undefined;
-    const filters = appliedRef.current;
-    try {
-      let response = await requestFrames(filters, mcp, id);
-      if (!aliveRef.current || ticket !== frameTokenRef.current) return;
-      if ((response.frames ?? []).length === 0 && id !== undefined) {
-        response = await requestFrames(filters, mcp, undefined);
-        if (!aliveRef.current || ticket !== frameTokenRef.current) return;
-      }
-      setFrames(response);
-    } catch (failure) {
-      if (!aliveRef.current || ticket !== frameTokenRef.current) return;
-      const text = failureText(failure);
-      setFramesError(text);
-      message.error(`协议帧读取失败：${text}`);
-    } finally {
-      if (aliveRef.current && ticket === frameTokenRef.current) setFramesLoading(false);
-    }
-  }
-
-  function requestFrames(
-    filters: AuditFilters,
-    mcp: string | null,
-    id: string | number | undefined,
-  ): Promise<FramesResponse<ProtocolFramePair>> {
-    return api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
-      query: {
-        detail: 'full',
-        from: toIso(filters.from),
-        to: toIso(filters.to),
-        mcp: mcp ?? undefined,
-        id,
-        binding: filters.binding === '' ? undefined : filters.binding,
-        clientName: filters.clientName === '' ? undefined : filters.clientName,
-        clientVersion: filters.clientVersion === '' ? undefined : filters.clientVersion,
-        limit: FRAME_LIMIT,
-      },
-    });
   }
 
   const columns = useMemo<TableProps<AuditEvent>['columns']>(
@@ -577,15 +512,10 @@ export function AuditPage(): React.ReactElement {
       {
         title: '时间',
         key: 'time',
-        width: 96,
-        render: (_value, event) => {
-          const time = parseEventTime(event);
-          return (
-            <span className="mono" title={formatTimestamp(event.ts ?? null)}>
-              {time === null ? '—' : formatTime(time)}
-            </span>
-          );
-        },
+        width: 170,
+        render: (_value, event) => (
+          <span className="mono">{formatTimestamp(parseEventTime(event) ?? event.ts ?? null)}</span>
+        ),
       },
       {
         title: '客户端 / binding',
@@ -606,7 +536,7 @@ export function AuditPage(): React.ReactElement {
         ),
       },
       {
-        title: '工具 / 方法',
+        title: '对象',
         key: 'tool',
         ellipsis: true,
         render: (_value, event) => <span className="mono">{eventSubject(event)}</span>,
@@ -678,8 +608,8 @@ export function AuditPage(): React.ReactElement {
   return (
     <div className="page">
       <PageHeader
-        title="审计"
-        description="调用列表、协议帧与调用详情；筛选在服务端完成，实时视图最多保留 5000 条。"
+        title="事件"
+        description="审计事件列表与详情；一行一条审计事件，不是请求或协议帧。请求与协议帧在「请求记录」查看。筛选在服务端完成，实时视图最多保留 5000 条。"
         actions={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={refreshEvents}>
@@ -698,7 +628,11 @@ export function AuditPage(): React.ReactElement {
 
       <Row gutter={[12, 12]}>
         <Col flex="1 1 170px">
-          <StatsCard label="调用量" value={stats === null ? '—' : formatNumber(stats.calls)} hint="tool 结果事件聚合" />
+          <StatsCard
+            label="工具调用量"
+            value={stats === null ? '—' : formatNumber(stats.calls)}
+            hint="tool_result 事件数"
+          />
         </Col>
         <Col flex="1 1 170px">
           <StatsCard
@@ -709,7 +643,7 @@ export function AuditPage(): React.ReactElement {
           />
         </Col>
         <Col flex="1 1 170px">
-          <StatsCard label="p50" value={stats === null ? '—' : formatDuration(stats.p50)} hint="调用耗时中位数" />
+          <StatsCard label="p50" value={stats === null ? '—' : formatDuration(stats.p50)} hint="工具调用耗时中位数" />
         </Col>
         <Col flex="1 1 170px">
           <StatsCard
@@ -737,7 +671,7 @@ export function AuditPage(): React.ReactElement {
       )}
       {stats === null ? null : (
         <Text type="secondary" style={{ fontSize: 11.5 }}>
-          snapshot {formatId(stats.snapshotId, 12)} · 计算于 {formatTime(stats.computedAt)} · 扫描{' '}
+          snapshot {formatId(stats.snapshotId, 12)} · 计算于 {formatTimestamp(stats.computedAt)} · 扫描{' '}
           {formatNumber(stats.scannedRows)} 行 · took {formatDuration(stats.tookMs)}
           {stats.cached ? ' · 缓存命中' : ''}；列表与统计可能来自不同扫描。
         </Text>
@@ -764,15 +698,15 @@ export function AuditPage(): React.ReactElement {
             </Field>
             <Field label="从">
               <DatePicker
-                showTime={{ format: 'HH:mm' }}
-                format="YYYY-MM-DD HH:mm"
+                showTime={{ format: 'HH:mm:ss' }}
+                format="YYYY-MM-DD HH:mm:ss"
                 placeholder="选择时间"
                 value={draft.from === '' ? null : dayjs(draft.from)}
-                style={{ width: 190 }}
+                style={{ width: 200 }}
                 onChange={(value) =>
                   setDraft({
                     ...draft,
-                    from: value === null ? '' : value.format('YYYY-MM-DDTHH:mm'),
+                    from: value === null ? '' : value.format('YYYY-MM-DDTHH:mm:ss'),
                     range: '',
                   })
                 }
@@ -780,15 +714,15 @@ export function AuditPage(): React.ReactElement {
             </Field>
             <Field label="到（留空=至今）">
               <DatePicker
-                showTime={{ format: 'HH:mm' }}
-                format="YYYY-MM-DD HH:mm"
+                showTime={{ format: 'HH:mm:ss' }}
+                format="YYYY-MM-DD HH:mm:ss"
                 placeholder="选择时间"
                 value={draft.to === '' ? null : dayjs(draft.to)}
-                style={{ width: 190 }}
+                style={{ width: 200 }}
                 onChange={(value) =>
                   setDraft({
                     ...draft,
-                    to: value === null ? '' : value.format('YYYY-MM-DDTHH:mm'),
+                    to: value === null ? '' : value.format('YYYY-MM-DDTHH:mm:ss'),
                     range: '',
                   })
                 }
@@ -905,7 +839,7 @@ export function AuditPage(): React.ReactElement {
       {notice === null ? null : <Alert type="warning" showIcon message={notice} />}
 
       <Card
-        title="调用列表"
+        title="事件列表"
         extra={
           <Space>
             {truncated ? <Tag color="gold">实时视图已截断</Tag> : null}
@@ -961,9 +895,10 @@ export function AuditPage(): React.ReactElement {
       </Card>
 
       <Drawer
+        placement="left"
         open={selected !== null}
         onClose={closeDrawer}
-        width={760}
+        width={900}
         title={
           selected === null ? '事件详情' : <span className="mono">{eventSubject(selected)}</span>
         }
@@ -976,7 +911,7 @@ export function AuditPage(): React.ReactElement {
                   <span className="mono">{formatTimestamp(selected.ts ?? null)}</span>
                 </Descriptions.Item>
                 <Descriptions.Item label="事件">
-                  <span className="mono">{selected.event ?? '—'}</span>
+                  {eventLabel(selected.event)}
                 </Descriptions.Item>
                 <Descriptions.Item label="客户端名称">
                   {eventClientParts(selected).name || '—'}
@@ -1002,10 +937,10 @@ export function AuditPage(): React.ReactElement {
                   </span>
                 </Descriptions.Item>
                 <Descriptions.Item label="kind">
-                  <span className="mono">{eventText(selected, 'kind') ?? '—'}</span>
+                  {aiRunKindLabel(eventText(selected, 'kind'))}
                 </Descriptions.Item>
                 <Descriptions.Item label="outcome">
-                  {eventText(selected, 'outcome') ?? '—'}
+                  {stateLabel(eventText(selected, 'outcome') ?? '—')}
                 </Descriptions.Item>
                 <Descriptions.Item label="queueMs / ms">
                   {`${formatDuration(asNumber(selected['queueMs']))} / ${formatDuration(eventDuration(selected))}`}
@@ -1024,26 +959,13 @@ export function AuditPage(): React.ReactElement {
                     key: 'raw',
                     label: '原始事件 JSON',
                     children: (
-                      <pre className="code-block" style={{ maxHeight: 260, overflow: 'auto' }}>
-                        {formatJson(selected, 2)}
-                      </pre>
+                      <JsonView value={selected} maxHeight={260} />
                     ),
                   },
                 ]}
               />
             </Card>
 
-            {framesLoading ? (
-              <Spin size="small" />
-            ) : framesError === null ? null : (
-              <Alert
-                type="error"
-                showIcon
-                message="协议帧读取失败"
-                description={framesError}
-              />
-            )}
-            {frames === null ? null : <FramesCard frames={frames} />}
           </Space>
         )}
       </Drawer>
@@ -1111,86 +1033,6 @@ function AuditStatusCell({ event }: { event: AuditEvent }): React.ReactElement {
       </Tag>
       {eventCancelled(event) ? <span className="muted">已取消</span> : null}
     </Space>
-  );
-}
-
-function FramesCard({
-  frames,
-}: {
-  frames: FramesResponse<ProtocolFramePair>;
-}): React.ReactElement {
-  const notice = framesTruncatedNotice(frames);
-  return (
-    <Card
-      size="small"
-      title="协议帧"
-      extra={
-        <Space>
-          <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
-          {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
-            <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
-          ) : null}
-        </Space>
-      }
-    >
-      {notice === null ? null : (
-        <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={notice} />
-      )}
-      {frames.frames.length === 0 ? (
-        <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
-      ) : (
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-          {frames.frames.slice(0, FRAME_LIMIT).map((frame, index) => (
-            <FramePairCard
-              key={`${frame.mcp}-${String(frame.id ?? '')}-${index}`}
-              frame={frame}
-            />
-          ))}
-        </Space>
-      )}
-      {frames.hasMore === true ? (
-        <Text type="secondary" style={{ fontSize: 11.5 }}>
-          还有更多帧；缩小时间范围或指定 mcp / id。
-        </Text>
-      ) : null}
-    </Card>
-  );
-}
-
-function FramePairCard({ frame }: { frame: ProtocolFramePair }): React.ReactElement {
-  return (
-    <Card
-      size="small"
-      title={
-        <span className="mono">
-          {frame.method ?? eventText(frame.request ?? undefined, 'method') ?? 'frame'}
-        </span>
-      }
-      extra={
-        <Space>
-          <span className="muted">
-            id {frame.id ?? '—'} · mcp {formatId(frame.mcp, 12)}
-          </span>
-          {frame.durMs === undefined ? null : (
-            <Tag bordered={false}>{formatDuration(frame.durMs)}</Tag>
-          )}
-          {frame.ok === undefined ? null : (
-            <Tag color={frame.ok ? 'green' : 'red'} bordered={false}>
-              {frame.ok ? 'ok' : 'error'}
-            </Tag>
-          )}
-        </Space>
-      }
-    >
-      <Row gutter={12}>
-        <Col span={12}>
-          <FrameColumn label="请求" event={frame.request} />
-        </Col>
-        <Col span={12}>
-          <FrameColumn label="响应" event={frame.response} />
-        </Col>
-      </Row>
-    </Card>
   );
 }
 
@@ -1391,17 +1233,6 @@ function splitClientFilter(label: string): { name: string; version: string } {
   return { name: label.slice(0, slash), version: label.slice(slash + 1) };
 }
 
-/** Tool for calls; `kind` for `ai_run`; the event name as the last resort. */
-function eventSubject(event: AuditEvent): string {
-  return (
-    eventText(event, 'tool') ??
-    eventText(event, 'method') ??
-    eventText(event, 'kind') ??
-    event.event ??
-    '—'
-  );
-}
-
 function eventClientLabel(event: AuditEvent): string {
   if (event.event === 'ai_run') {
     const client = eventText(event, 'client') ?? 'admin';
@@ -1415,8 +1246,10 @@ function eventModeLabel(event: AuditEvent): string {
   if (event.event === 'ai_run') {
     const outcome = eventText(event, 'outcome');
     const trigger = eventText(event, 'trigger');
-    if (outcome !== null && trigger !== null) return `${outcome} · ${trigger}`;
-    return outcome ?? trigger ?? '—';
+    if (outcome !== null && trigger !== null) {
+      return `${stateLabel(outcome)} · ${aiRunTriggerLabel(trigger)}`;
+    }
+    return outcome !== null ? stateLabel(outcome) : aiRunTriggerLabel(trigger);
   }
   return eventText(event, 'mode') ?? eventText(event, 'concurrency') ?? '—';
 }

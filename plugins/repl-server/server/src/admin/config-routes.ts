@@ -134,10 +134,8 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
       const stored = new Set(await deps.secrets.listNames());
       const declared = new Set<string>();
       for (const server of await deps.servers.list()) {
-        // Every env/header key is a declaration, whether it holds a literal or
-        // a $secret reference; an arg declares a key only through a reference.
-        for (const key of Object.keys(server.env)) declared.add(key);
-        for (const key of Object.keys(server.headers)) declared.add(key);
+        // Only `$secret` references name stored secrets; an env/header key that
+        // holds a literal is ordinary config data, not a secret.
         for (const name of requiredSecretNames(server)) declared.add(name);
       }
       const names = [...new Set([...stored, ...declared])].sort();

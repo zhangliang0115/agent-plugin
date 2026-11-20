@@ -93,17 +93,15 @@ test('DELETE /secrets/:name reports whether the key existed and removes it', asy
   assert.equal(await handler({ method: 'DELETE', path: '/admin/api/secrets' }), null);
 });
 
-test('GET /secrets unions stored names with env, header and arg declarations', async (t) => {
+test('GET /secrets lists stored names plus referenced $secret names', async (t) => {
   const { handler } = await fixture(t);
   const response = await getSecrets(handler);
   assert.equal(response.status, 200);
 
+  // Env/header key names that hold literals or point at a differently named
+  // secret are not secrets themselves; only the `$secret` targets are listed.
   assert.deepEqual(response.body, {
     secrets: [
-      { name: 'Authorization', configured: false },
-      { name: 'DATABASE_URL', configured: false },
-      { name: 'NODE_ENV', configured: false },
-      { name: 'X-Literal', configured: false },
       { name: 'arg_token', configured: false },
       { name: 'github_pat', configured: false },
       { name: 'pg_db_url', configured: true },

@@ -22,7 +22,7 @@ export { PROVIDER_TOKEN_RULES } from './redact.ts';
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+const HEADER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
 // Mirrors the category dictionary key rule in `admin/categories.ts`, so every
 // key the administrator can store is also representable in an AI draft.
 const CATEGORY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/u;
@@ -587,7 +587,6 @@ export function toServerConfig(server: ProposalServer): ServerConfig {
 
 export interface NormalizedToolOverride {
   name: string;
-  description?: string | null;
   tags?: string[];
 }
 
@@ -617,15 +616,25 @@ const ANNOTATION_FIELDS: ReadonlySet<string> = new Set([
   'toolOverrides',
   'warnings',
 ]);
+// `description` stays allowed but is ignored: models occasionally keep returning
+// it from older prompts, and tool descriptions are never written by AI.
 const TOOL_OVERRIDE_FIELDS: ReadonlySet<string> = new Set(['name', 'description', 'tags']);
 const SUGGESTION_LABEL_MAX = 40;
 const MAX_TAG_SUGGESTIONS = MAX_TAGS;
 
-function annotationTags(value: unknown, field: string, prefix: string): string[] {
+/**
+ * Validates a tag list, then applies the item cap. Model previews truncate the
+ * overshoot (with a warning) because a single chatty field should not throw
+ * away an otherwise valid annotation; apply keeps the hard rejection.
+ */
+function readTagList(
+  value: unknown,
+  field: string,
+  prefix: string,
+  limit: number,
+  truncate: boolean,
+): { tags: string[]; dropped: number } {
   if (!Array.isArray(value)) throw annotationInvalid([`${field} must be an array`], [prefix]);
-  if (value.length > MAX_TAGS) {
-    throw annotationInvalid([`${field} must have at most ${MAX_TAGS} items`], [prefix]);
-  }
   const tags: string[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const entry = value[index];
@@ -637,12 +646,17 @@ function annotationTags(value: unknown, field: string, prefix: string): string[]
     }
     if (!tags.includes(entry)) tags.push(entry);
   }
-  return tags;
+  if (tags.length <= limit) return { tags, dropped: 0 };
+  if (!truncate) {
+    throw annotationInvalid([`${field} must have at most ${limit} items`], [prefix]);
+  }
+  return { tags: tags.slice(0, limit), dropped: tags.length - limit };
 }
 
 function readToolOverrides(
   value: unknown,
   knownTools: ReadonlySet<string>,
+  options: { truncate: boolean; notes: string[] },
 ): NormalizedToolOverride[] {
   if (!Array.isArray(value)) {
     throw annotationInvalid(['toolOverrides must be an array'], ['toolOverrides']);
@@ -679,30 +693,20 @@ function readToolOverrides(
     }
 
     const override: NormalizedToolOverride = { name };
-    if ('description' in entry) {
-      const description = entry['description'];
-      if (description !== null && typeof description !== 'string') {
-        throw annotationInvalid(
-          [`${field}.description must be a string or null`],
-          [`${field}.description`],
+    if ('tags' in entry) {
+      const read = readTagList(
+        entry['tags'],
+        `${field}.tags`,
+        `${field}.tags`,
+        MAX_TAGS,
+        options.truncate,
+      );
+      if (read.dropped > 0) {
+        options.notes.push(
+          `工具 ${name} 的标签超过 ${MAX_TAGS} 个，已保留前 ${MAX_TAGS} 个，其余 ${read.dropped} 个丢弃`,
         );
       }
-      override.description =
-        description === null
-          ? null
-          : (() => {
-              const text = sanitizeSingleLine(description);
-              if (text.length > 200) {
-                throw annotationInvalid(
-                  [`${field}.description must be at most 200 characters`],
-                  [`${field}.description`],
-                );
-              }
-              return text;
-            })();
-    }
-    if ('tags' in entry) {
-      override.tags = annotationTags(entry['tags'], `${field}.tags`, `${field}.tags`);
+      override.tags = read.tags;
     }
     overrides.push(override);
   }
@@ -741,33 +745,49 @@ function readSuggestion(
   return { key, zh, en };
 }
 
-function readTagSuggestions(value: unknown): DictionarySuggestion[] {
+function readTagSuggestions(
+  value: unknown,
+  options: { truncate: boolean; notes: string[] },
+): DictionarySuggestion[] {
   if (!Array.isArray(value)) {
     throw annotationInvalid(['tagSuggestions must be an array'], ['tagSuggestions']);
-  }
-  if (value.length > MAX_TAG_SUGGESTIONS) {
-    throw annotationInvalid(
-      [`tagSuggestions must have at most ${MAX_TAG_SUGGESTIONS} items`],
-      ['tagSuggestions'],
-    );
   }
   const suggestions: DictionarySuggestion[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const suggestion = readSuggestion(value[index], `tagSuggestions[${index}]`, TAG_PATTERN);
     if (!suggestions.some((entry) => entry.key === suggestion.key)) suggestions.push(suggestion);
   }
-  return suggestions;
+  if (suggestions.length <= MAX_TAG_SUGGESTIONS) return suggestions;
+  if (!options.truncate) {
+    throw annotationInvalid(
+      [`tagSuggestions must have at most ${MAX_TAG_SUGGESTIONS} items`],
+      ['tagSuggestions'],
+    );
+  }
+  const dropped = suggestions.length - MAX_TAG_SUGGESTIONS;
+  options.notes.push(
+    `建议标签超过 ${MAX_TAG_SUGGESTIONS} 个，已保留前 ${MAX_TAG_SUGGESTIONS} 个，其余 ${dropped} 个丢弃`,
+  );
+  return suggestions.slice(0, MAX_TAG_SUGGESTIONS);
+}
+
+export interface NormalizeAnnotationOptions {
+  /** Preview-only: trim tag counts that exceed the caps instead of rejecting the draft. */
+  truncateTagCounts?: boolean;
 }
 
 export function normalizeAnnotation(
   value: unknown,
   knownTools: readonly string[],
+  options: NormalizeAnnotationOptions = {},
 ): NormalizedAnnotation {
   if (!isPlainObject(value)) {
     throw annotationInvalid(['annotation must be a JSON object'], []);
   }
   unknownFields(value, ANNOTATION_FIELDS, '', annotationInvalid);
 
+  const truncate = options.truncateTagCounts === true;
+  const notes: string[] = [];
   const result: NormalizedAnnotation = { warnings: [] };
 
   if ('summary' in value) {
@@ -804,17 +824,24 @@ export function normalizeAnnotation(
   }
 
   if ('tags' in value) {
-    result.tags = annotationTags(value['tags'], 'tags', 'tags');
+    const read = readTagList(value['tags'], 'tags', 'tags', MAX_TAGS, truncate);
+    if (read.dropped > 0) {
+      notes.push(
+        `标签超过 ${MAX_TAGS} 个，已保留前 ${MAX_TAGS} 个，其余 ${read.dropped} 个丢弃`,
+      );
+    }
+    result.tags = read.tags;
   }
 
   if ('tagSuggestions' in value) {
-    result.tagSuggestions = readTagSuggestions(value['tagSuggestions']);
+    result.tagSuggestions = readTagSuggestions(value['tagSuggestions'], { truncate, notes });
   }
 
   if ('toolOverrides' in value) {
     result.toolOverrides = readToolOverrides(
       value['toolOverrides'],
       new Set(knownTools),
+      { truncate, notes },
     );
   }
 
@@ -840,6 +867,7 @@ export function normalizeAnnotation(
     });
   }
 
+  result.warnings.push(...notes);
   return result;
 }
 

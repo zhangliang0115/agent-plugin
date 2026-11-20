@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { Mono, PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
-import { formatNumber, formatPercent, formatTime, type Tone } from '../../lib/format.ts';
+import { formatNumber, formatPercent, formatTimestamp, type Tone } from '../../lib/format.ts';
 import { navigate, type ManageTab } from '../router.ts';
 
 const { Text } = Typography;
@@ -465,7 +465,7 @@ export function OverviewPage(): React.ReactElement {
       )}
       {lastUpdated === null ? null : (
         <Text type="secondary" style={{ fontSize: 11.5 }}>
-          更新于 {formatTime(lastUpdated)} · 数据源 /admin/api/overview
+          更新于 {formatTimestamp(lastUpdated)} · 数据源 /admin/api/overview
         </Text>
       )}
 

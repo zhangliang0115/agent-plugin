@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
+import { createLog, type LogFn } from './log.ts';
 import { isAllowedHost } from './auth/tokens.ts';
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
 import { parseClientInfo } from './client-info.ts';
@@ -18,6 +19,8 @@ export interface McpContext {
   tasks: McpTaskStore;
   tasksDeclared: boolean;
   transportId: string;
+  /** JSON-RPC id of this request; `null` for notifications. Stamped into eval audits. */
+  requestId: string | number | null;
   /** Present when the report pipeline is wired; `report_problem` needs it. */
   reports?: ReportService;
 }
@@ -44,7 +47,7 @@ export interface AppOptions {
    */
   onSessionActivity?: (transportId: string, identity: RequestIdentity) => void;
   health?: () => Record<string, unknown>;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 const MAX_BODY_BYTES = 1 << 20;
@@ -97,7 +100,7 @@ function declaredTasks(message: unknown): boolean {
 
 /** Builds the HTTP surface: `/mcp` modern + legacy, `/admin` delegated, `/health`. */
 export function createApp(options: AppOptions): Server {
-  const log = options.log ?? ((line: string) => console.error(line));
+  const log = options.log ?? createLog((line) => console.error(line));
 
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -179,7 +182,7 @@ export function createApp(options: AppOptions): Server {
       if (requestedId === undefined) {
         const session = options.sessions.create(method === 'initialize' ? 'legacy' : 'modern', {
           onClose: async (reason) => {
-            log(`repl-server: transport closed (${reason})`);
+            log(`transport closed (${reason})`, { scope: 'mcp', mcp: session.id });
             // DELETE /mcp and idle expiry both land here: drop the exec
             // sessions, their workers/serve handles and this session's tasks.
             await options.gateway.destroyOwner(session.id);
@@ -238,15 +241,26 @@ export function createApp(options: AppOptions): Server {
         tasks: options.tasks,
         tasksDeclared: declaredTasks(message),
         transportId,
+        requestId:
+          typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
         ...(options.reports === undefined ? {} : { reports: options.reports }),
       };
 
       // Task mappings record the creating transport session here, so the
       // DELETE cascade can find bound tasks whose owner is the binding id.
+      const started = Date.now();
       const response = await withTransportSession(transportId, () =>
         options.dispatcher.handle(message, context),
       );
-      log(`repl-server: mcp ${method ?? 'notification'} -> ${response === null ? 202 : 200}`);
+      log(`mcp ${method ?? 'notification'} -> ${response === null ? 202 : 200}`, {
+        scope: 'mcp',
+        mcp: transportId,
+        client: identity.client,
+        binding: identity.binding,
+        method: method ?? 'notification',
+        status: response === null ? 202 : 200,
+        durMs: Date.now() - started,
+      });
       if (response === null) {
         res.writeHead(202, { 'mcp-session-id': transportId });
         res.end();
@@ -262,7 +276,7 @@ export function createApp(options: AppOptions): Server {
       });
       sendJson(res, 200, response, { 'mcp-session-id': transportId });
     } catch (error) {
-      log(`repl-server: unhandled request error: ${(error as Error).message}`);
+      log(`unhandled request error: ${(error as Error).message}`, { level: 'error', scope: 'mcp' });
       if (!res.headersSent) {
         sendJson(res, 500, { error: { code: 'INTERNAL', message: 'internal error' } });
       } else {

@@ -2,6 +2,7 @@
 import { Space, Tag, Typography } from 'antd';
 
 import { formatBytes, formatJson } from '../../lib/format.ts';
+import { JsonView } from './JsonView.tsx';
 
 const { Text } = Typography;
 
@@ -14,9 +15,12 @@ export interface FrameEvent {
 export function FrameColumn({
   label,
   event,
+  maxHeight = 240,
 }: {
   label: string;
   event: FrameEvent | null;
+  /** Payload box height cap; drawers pass a viewport-based value to use the free area. */
+  maxHeight?: number | string;
 }): React.ReactElement {
   if (event === null) {
     return (
@@ -55,9 +59,13 @@ export function FrameColumn({
           {payloadTruncation === null ? null : <Tag color="gold">{payloadTruncation}</Tag>}
         </Space>
       )}
-      <pre className="code-block" style={{ maxHeight: 240, overflow: 'auto' }}>
-        {text}
-      </pre>
+      {head === null ? (
+        <JsonView value={payload} maxHeight={maxHeight} />
+      ) : (
+        <pre className="code-block" style={{ maxHeight, overflow: 'auto' }}>
+          {text}
+        </pre>
+      )}
     </div>
   );
 }

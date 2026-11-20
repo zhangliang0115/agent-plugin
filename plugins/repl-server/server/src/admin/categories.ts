@@ -53,6 +53,15 @@ export const DEFAULT_CATEGORY_DICTIONARY: readonly CategoryDefinition[] = Object
   { key: 'other', zh: '其他', en: 'Other' },
 ]);
 
+/** Built-in categories: every shipped default key. Never editable or removable. */
+const LOCKED_CATEGORY_KEYS: ReadonlySet<string> = new Set(
+  DEFAULT_CATEGORY_DICTIONARY.map((category) => category.key),
+);
+
+export function isLockedCategoryKey(key: string): boolean {
+  return LOCKED_CATEGORY_KEYS.has(key);
+}
+
 /** The 15-entry default from before categories and tags diverged. */
 const LEGACY_DEFAULT_DICTIONARY: readonly CategoryDefinition[] = [
   { key: 'official', zh: '官方', en: 'Official' },
@@ -204,6 +213,18 @@ export function createAdminCategoriesHandler(deps: AdminCategoriesDeps): AdminHa
       const categories = parseCategoryDictionary(requireObjectBody(request)['categories']);
       const current = await deps.settings.read();
       assertRevision(current.revision, expected);
+      // Built-in keys that exist today must survive the full replacement unchanged.
+      for (const entry of readCategoryDictionary(current.settings)) {
+        if (!isLockedCategoryKey(entry.key)) continue;
+        const next = categories.find((category) => category.key === entry.key);
+        if (next === undefined || next.zh !== entry.zh || next.en !== entry.en) {
+          throw new AdminApiError(
+            422,
+            'INVALID_CATEGORIES',
+            `category ${entry.key} is system-managed and cannot be edited or removed`,
+          );
+        }
+      }
       const next: StoredSettings = { ...current.settings, [SETTING_KEY]: categories };
       const { revision } = await deps.settings.replace(next, expected);
       return adminJson(200, { categories: readCategoryDictionary(next), revision });

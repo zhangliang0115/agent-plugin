@@ -21,16 +21,23 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
-import { PageHeader } from '../components/common.tsx';
+import { PageHeader, stateLabel } from '../components/common.tsx';
 import { FrameColumn, type FrameEvent } from '../components/FramePayload.tsx';
+import { RequestTimeline } from '../components/RequestTimeline.tsx';
 import {
   ApiError,
   framesTruncatedNotice,
   type FramesResponse,
   type StreamState,
 } from '../../lib/api.ts';
+import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
-import { eventWindow, isAsyncResponse, isProtocolFrame } from '../../lib/request-detail.ts';
+import {
+  eventWindow,
+  isAsyncResponse,
+  isProtocolFrame,
+  requestRunIds,
+} from '../../lib/request-detail.ts';
 
 const { Text } = Typography;
 
@@ -188,20 +195,28 @@ export function RequestsPage(): React.ReactElement {
     setEventsLoading(true);
     const ticket = ++eventTicketRef.current;
     try {
-      // `tool_call`/`tool_result` carry no mcp/binding/exec fields and `evalId`
-      // is rejected without `exec`, so time is the only filter that keeps the
-      // trace complete. Async evals keep the tail open because their events
-      // are written after the response returns.
-      const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+      // Exact link: `eval_start` carries the id of the `tools/call` that started
+      // it, and every tool event of that eval carries the same `runId`. The
+      // padded window only bounds this lookup (async evals keep the tail open).
+      const starts = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
         query: {
           ...eventWindow(pair.request?.ts, pair.response?.ts, isAsyncResponse(pair.response)),
+          mcp: pair.mcp,
           limit: 500,
         },
       });
       if (ticket !== eventTicketRef.current) return;
-      const list = Array.isArray(response.events) ? response.events : [];
-      list.sort((left, right) => timeOf(left) - timeOf(right));
-      setEvents(list);
+      const runIds = requestRunIds(Array.isArray(starts.events) ? starts.events : [], pair.id);
+      const collected: AuditEvent[] = [];
+      for (const runId of runIds) {
+        const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+          query: { runId, limit: 500 },
+        });
+        if (ticket !== eventTicketRef.current) return;
+        if (Array.isArray(response.events)) collected.push(...response.events);
+      }
+      collected.sort((left, right) => timeOf(left) - timeOf(right));
+      setEvents(collected);
     } catch (failure) {
       if (ticket !== eventTicketRef.current) return;
       setEventsError(failureText(failure));
@@ -222,13 +237,13 @@ export function RequestsPage(): React.ReactElement {
     {
       title: '客户端 / binding',
       key: 'client',
-      width: 190,
       ellipsis: true,
       render: (_value, pair) => pairClientLabel(pair),
     },
     {
       title: '方法',
       key: 'method',
+      width: 180,
       ellipsis: true,
       render: (_value, pair) => <span className="mono">{pair.method ?? '—'}</span>,
     },
@@ -250,7 +265,7 @@ export function RequestsPage(): React.ReactElement {
           </Tag>
         ) : (
           <Tag color={pair.ok === false ? 'red' : 'green'} bordered={false}>
-            {pair.ok === false ? 'error' : 'ok'}
+            {stateLabel(pair.ok === false ? 'error' : 'ok')}
           </Tag>
         ),
     },
@@ -288,7 +303,7 @@ export function RequestsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="请求记录"
-        description="一行一次 MCP 请求。点击一行查看本次请求的协议帧与审计事件；列表在实时模式下随协议帧自动刷新。"
+        description="一行一次 MCP 请求。点击一行查看本次请求的过程、协议帧与审计事件；列表在实时模式下随协议帧自动刷新。"
         actions={
           <Space size={10}>
             <Tag color={streamState === 'open' ? 'green' : 'default'} bordered={false}>
@@ -376,13 +391,14 @@ export function RequestsPage(): React.ReactElement {
       </Card>
 
       <Drawer
+        placement="left"
         open={selected !== null}
         onClose={() => {
           eventTicketRef.current += 1;
           setSelected(null);
           setEvents(null);
         }}
-        width={920}
+        width={1120}
         title={
           selected === null ? (
             '请求详情'
@@ -391,7 +407,9 @@ export function RequestsPage(): React.ReactElement {
               <span className="mono">{selected.method ?? 'request'}</span>
               <span className="muted">#{selected.id ?? '—'}</span>
               <Tag color={selected.ok === false ? 'red' : 'green'} bordered={false}>
-                {selected.response === null ? '无响应' : selected.ok === false ? 'error' : 'ok'}
+                {selected.response === null
+                  ? '无响应'
+                  : stateLabel(selected.ok === false ? 'error' : 'ok')}
               </Tag>
             </Space>
           )
@@ -401,15 +419,36 @@ export function RequestsPage(): React.ReactElement {
           <Tabs
             items={[
               {
+                key: 'timeline',
+                label: '过程',
+                children: (
+                  <RequestTimeline
+                    request={selected.request}
+                    response={selected.response}
+                    events={events}
+                    loading={eventsLoading}
+                    error={eventsError}
+                  />
+                ),
+              },
+              {
                 key: 'frames',
                 label: '协议帧',
                 children: (
                   <Row gutter={12}>
                     <Col span={12}>
-                      <FrameColumn label="请求报文" event={selected.request} />
+                      <FrameColumn
+                        label="请求报文"
+                        event={selected.request}
+                        maxHeight="calc(100vh - 210px)"
+                      />
                     </Col>
                     <Col span={12}>
-                      <FrameColumn label="响应报文" event={selected.response} />
+                      <FrameColumn
+                        label="响应报文"
+                        event={selected.response}
+                        maxHeight="calc(100vh - 210px)"
+                      />
                     </Col>
                   </Row>
                 ),
@@ -419,6 +458,9 @@ export function RequestsPage(): React.ReactElement {
                 label: eventCount === null ? '事件' : `事件（${eventCount}）`,
                 children: (
                   <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>
+                      只显示与本次请求关联的事件：eval_start 上的 requestId 指向这条请求，其余事件共享同一次执行的 runId。没有执行事件的请求（连接、server/discover、tools/list、search_tools 等）显示为空。
+                    </Typography.Text>
                     {eventsError === null ? null : (
                       <Alert type="error" showIcon message="事件读取失败" description={eventsError} />
                     )}
@@ -432,7 +474,7 @@ export function RequestsPage(): React.ReactElement {
                       scroll={{ x: 760 }}
                       locale={{
                         emptyText: (
-                          <Empty description="本次请求没有执行事件。discover、tools/list、连接类请求通常只有协议帧。" />
+                          <Empty description="本次请求没有关联的执行事件。连接、server/discover、tools/list、search_tools 这类请求本来就没有执行事件；本次升级之前写入的旧审计记录也没有关联字段。" />
                         ),
                       }}
                     />
@@ -459,22 +501,14 @@ const eventColumns: TableProps<AuditEvent>['columns'] = [
   {
     title: '事件',
     dataIndex: 'event',
-    width: 130,
-    render: (value: unknown) => <span className="mono">{typeof value === 'string' ? value : '—'}</span>,
+    width: 110,
+    render: (value: unknown) => <span>{eventLabel(value)}</span>,
   },
   {
     title: '对象',
     key: 'subject',
     ellipsis: true,
-    render: (_value, event) => (
-      <span className="mono">
-        {stringField(event, 'tool') ??
-          stringField(event, 'method') ??
-          stringField(event, 'kind') ??
-          stringField(event, 'server') ??
-          '—'}
-      </span>
-    ),
+    render: (_value, event) => <span className="mono">{eventSubject(event)}</span>,
   },
   {
     title: 'eval',
@@ -523,14 +557,9 @@ function eventStatusTag(event: AuditEvent): React.ReactElement {
   const color = status === 'error' || status === 'failed' ? 'red' : status === 'timeout' ? 'orange' : 'green';
   return (
     <Tag color={color} bordered={false}>
-      {status}
+      {stateLabel(status)}
     </Tag>
   );
-}
-
-function stringField(event: AuditEvent, key: string): string | null {
-  const value = event[key];
-  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 function timeOf(event: AuditEvent): number {

@@ -678,6 +678,65 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
   assert.equal(errorCode(duplicate), 'SERVER_EXISTS');
 });
 
+test('parseCreateServer accepts header names with underscores and dots', () => {
+  const config = parseCreateServer({
+    id: 'idea-os',
+    transport: 'http',
+    url: 'http://127.0.0.1:64342/stream',
+    headerKeys: ['IJ_MCP_SERVER_PROJECT_PATH', 'X.Api.Key'],
+  });
+  assert.deepEqual(Object.keys(config.headers ?? {}), [
+    'IJ_MCP_SERVER_PROJECT_PATH',
+    'X.Api.Key',
+  ]);
+
+  for (const key of ['Bad Key', 'Host: evil', 'A/B']) {
+    assert.throws(
+      () =>
+        parseCreateServer({
+          id: 'idea-os',
+          transport: 'http',
+          url: 'http://127.0.0.1:64342/stream',
+          headerKeys: [key],
+        }),
+      (error: unknown) =>
+        error instanceof AdminApiError && error.status === 400 && error.code === 'INVALID_FIELD',
+      key,
+    );
+  }
+});
+
+test('PATCH /servers keeps existing $secret targets when envKeys are resubmitted', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, {
+    id: 'disc',
+    env: {
+      TOKEN: { $secret: 'disc.disc.env.TOKEN' },
+      NODE_ENV: 'production',
+    },
+    headers: { Authorization: { $secret: 'disc.disc.header.Authorization' } },
+  });
+
+  const patched = await call(
+    handler,
+    makeRequest('PATCH', '/servers/disc', {
+      // The edit form sends every current key on save.
+      body: { envKeys: ['TOKEN', 'NODE_ENV'], headerKeys: ['Authorization'] },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(patched.status, 200);
+  const server = bodyOf(patched)['server'] as Record<string, unknown>;
+  assert.deepEqual(server['envSecrets'], {
+    TOKEN: 'disc.disc.env.TOKEN',
+    NODE_ENV: 'NODE_ENV',
+  });
+  assert.deepEqual(server['headerSecrets'], {
+    Authorization: 'disc.disc.header.Authorization',
+  });
+});
+
 test('parseCreateServer rejects __proto__ instead of writing the prototype', () => {
   assert.throws(
     () => parseCreateServer({ id: 'pg', command: 'npx', envKeys: ['__proto__'] }),

@@ -19,7 +19,7 @@ test('propose prompt injects both dictionaries and forbids invented keys', () =>
     'abcd1234',
   );
 
-  assert.equal(PROMPT_VERSION, 7);
+  assert.equal(PROMPT_VERSION, 9);
   assert.ok(prompt.includes('分类字典（category 只能从这里选；都不合适时用 other）：\nvector-db=向量数据库'));
   assert.ok(prompt.includes('标签字典（tags 只能从这里选；没有合适的就留空）：\nembedding=嵌入, read=只读'));
   assert.match(prompt, /category 必须从下面的分类字典 key 中选一个/);
@@ -38,7 +38,7 @@ test('annotate prompt carries both dictionaries and the suggestion rules', () =>
     'abcd1234',
   );
 
-  assert.equal(PROMPT_VERSION, 7);
+  assert.equal(PROMPT_VERSION, 9);
   assert.match(result.prompt, /database=数据库/);
   assert.match(result.prompt, /observability=可观测性/);
   assert.match(result.prompt, /env\.dev=开发环境/);
@@ -48,4 +48,8 @@ test('annotate prompt carries both dictionaries and the suggestion rules', () =>
   assert.match(result.prompt, /分类 key 与标签 key 不能重名/);
   assert.match(result.prompt, /categorySuggestion 同样不能用 env\.\*、cross-env、official、builtin/);
   assert.match(result.prompt, /≤40 字符/);
+  assert.match(result.prompt, /zh 用中文名称/);
+  assert.match(result.prompt, /不要生成工具描述/);
+  assert.match(result.prompt, /"toolOverrides": \[\n    \{"name": "query", "tags"/);
+  assert.doesNotMatch(result.prompt, /"description": "Run a read-only/);
 });

@@ -255,6 +255,18 @@ test('ai_run maps outcome to status and serverId to the server filter', () => {
   assert.equal(matchesFilter(failed, normalizeFilter({ server: 'srv_other' })), false);
 });
 
+test('matchesFilter and parseAuditQueryParams support the eval runId', () => {
+  const event = {
+    event: 'tool_call',
+    ts: new Date(DAY_18).toISOString(),
+    exec: 'es_1',
+    runId: 'run_1',
+  };
+  assert.equal(matchesFilter(event, normalizeFilter({ runId: 'run_1' })), true);
+  assert.equal(matchesFilter(event, normalizeFilter({ runId: 'run_2' })), false);
+  assert.equal(parseAuditQueryParams(new URLSearchParams('runId=run_1')).runId, 'run_1');
+});
+
 test('queryAudit finds ai_run events by status and serverId', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'repl-audit-ai-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

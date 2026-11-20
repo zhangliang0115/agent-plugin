@@ -137,7 +137,7 @@ type ServerAction = 'connect' | 'disconnect' | 'restart';
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+const HEADER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export function ServersPage(): React.ReactElement {
   const api = useApi();
@@ -939,10 +939,11 @@ export function ServersPage(): React.ReactElement {
       </Card>
 
       <Drawer
+        placement="left"
         open={detailId !== null}
         onClose={() => setDetailId(null)}
         title={selected === null ? '服务详情' : `${selected.label} · ${selected.id}`}
-        width={560}
+        width={640}
         extra={selected === null ? null : <StateTag state={selected.state} />}
       >
         {selected === null ? (
@@ -1018,11 +1019,12 @@ export function ServersPage(): React.ReactElement {
       </Drawer>
 
       <Drawer
+        placement="left"
         forceRender
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={editing === null ? '新增 server' : `编辑 ${editing.id}`}
-        width={560}
+        width={600}
         extra={
           <Space>
             <Button onClick={() => setEditorOpen(false)}>取消</Button>
@@ -1157,7 +1159,7 @@ export function ServersPage(): React.ReactElement {
                     validator: async (_rule, value?: string) => {
                       for (const key of splitList(value)) {
                         if (!HEADER_KEY_PATTERN.test(key)) {
-                          throw new Error(`header 名 ${key} 不合法：只能包含字母、数字与短横线`);
+                          throw new Error(`header 名 ${key} 不合法：只能包含字母、数字、点、下划线与短横线`);
                         }
                       }
                     },
@@ -1231,11 +1233,12 @@ export function ServersPage(): React.ReactElement {
       </Drawer>
 
       <Drawer
+        placement="left"
         forceRender
         open={aiOpen}
         onClose={() => setAiOpen(false)}
         title="AI 生成配置"
-        width={640}
+        width={720}
         extra={
           <Space>
             <Button onClick={() => setAiOpen(false)}>取消</Button>
@@ -1450,7 +1453,7 @@ export function ServersPage(): React.ReactElement {
                         validator: async (_rule, value?: string) => {
                           for (const key of splitList(value)) {
                             if (!HEADER_KEY_PATTERN.test(key)) {
-                              throw new Error(`header 名 ${key} 不合法：只能包含字母、数字与短横线`);
+                              throw new Error(`header 名 ${key} 不合法：只能包含字母、数字、点、下划线与短横线`);
                             }
                           }
                         },

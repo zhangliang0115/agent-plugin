@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * AI service: config, proposal drafting and annotation preview/apply (08 §3–§5).
  *
@@ -171,6 +172,8 @@ export interface AnnotationApplyResponse {
   tools: Array<{ name: string; descriptionOverride: string | null; tags: string[] }>;
   revision: number;
   changed: string[];
+  /** Values dropped because the dictionary changed since the proposal was made. */
+  warnings: string[];
 }
 
 export interface AiService {
@@ -192,7 +195,7 @@ export interface AiService {
    * but production callers should not await it: the AI run is bounded by
    * `ai.timeoutMs` and must not block tool indexing.
    */
-  onToolsIndexed(serverId: string, options?: { explicit?: boolean }): Promise<void>;
+  onToolsIndexed(serverId: string): Promise<void>;
   /** PATCH/refresh/delete: a pending preview built from older metadata is stale. */
   onServerMutated(serverId: string): void;
   /**
@@ -211,7 +214,7 @@ export interface AiServiceDeps {
   settings: SettingsStore;
   spawn?: SpawnFn;
   clock?: Clock;
-  log?: (line: string) => void;
+  log?: LogFn;
   dataDir?: string;
   /** Test seam only; never passed by assembly. */
   extraEnv?: Readonly<Record<string, string>>;
@@ -411,7 +414,6 @@ export function createAiService(deps: AiServiceDeps): AiService {
   const limiter = createAiLimiter();
   const proposals = createProposalStore({ clock });
   const annotations = createAnnotationStore({ clock });
-  const createdThisProcess = new Set<string>();
   const lastAutoAt = new Map<string, number>();
   /** `(serverId, toolsHash)` keys with a preview between precheck and model run. */
   const autoInFlight = new Set<string>();
@@ -467,7 +469,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
     try {
       deps.onAiRun(event);
     } catch (error) {
-      log(`ai audit hook failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`ai audit hook failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'ai' });
     }
   }
 
@@ -510,7 +512,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         }),
       );
       const resultBytes = Buffer.byteLength(run.resultText, 'utf8');
-      log(`ai ${input.kind} code=ok durationMs=${run.durationMs} bytes=${resultBytes}`);
+      log('ai run finished', { scope: 'ai', kind: input.kind, code: 'ok', durMs: run.durationMs, bytes: resultBytes });
       return {
         run,
         audit: {
@@ -541,7 +543,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         costUsd: null,
         proposalId: null,
       });
-      log(`ai ${input.kind} code=${code} durationMs=${durationMs} bytes=0`);
+      log('ai run failed', { level: 'error', scope: 'ai', kind: input.kind, code, durMs: durationMs, bytes: 0 });
       throw mapped;
     }
   }
@@ -593,7 +595,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
       normalized = normalizeProposal(run.payload);
     } catch (error) {
       emitSuccess(audit, null);
-      log(`ai propose code=${errorCode(error)} durationMs=${run.durationMs} bytes=0`);
+      log('ai proposal rejected', { level: 'error', scope: 'ai', kind: 'propose', code: errorCode(error), durMs: run.durationMs });
       throw error;
     }
 
@@ -697,9 +699,6 @@ export function createAiService(deps: AiServiceDeps): AiService {
     }
 
     proposals.take(proposalId);
-    // Servers created through this route also qualify for the first-tools-list
-    // auto preview (08 §4.7 trigger list).
-    createdThisProcess.add(server.id);
     deps.catalog.rebuild([server.id]);
     return { server: renderServerView(created.server), revision: created.revision };
   }
@@ -774,10 +773,11 @@ export function createAiService(deps: AiServiceDeps): AiService {
       normalized = normalizeAnnotation(
         run.payload,
         tools.map((tool) => tool.name),
+        { truncateTagCounts: true },
       );
     } catch (error) {
       emitSuccess(audit, null);
-      log(`ai annotate code=${errorCode(error)} durationMs=${run.durationMs} bytes=0`);
+      log('ai annotation rejected', { level: 'error', scope: 'ai', kind: 'annotate', code: errorCode(error), durMs: run.durationMs });
       throw error;
     }
 
@@ -835,7 +835,10 @@ export function createAiService(deps: AiServiceDeps): AiService {
     );
     const dictionaries = await annotationDictionaries();
     const restricted = restrictAnnotationToDictionary(normalized, dictionaryKeys(dictionaries));
-    if (restricted.dropped.length > 0) {
+    // The dictionary may have changed after the preview was generated (entries
+    // deleted). Apply the remaining values and report the drops, exactly like
+    // the preview does; only reject when nothing is left to write.
+    if (restricted.dropped.length > 0 && annotationIsEmpty(restricted.annotation)) {
       throw new AdminApiError(
         422,
         'AI_ANNOTATION_INVALID',
@@ -879,6 +882,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
       })),
       revision: result.revision,
       changed: result.changed,
+      warnings: restricted.dropped,
     };
   }
 
@@ -897,7 +901,6 @@ export function createAiService(deps: AiServiceDeps): AiService {
   // -- auto preview ---------------------------------------------------------
 
   function onServerCreated(serverId: string): void {
-    createdThisProcess.add(serverId);
     annotations.deleteByServer(serverId);
     lastAutoAt.delete(serverId);
   }
@@ -906,14 +909,9 @@ export function createAiService(deps: AiServiceDeps): AiService {
     annotations.deleteByServer(serverId);
   }
 
-  async function maybeAutoAnnotate(
-    serverId: string,
-    options: { explicit?: boolean } = {},
-  ): Promise<void> {
+  async function maybeAutoAnnotate(serverId: string): Promise<void> {
     const ai = getAiSettings(deps.db);
     if (!ai.enabled || !ai.autoAnnotate) return;
-    const explicit = options.explicit === true;
-    if (!explicit && !createdThisProcess.has(serverId)) return;
 
     const record = await deps.servers.get(serverId);
     if (record === null || isBuiltinRecord(record)) return;
@@ -961,7 +959,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
     } catch (error) {
       // Precheck failures leave no attempt behind; model failures are audited by
       // `callModel`. Neither is retried automatically.
-      log(`ai annotate auto code=${errorCode(error)} server=${serverId}`);
+      log('ai auto annotate failed', { level: 'warn', scope: 'ai', kind: 'annotate', server: serverId, code: errorCode(error) });
     } finally {
       autoInFlight.delete(key);
     }
@@ -971,14 +969,11 @@ export function createAiService(deps: AiServiceDeps): AiService {
    * Auto-preview is best-effort: a database or AI failure here must never break
    * the tool-indexing path that called it.
    */
-  async function onToolsIndexed(
-    serverId: string,
-    options: { explicit?: boolean } = {},
-  ): Promise<void> {
+  async function onToolsIndexed(serverId: string): Promise<void> {
     try {
-      await maybeAutoAnnotate(serverId, options);
+      await maybeAutoAnnotate(serverId);
     } catch (error) {
-      log(`ai annotate auto skipped code=${errorCode(error)} server=${serverId}`);
+      log('ai auto annotate skipped', { level: 'warn', scope: 'ai', kind: 'annotate', server: serverId, code: errorCode(error) });
     }
   }
 
@@ -990,7 +985,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
     closePromise = Promise.resolve()
       .then(() => runner.close())
       .catch((error: unknown) => {
-        log(`ai close failed: ${error instanceof Error ? error.message : String(error)}`);
+        log(`ai close failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'ai' });
       });
     return closePromise;
   }

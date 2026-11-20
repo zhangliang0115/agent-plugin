@@ -103,7 +103,7 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+const HEADER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
 /** A downstream merge of the response through [[Set]] would rewrite the prototype. */
 const RESERVED_REF_KEYS: ReadonlySet<string> = new Set(['__proto__']);
 

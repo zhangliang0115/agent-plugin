@@ -104,6 +104,35 @@ test('an idle sweep recycles the session after 60 minutes but keeps the task tab
   assert.equal(waited.events[0]?.status, 'completed');
 });
 
+test('eval and tool audits carry the request id and a shared runId', async (t) => {
+  const events: Array<Record<string, unknown>> = [];
+  const gateway = createGateway(t, {
+    onAudit: (event) => {
+      events.push(event as unknown as Record<string, unknown>);
+    },
+  });
+
+  const outcome = await gateway.runScript({
+    ...request('return await tools.echo({});'),
+    async: false,
+    requestId: 7,
+  });
+  assert.equal(outcome.isError, false);
+
+  const start = events.find((event) => event['event'] === 'eval_start');
+  const toolCall = events.find((event) => event['event'] === 'tool_call');
+  const toolResult = events.find((event) => event['event'] === 'tool_result');
+  const end = events.find((event) => event['event'] === 'eval_end');
+  assert.equal(start?.['requestId'], 7);
+  const runId = start?.['runId'];
+  assert.equal(typeof runId, 'string');
+  for (const event of [toolCall, toolResult, end]) {
+    assert.equal(event?.['runId'], runId);
+  }
+  assert.equal(toolCall?.['exec'], start?.['exec']);
+  assert.equal(typeof toolCall?.['exec'], 'string');
+});
+
 test('a serve idle for 15 minutes is released while the session stays', async (t) => {
   const clock = fakeClock();
   const closed: Array<{ id: string; workspace: string }> = [];

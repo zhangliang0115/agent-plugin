@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * Audit runtime: owned JSONL writers plus the protocol-frame recorder.
  *
@@ -43,7 +44,7 @@ export interface AuditRuntimeOptions {
   /** Directory holding `audit-*.jsonl` and `protocol-*.jsonl`. Created when missing. */
   dir: string;
   /** Diagnostics sink for dropped writes. Never receives audit payloads. */
-  log?: (line: string) => void;
+  log?: LogFn;
   clock?: Clock;
   /** Protocol-frame mode (`docs/02 §6.6`). Default `summary`. */
   frameMode?: FrameMode;
@@ -179,7 +180,7 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
   const reportFailure = (error: unknown): void => {
     if (writeFailureLogged) return;
     writeFailureLogged = true;
-    log(`repl-server: audit write failed: ${error instanceof Error ? error.message : String(error)}`);
+    log(`audit write failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'audit' });
   };
 
   function notify(event: AuditEvent): void {
@@ -187,14 +188,14 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
     try {
       options.onEvent(event);
     } catch (error) {
-      log(`repl-server: audit event listener failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`audit event listener failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'audit' });
     }
   }
 
   function accept(target: AuditWriter, event: AuditEvent): boolean {
     if (closed) return false;
     if (typeof event !== 'object' || event === null || typeof event.event !== 'string' || event.event === '') {
-      log('repl-server: audit event dropped: missing event name');
+      log('audit event dropped: missing event name', { level: 'warn', scope: 'audit' });
       return false;
     }
     try {

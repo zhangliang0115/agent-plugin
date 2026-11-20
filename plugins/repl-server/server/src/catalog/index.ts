@@ -4,6 +4,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite';
 
+import { createLog } from '../log.ts';
+
 import type { Catalog, CatalogSnapshot } from '../ports.ts';
 import { getClientBinding } from '../db/clients.ts';
 import { refreshServerIndex } from '../db/tools.ts';
@@ -15,6 +17,8 @@ import {
 } from './snapshot.ts';
 import { searchTools } from './search.ts';
 import type { SearchHit, SearchRequest } from './search.ts';
+
+const log = createLog((line) => console.error(line));
 
 export {
   buildCatalogSnapshot,
@@ -121,7 +125,7 @@ export function createCatalogService(options: CatalogServiceOptions): CatalogSer
         listener(event);
       } catch (error) {
         // A broken subscriber (SSE client, test spy) must not fail a catalog commit.
-        console.error('repl-server: catalog_changed listener failed', error);
+        log(`catalog_changed listener failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'catalog' });
       }
     }
   }

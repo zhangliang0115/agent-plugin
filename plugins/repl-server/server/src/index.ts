@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import { join } from 'node:path';
+import { threadId } from 'node:worker_threads';
 
 import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-server-core';
 
 import { assemble } from './assembly.ts';
+import { createLog } from './log.ts';
 import { stateDbPath } from './local-tokens.ts';
 import { runStdioBridge } from './stdio-bridge.ts';
+
+const log = createLog((line) => console.error(line), { threadId });
 
 interface CliOptions {
   port: number;
@@ -24,7 +28,7 @@ function readOptions(argv: readonly string[]): CliOptions {
   const raw = stringArg(argv, '--port') ?? process.env['REPL_SERVER_PORT'];
   const port = Number(raw ?? 8787);
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    console.error(`repl-server: invalid port ${JSON.stringify(raw)}`);
+    log(`invalid port ${JSON.stringify(raw)}`, { level: 'error', scope: 'server' });
     process.exit(2);
   }
   return {
@@ -41,7 +45,7 @@ if (options.stdio) {
   process.exitCode = await runStdioBridge({
     url: options.url,
     ...(options.tokenFile === undefined ? {} : { tokenFile: options.tokenFile }),
-    log: (line) => console.error(line),
+    log,
   });
 } else {
   const host = '127.0.0.1';
@@ -49,23 +53,27 @@ if (options.stdio) {
   const dataRoot = join(stateDbPath(root === undefined ? undefined : `${root}/repl-server`), '..');
   const bootId = newId('boot');
   const sweep = startupSweep({ root: dataRoot, bootId });
-  console.error(
-    `repl-server: startup sweep ${sweep.status} boot=${bootId} killed=${sweep.killed.length} ai-runs-cleaned=${sweep.cleanedAiRuns.length} orphans=${sweep.reportPath ?? 'none'}`,
+  log(
+    `startup sweep ${sweep.status} boot=${bootId} killed=${sweep.killed.length} ai-runs-cleaned=${sweep.cleanedAiRuns.length} orphans=${sweep.reportPath ?? 'none'}`,
+    { scope: 'server' },
   );
   if (sweep.status === 'locked') {
-    console.error('repl-server: another instance holds the instance lock');
+    log('another instance holds the instance lock', { level: 'error', scope: 'server' });
     process.exit(1);
   }
 
-  const assembly = await assemble({ strictAuth: options.strictAuth, bootId });
+  const assembly = await assemble({ strictAuth: options.strictAuth, bootId, log });
 
   assembly.server.listen(options.port, host, () => {
     // stdout is reserved for the stdio bridge; logs go to stderr.
     const address = assembly.server.address();
     const actual = address !== null && typeof address === 'object' ? address.port : options.port;
-    console.error(`repl-server listening on http://${host}:${actual}`);
+    log(`listening on http://${host}:${actual}`, { scope: 'server', port: actual });
     if (assembly.adminBootstrapToken !== null) {
-      console.error(`repl-server admin: http://${host}:${actual}/admin?token=${assembly.adminBootstrapToken}`);
+      log(`admin: http://${host}:${actual}/admin?token=${assembly.adminBootstrapToken}`, {
+        scope: 'server',
+        port: actual,
+      });
     }
   });
 

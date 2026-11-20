@@ -198,7 +198,7 @@ test('full mode redacts Authorization/Cookie, strips URL queries and replaces ba
   });
 });
 
-test('full mode truncates a payload over 256KB to a 32KB head plus metadata', () => {
+test('full mode truncates a payload over 1MB to a 64KB head plus metadata', () => {
   const { sink, recorder } = makeRecorder('full');
   recorder.recordIn({
     mcp: 'mcp_1',

@@ -23,8 +23,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { useCategoryDictionary } from '../components/CategorySelect.tsx';
-import { tagLabel, useTagDictionary } from '../components/TagPicker.tsx';
+import { tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
+import { isLockedCategoryKey, isLockedTagKey } from '../../lib/tags.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatTimestamp } from '../../lib/format.ts';
 
@@ -46,7 +47,6 @@ interface AiConfigView {
 
 interface ToolOverride {
   name: string;
-  description?: string | null;
   tags?: string[];
 }
 
@@ -363,14 +363,30 @@ export function AiPage(): React.ReactElement {
         message.error('这条标注没有可应用的字段。');
         return;
       }
-      const response = await api.post<{ changed?: string[] }>(
+      const response = await api.post<{ changed?: string[]; warnings?: string[] }>(
         `/ai/annotate/${encodeURIComponent(target.serverId)}`,
         { mode: 'apply', apply: body },
         { headers: { 'If-Match': String(revision) } },
       );
       const changed = Array.isArray(response.changed) ? response.changed.length : 0;
+      const warnings = Array.isArray(response.warnings) ? response.warnings : [];
       if (changed === 0) message.info('标注没有变化。');
       else message.success(`已应用标注：${changed} 项变更。`);
+      if (warnings.length > 0) {
+        modal.info({
+          title: `部分建议已丢弃（${warnings.length}）`,
+          width: 640,
+          content: (
+            <div
+              className="mono"
+              style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}
+            >
+              {warnings.join('\n')}
+            </div>
+          ),
+          okText: '知道了',
+        });
+      }
       setReview(null);
       await Promise.all([loadPending(), loadServers(), reloadCategories(), reloadTags()]);
     } catch (error) {
@@ -493,8 +509,8 @@ export function AiPage(): React.ReactElement {
                 <Space direction="vertical" size={2}>
                   <Switch checked={autoAnnotate} onChange={setAutoAnnotate} />
                   <Typography.Text type="secondary">
-                    启用且 AI 已启用时，新建或从发现页注册的 server 在首次拿到工具列表后会生成
-                    summary/category/tags 建议，进入下方「待处理标注」；不会自动写入，需审阅或点「直接应用」。失败不重试，可手动生成标注预览。
+                    启用且 AI 已启用时，工具索引完成后，标注不完整（summary/category/tags 未齐全）的 server
+                    会自动生成 summary/category/tags 建议，进入下方「待处理标注」；服务重启后首次连接也会补齐。不会自动写入，需审阅或点「直接应用」。失败不重试，可手动生成标注预览。
                   </Typography.Text>
                 </Space>
               </Form.Item>
@@ -588,9 +604,10 @@ export function AiPage(): React.ReactElement {
         />
       </Card>
       <Drawer
+        placement="left"
         open={review !== null}
         onClose={() => setReview(null)}
-        width={720}
+        width={840}
         title={review === null ? '标注建议' : `标注建议 · ${review.serverId}`}
         extra={
           review === null ? null : (
@@ -648,8 +665,12 @@ export function AiPage(): React.ReactElement {
                   ) : review.proposed.categorySuggestion == null ? (
                     <span className="muted">—</span>
                   ) : (
-                    <Tag color="gold" bordered={false}>
-                      建议新分类 {review.proposed.categorySuggestion.key}
+                    <Tag
+                      color="gold"
+                      bordered={false}
+                      title={review.proposed.categorySuggestion.key}
+                    >
+                      建议新分类 {review.proposed.categorySuggestion.zh}
                     </Tag>
                   )}
                 </Space>
@@ -722,7 +743,7 @@ export function AiPage(): React.ReactElement {
                 ))}
                 <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
                   已有标签全部保留，AI 只做新增；建议的新分类/新标签在应用时自动写入字典，不需要的可在行内点“拒绝”移除。
-                  env.*、official、builtin 由管理员维护，不会被 AI 删除或新增。
+                  系统内置标签与分类由管理员维护，AI 不会改动或删除已有项。
                 </Typography.Text>
               </Descriptions.Item>
             </Descriptions>
@@ -744,12 +765,6 @@ export function AiPage(): React.ReactElement {
                   render: (value: string) => <span className="mono">{value}</span>,
                 },
                 {
-                  title: '建议描述',
-                  dataIndex: 'description',
-                  ellipsis: true,
-                  render: (value: string | null | undefined) => value ?? '—',
-                },
-                {
                   title: '建议标签',
                   dataIndex: 'tags',
                   width: 200,
@@ -758,7 +773,11 @@ export function AiPage(): React.ReactElement {
                       ? '—'
                       : value.map((tag) => (
                           <Tag key={tag} bordered={false} title={tag}>
-                            {tagLabel(tagDefinitions, tag)}
+                            {tagLabelWithSuggestions(
+                              tagDefinitions,
+                              review?.proposed.tagSuggestions ?? [],
+                              tag,
+                            )}
                           </Tag>
                         )),
                 },
@@ -795,13 +814,6 @@ const CATEGORY_SUGGESTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 /** Tag dictionary rule (`server/src/ai/validate.ts` TAG_PATTERN). */
 const TAG_SUGGESTION_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 const SUGGESTION_LABEL_MAX = 40;
-/** Deployment/provenance keys the server refuses as new tag suggestions. */
-const RESERVED_SUGGESTION_KEYS = new Set(['official', 'builtin', 'cross-env']);
-
-function isReservedSuggestionKey(key: string): boolean {
-  return key.startsWith('env.') || RESERVED_SUGGESTION_KEYS.has(key);
-}
-
 /** Editing a suggestion key must follow the tool overrides that reference it. */
 export function renameToolTagReferences(
   overrides: readonly ToolOverride[],
@@ -876,8 +888,8 @@ export function suggestionValidationError(
     if (error !== null) return error;
     const key = categorySuggestion.key.trim();
     // A key already in the dictionary is an existing category, not a new reserved name.
-    if (!categoryKeys.has(key) && isReservedSuggestionKey(key)) {
-      return '建议分类 key 不能是 official、builtin、cross-env，也不能以 env. 开头。';
+    if (!categoryKeys.has(key) && isLockedCategoryKey(key)) {
+      return '建议分类 key 不能与系统内置分类重名。';
     }
   }
   for (const [index, suggestion] of (proposed.tagSuggestions ?? []).entries()) {
@@ -885,12 +897,23 @@ export function suggestionValidationError(
     const error = suggestionShapeError(label, suggestion, TAG_SUGGESTION_KEY_PATTERN);
     if (error !== null) return error;
     const key = suggestion.key.trim();
-    if (isReservedSuggestionKey(key)) {
-      return `${label} key 不能是 official、builtin、cross-env，也不能以 env. 开头。`;
+    if (isLockedTagKey(key)) {
+      return `${label} key 不能与系统内置标签重名。`;
     }
     if (categoryKeys.has(key)) return `${label} key 与现有分类 ${key} 重复。`;
   }
   return null;
+}
+
+/** Dictionary label first, then a not-yet-saved tag suggestion, else the raw key. */
+function tagLabelWithSuggestions(
+  dictionary: readonly TagDefinition[],
+  suggestions: readonly DictionarySuggestion[],
+  key: string,
+): string {
+  const direct = dictionary.find((entry) => entry.key === key);
+  if (direct !== undefined) return direct.zh;
+  return suggestions.find((suggestion) => suggestion.key === key)?.zh ?? key;
 }
 
 function trimSuggestion(suggestion: DictionarySuggestion): DictionarySuggestion {
@@ -918,9 +941,6 @@ export function buildApplyBody(proposed: AnnotationProposed): Record<string, unk
   const overrides: Array<Record<string, unknown>> = [];
   for (const override of proposed.toolOverrides) {
     const entry: Record<string, unknown> = { name: override.name };
-    if (override.description !== undefined && override.description !== null) {
-      entry['description'] = override.description;
-    }
     if (override.tags !== undefined && override.tags.length > 0) entry['tags'] = override.tags;
     overrides.push(entry);
   }

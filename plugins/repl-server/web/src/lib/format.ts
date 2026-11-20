@@ -9,22 +9,12 @@
 
 export type Tone = 'ok' | 'error' | 'queue' | 'slow' | 'info' | 'neutral';
 
-const dateTimeFormat = new Intl.DateTimeFormat(undefined, {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-});
-
-const timeFormat = new Intl.DateTimeFormat(undefined, {
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-});
-
 const numberFormat = new Intl.NumberFormat();
+
+/** Zero-padded two-digit field. */
+function two(value: number): string {
+  return String(value).padStart(2, '0');
+}
 
 const BYTE_UNITS = ['KB', 'MB', 'GB', 'TB'] as const;
 
@@ -34,18 +24,15 @@ export function toDate(value: string | number | Date): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** Local date and time, with seconds; `—` for missing/invalid values. */
+/** Local date and time as `YYYY-MM-DD HH:mm:ss`; `—` for missing/invalid values. */
 export function formatTimestamp(value: string | number | Date | null | undefined): string {
   if (value === null || value === undefined) return '—';
   const date = toDate(value);
-  return date === null ? '—' : dateTimeFormat.format(date);
-}
-
-/** Local time of day, with seconds. */
-export function formatTime(value: string | number | Date | null | undefined): string {
-  if (value === null || value === undefined) return '—';
-  const date = toDate(value);
-  return date === null ? '—' : timeFormat.format(date);
+  if (date === null) return '—';
+  return (
+    `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}` +
+    ` ${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`
+  );
 }
 
 /** Relative time for recent events; older values fall back to {@link formatTimestamp}. */

@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /** Admin API for server configuration, connection control and runtime tests.
  *
  * Each `admin/*` module exports a factory that takes its dependencies and returns a
@@ -581,7 +582,7 @@ export interface AdminServersDeps {
    * turns a successful refresh into a failed operation.
    */
   onToolsRefreshed?: (serverId: string) => void | Promise<void>;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +591,7 @@ export interface AdminServersDeps {
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[A-Za-z0-9-]+$/;
+const HEADER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_CONCURRENCY = 8;
 
@@ -764,8 +765,11 @@ function applySecretKeys(
 ): Record<string, SecretValue> {
   const next: Record<string, SecretValue> = { ...base };
   for (const key of keys) {
-    // `envKeys`/`headerKeys` declare that the value comes from the secret store,
-    // so they replace a previously stored literal for the same key.
+    // `envKeys`/`headerKeys` declare that the value comes from the secret store.
+    // An existing `$secret` target is kept: discovery binds keys to `disc.*`
+    // names, and a form edit resubmits every key. Only literals (or new keys)
+    // are rebound to a same-named secret.
+    if (isSecretRef(next[key])) continue;
     next[key] = { $secret: key };
   }
   return next;
@@ -1237,7 +1241,8 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
         await deps.pool.disconnect(id);
       } catch (error) {
         deps.log?.(
-          `disconnect(${id}) after disabling failed: ${error instanceof Error ? error.message : String(error)}`,
+          `disconnect after disabling failed: ${error instanceof Error ? error.message : String(error)}`,
+          { level: 'error', scope: 'admin', server: id },
         );
       }
     }
@@ -1292,7 +1297,8 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
       // The tools themselves are already indexed; a stale AI preview is not a
       // reason to report the refresh as failed.
       deps.log?.(
-        `onToolsRefreshed(${id}) failed: ${error instanceof Error ? error.message : String(error)}`,
+        `onToolsRefreshed failed: ${error instanceof Error ? error.message : String(error)}`,
+        { level: 'warn', scope: 'admin', server: id },
       );
     }
   }

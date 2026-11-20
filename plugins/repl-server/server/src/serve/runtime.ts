@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * Per-execution-session `claude mcp serve` runtime.
  *
@@ -51,7 +52,7 @@ export interface ServeRuntimeOptions {
   /** Serve executable; defaults to `REPL_CLAUDE_BIN`, then `claude`. */
   readonly bin?: string;
   /** Diagnostics sink; MCP traffic never goes here. Defaults to silence. */
-  readonly log?: (line: string) => void;
+  readonly log?: LogFn;
   /** Test seam; defaults to `node:child_process.spawn`. */
   readonly spawn?: ServeSpawn;
   /**
@@ -157,7 +158,7 @@ const defaultSpawn: ServeSpawn = (command, args, options) =>
 class ServeRuntimeImpl implements ServeRuntime {
   readonly dataDir: string;
   private readonly command: string;
-  private readonly log: (line: string) => void;
+  private readonly log: LogFn;
   private readonly spawnProcess: ServeSpawn;
   private readonly bootId: string;
   private readonly readyTimeoutMs: number;
@@ -183,7 +184,7 @@ class ServeRuntimeImpl implements ServeRuntime {
     this.spawnProcess = options.spawn ?? defaultSpawn;
     this.ledger = new ProcessLedger({
       root: this.dataDir,
-      onCorrupt: (issue) => this.log(`[serve] ledger ${issue.path}: ${issue.reason}`),
+      onCorrupt: (issue) => this.log(`ledger corrupt: ${issue.reason}`, { level: 'warn', scope: 'serve', path: issue.path }),
     });
     // Adopt the boot already recorded in state.json so a manager never trips
     // ServeManager's SERVE_BOOT_MISMATCH. A fresh id is only for the first
@@ -290,7 +291,7 @@ class ServeRuntimeImpl implements ServeRuntime {
       const record = await entry.manager.restart('manual');
       return record !== null;
     } catch (error) {
-      this.log(`[serve] ${entry.sessionId} restart failed: ${describe(error)}`);
+      this.log(`restart failed: ${describe(error)}`, { level: 'error', scope: 'serve', exec: entry.sessionId });
       return false;
     }
   }
@@ -372,13 +373,13 @@ class ServeRuntimeImpl implements ServeRuntime {
       // over, so a `{serve:null}` tombstone would only accumulate.
       await entry.manager.dispose(reason);
     } catch (error) {
-      this.log(`[serve] ${entry.sessionId} stop failed: ${describe(error)}`);
+      this.log(`stop failed: ${describe(error)}`, { level: 'error', scope: 'serve', exec: entry.sessionId });
     }
     if (client !== null) {
       try {
         await client.close();
       } catch (error) {
-        this.log(`[serve] ${entry.sessionId} close failed: ${describe(error)}`);
+        this.log(`close failed: ${describe(error)}`, { level: 'error', scope: 'serve', exec: entry.sessionId });
       }
     }
   }
@@ -445,7 +446,7 @@ class ServeRuntimeImpl implements ServeRuntime {
       try {
         this.ledger.removeServe(spec.sessionId);
       } catch (removeError) {
-        this.log(`[serve] ${spec.sessionId} ledger cleanup failed: ${describe(removeError)}`);
+        this.log(`ledger cleanup failed: ${describe(removeError)}`, { level: 'error', scope: 'serve', exec: spec.sessionId });
       }
       throw error;
     }
@@ -482,22 +483,26 @@ class ServeRuntimeImpl implements ServeRuntime {
   private onManagerEvent(entry: RuntimeEntry, event: ServeManagerEvent): void {
     switch (event.type) {
       case 'started':
-        this.log(
-          `[serve] started ${entry.sessionId} workspace=${entry.workspace} pid=${event.record.pid}`
-            + ` keeper=${event.record.keeperPid}${event.restarted ? ` (${event.reason ?? 'restart'})` : ''}`,
-        );
+        this.log('serve started', {
+          scope: 'serve',
+          exec: entry.sessionId,
+          workspace: entry.workspace,
+          servePid: event.record.pid,
+          keeperPid: event.record.keeperPid,
+          ...(event.restarted ? { reason: event.reason ?? 'restart' } : {}),
+        });
         break;
       case 'stopped':
         // Covers release/shutdown and the stop half of a restart: the old
         // client's process is gone, so acquire must wait for a fresh one.
         entry.client = null;
-        this.log(`[serve] stopped ${entry.sessionId} workspace=${entry.workspace} reason=${event.reason}`);
+        this.log('serve stopped', { scope: 'serve', exec: entry.sessionId, workspace: entry.workspace, reason: event.reason });
         break;
       case 'ping_unsupported':
-        this.log(`[serve] ${entry.sessionId} ping unsupported; relying on exit/close`);
+        this.log('ping unsupported; relying on exit/close', { level: 'warn', scope: 'serve', exec: entry.sessionId });
         break;
       case 'error':
-        this.log(`[serve] ${entry.sessionId} error: ${describe(event.error)}`);
+        this.log(`serve error: ${describe(event.error)}`, { level: 'error', scope: 'serve', exec: entry.sessionId });
         break;
     }
   }

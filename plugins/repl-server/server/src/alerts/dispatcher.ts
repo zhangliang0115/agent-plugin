@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /** Serial alert outbox dispatcher: claim, rules, send, retry and cooldown (06 §4.2). @module */
 
 import { systemClock, type Clock } from '../ports.ts';
@@ -57,7 +58,7 @@ export interface AlertDispatcherDeps {
   fetch?: typeof fetch;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   env?: NodeJS.ProcessEnv;
-  log?: (line: string) => void;
+  log?: LogFn;
   timeoutMs?: number;
   retryDelayMs?: number;
   minSendIntervalMs?: number;
@@ -127,7 +128,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
     try {
       deps.audit.write({ ts: nowIso(), ...fields });
     } catch (error) {
-      log(`repl-server: alert audit write failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`alert audit write failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
     }
   }
 
@@ -252,7 +253,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
     } catch {
       // Leave the row in `sending`; the 30 s tick returns it to `pending`.
       // Never log the SecretStore error text: it may carry a file path.
-      log('repl-server: alert webhook read failed');
+      log('alert webhook read failed', { level: 'error', scope: 'alerts' });
       return;
     }
     if (url === undefined || url === '') {
@@ -348,7 +349,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
     try {
       return (await deps.config.read()).config;
     } catch (error) {
-      log(`repl-server: alert config read failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`alert config read failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
       return null;
     }
   }
@@ -397,7 +398,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
         } while (recheck && !closed && clock.now() >= cooldownUntil);
       } catch (error) {
         if (!closed) {
-          log(`repl-server: alert drain failed: ${error instanceof Error ? error.message : String(error)}`);
+          log(`alert drain failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
         }
       } finally {
         draining = false;
@@ -415,7 +416,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
     try {
       deps.store.resetStaleSending(new Date(clock.now() - staleSendingMs).toISOString());
     } catch (error) {
-      log(`repl-server: alert stale reset failed: ${error instanceof Error ? error.message : String(error)}`);
+      log(`alert stale reset failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
     }
     if (clock.now() < cooldownUntil) {
       scheduleWake();
@@ -431,21 +432,21 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
       const now = nowIso();
       try {
         const reset = deps.store.resetAllSending(now);
-        if (reset > 0) log(`repl-server: recovered ${reset} sending alert row(s)`);
+        if (reset > 0) log(`recovered ${reset} sending alert row(s)`, { scope: 'alerts', recovered: reset });
       } catch (error) {
-        log(`repl-server: alert recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+        log(`alert recovery failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
       }
       try {
         const failed = deps.store.failStalePending(
           new Date(clock.now() - stalePendingMs).toISOString(),
           now,
         );
-        if (failed > 0) log(`repl-server: failed ${failed} stale pending alert row(s)`);
+        if (failed > 0) log(`failed ${failed} stale pending alert row(s)`, { level: 'warn', scope: 'alerts', failed });
       } catch (error) {
-        log(`repl-server: stale pending sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+        log(`stale pending sweep failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'error', scope: 'alerts' });
       }
       if (loopbackWebhookAllowed(env)) {
-        log('repl-server: warning: loopback alert webhooks are allowed (test hook active)');
+        log('loopback alert webhooks are allowed (test hook active)', { level: 'warn', scope: 'alerts' });
       }
       timer = setInterval(() => {
         void tick();
@@ -534,7 +535,7 @@ export function createAlertDispatcher(deps: AlertDispatcherDeps): AlertDispatche
       try {
         deps.store.resetAllSending(nowIso());
       } catch {
-        log('repl-server: alert close reset failed');
+        log('alert close reset failed', { level: 'error', scope: 'alerts' });
       }
       currentSending.clear();
     },

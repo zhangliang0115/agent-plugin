@@ -36,8 +36,6 @@ import { isAiForbiddenTag } from './validate.ts';
 
 export interface ToolOverridePatch {
   name: string;
-  /** Absent: leave the override untouched. `null`: clear it. */
-  description?: string | null;
   /** Absent or empty: leave tags untouched. Tags are merged, never removed. */
   tags?: string[];
 }
@@ -241,11 +239,6 @@ function planAnnotationChanges(
 
       const toolPatch: ToolPatch = {};
       let touched = false;
-      if (override.description !== undefined && override.description !== tool.descriptionOverride) {
-        toolPatch.description = override.description;
-        plan.changed.push(`tools.${override.name}.description_override`);
-        touched = true;
-      }
       if (override.tags !== undefined) {
         const merged = mergeTags(tool.tags, override.tags);
         if (!sameStringArray(merged, tool.tags)) {

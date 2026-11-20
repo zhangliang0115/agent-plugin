@@ -106,7 +106,13 @@ function makeHandler(
     }),
     annotateApply: async (serverId, apply, expected) => {
       calls.annotateApply.push({ serverId, apply, expected });
-      return { server: SERVER_VIEW, tools: [], revision: expected + 1, changed: ['server.summary'] };
+      return {
+        server: SERVER_VIEW,
+        tools: [],
+        revision: expected + 1,
+        changed: ['server.summary'],
+        warnings: [],
+      };
     },
     pendingAnnotations: async () => ({
       items: [

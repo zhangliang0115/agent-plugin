@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * `claude -p` runner: fixed argv, whitelisted env, an empty temp cwd, a per-run
  * empty MCP config, a hard timeout that kills the process group, and bounded
@@ -79,7 +80,7 @@ export interface AiRunnerDeps {
   /** Test seam only; production callers never pass this (08 §2.2). */
   extraEnv?: Readonly<Record<string, string>>;
   clock?: Clock;
-  log?: (line: string) => void;
+  log?: LogFn;
   maxOutputBytes?: number;
   stderrLimitBytes?: number;
   /** Test seam; production uses the real `--version`/`--help` probe. */
@@ -381,6 +382,7 @@ export function createAiRunner(deps: AiRunnerDeps = {}): AiRunner {
       // The run itself can still succeed; a broken ledger only affects recovery.
       deps.log?.(
         `ai ledger ${label} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { level: 'warn', scope: 'ai', ledger: label },
       );
     }
   }

@@ -1,3 +1,4 @@
+import type { LogFn } from '../log.ts';
 /**
  * Lazy `claude mcp serve` -> `tools/list` sync for the seeded `__official__`
  * server.
@@ -44,7 +45,7 @@ export interface OfficialToolsSyncOptions {
   resolveBin?: (bin: string) => string | null;
   /** Called after rows were written; assembly refreshes the catalog snapshot. */
   onSynced?: (count: number) => void;
-  log?: (line: string) => void;
+  log?: LogFn;
 }
 
 export function createOfficialToolsSync(options: OfficialToolsSyncOptions): OfficialToolsSync {
@@ -55,7 +56,7 @@ export function createOfficialToolsSync(options: OfficialToolsSyncOptions): Offi
 
   function failed(error: unknown): OfficialToolsSyncResult {
     const message = describe(error);
-    options.log?.(`[official] tools sync failed: ${message}`);
+    options.log?.(`official tools sync failed: ${message}`, { level: 'error', scope: 'serve' });
     return {
       status: 'failed',
       count: 0,
@@ -98,7 +99,7 @@ export function createOfficialToolsSync(options: OfficialToolsSyncOptions): Offi
         options.onSynced?.(count);
       } catch (error) {
         // Rows are written; a stale snapshot is not a sync failure.
-        options.log?.(`[official] catalog refresh failed: ${describe(error)}`);
+        options.log?.(`official catalog refresh failed: ${describe(error)}`, { level: 'error', scope: 'serve' });
       }
       return { status: 'synced', count };
     } catch (error) {
@@ -108,7 +109,7 @@ export function createOfficialToolsSync(options: OfficialToolsSyncOptions): Offi
         try {
           await options.runtime.release(options.workspace);
         } catch (error) {
-          options.log?.(`[official] release failed: ${describe(error)}`);
+          options.log?.(`official release failed: ${describe(error)}`, { level: 'error', scope: 'serve' });
         }
       }
     }

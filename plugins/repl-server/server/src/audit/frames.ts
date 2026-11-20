@@ -10,7 +10,7 @@
  * - `full`: the same plus redacted and bounded `params` / `result` / `error`.
  *
  * Full-mode payload pipeline is redact -> replace base64 blobs -> bound to
- * 256KB (32KB head + `{truncated, bytes, sha256}`). The recorder never blocks
+ * 1MB (64KB head + `{truncated, bytes, sha256}`). The recorder never blocks
  * or throws into the MCP path: writes go through a bounded queue that drops
  * the oldest frame and aggregates `protocol_dropped` per second.
  *
@@ -25,9 +25,9 @@ export const FRAME_MODES = ['off', 'summary', 'full'] as const;
 export type FrameMode = (typeof FRAME_MODES)[number];
 
 /** Maximum serialized size of one full-mode payload. */
-export const FRAME_MAX_BYTES = 256 * 1024;
+export const FRAME_MAX_BYTES = 1024 * 1024;
 /** Bytes of the original payload kept when a frame is truncated. */
-export const FRAME_HEAD_BYTES = 32 * 1024;
+export const FRAME_HEAD_BYTES = 64 * 1024;
 /** Independent frame write queue length (docs/02 §6.6). */
 export const FRAME_QUEUE_LIMIT = 10_000;
 /** Upper bound on remembered unanswered requests. */
@@ -247,7 +247,7 @@ export interface TruncatedFramePayload {
 
 /**
  * Bounds one serialized payload to `FRAME_MAX_BYTES`; over the limit the
- * payload is replaced by a 32KB head plus metadata, never half a JSON value.
+ * payload is replaced by a 64KB head plus metadata, never half a JSON value.
  */
 export function boundFramePayload(
   value: unknown,

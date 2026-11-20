@@ -46,7 +46,7 @@
 | `srv-13-tool-registry` | 5 个工具注册与 alwaysLoad：冻结 schema、annotations、动态 description（含 `report_problem`） | srv-04-discover-methods, srv-18-protocol-doc | 1d |
 | `srv-14-mcp-tasks` | 手写 MCP tasks 层：CreateTaskResult 判定、双 id 空间与 get/cancel/update | srv-04-discover-methods, srv-07-exec-sessions, srv-18-protocol-doc | 2d |
 | `srv-15-tools-call` | tools/call 路由：content-only XML、isError/errorInfo、search/describe/wait_tasks 语义 | srv-07-exec-sessions, srv-09-auth-matrix, srv-13-tool-registry, srv-14-mcp-tasks, srv-18-protocol-doc | 1d |
-| `srv-16-protocol-frames` | 协议帧记录：summary/full、请求响应配对、脱敏、256KB 截断与丢帧统计 | srv-01-http-shell, srv-04-discover-methods | 1d |
+| `srv-16-protocol-frames` | 协议帧记录：summary/full、请求响应配对、脱敏、1MB 截断与丢帧统计 | srv-01-http-shell, srv-04-discover-methods | 1d |
 | `srv-17-audit-endpoints` | 审计端点：游标分页、eval 轨迹、协议帧、统计缓存与 JSONL 导出 | srv-09-auth-matrix, srv-10-admin-events-sse, srv-16-protocol-frames | 2d |
 | `srv-18-protocol-doc` | protocol.md：复制 01 §4.2 / 02 §4.3–4.4 与 03 §2–§4 的 server 契约 | — | 0.5d |
 | `srv-19-wire-e2e` | 装配与端到端：把 transport、会话、鉴权、工具、tasks、SSE、审计接成一个可运行 server | srv-02-streamable-http, srv-03-stdio-bridge, srv-05-transport-sessions, srv-07-exec-sessions, srv-08-capacity-lru, srv-09-auth-matrix, srv-10-admin-events-sse, srv-11-pool-lifecycle, srv-12-pool-gates, srv-13-tool-registry, srv-14-mcp-tasks, srv-15-tools-call, srv-16-protocol-frames, srv-17-audit-endpoints, srv-18-protocol-doc | 1d |
@@ -69,7 +69,7 @@
 | `RS-12-admin-discover` | 本地环境探测端点 POST /discover：配置文件、命令与凭据文件三类探针，只报键名不读值 | RS-07-admin-base | 1d |
 | `RS-13-audit-query` | 审计 JSONL 流式读取与查询：过滤参数、cursor 分页、eval 轨迹与执行会话列表 | RS-07-admin-base | 2d |
 | `RS-14-audit-frames-export` | 协议帧配对端点与审计导出：request/response 配对、summary/full、截断元数据与 10 万行上限 | RS-13-audit-query | 2d |
-| `RS-15-audit-stats` | 审计聚合 worker：调用量/错误率/p50/p95/排队均值、groupBy 与 10s 缓存、200k 行/10s 饱和返回 503 | RS-13-audit-query | 2d |
+| `RS-15-audit-stats` | 审计聚合 worker：工具调用量/错误率/p50/p95/排队均值、groupBy 与 10s 缓存、200k 行/10s 饱和返回 503 | RS-13-audit-query | 2d |
 | `RS-16-sse` | SSE 中枢：/admin/api/events 与 /admin/api/audit/stream、Last-Event-ID 回放、心跳与缺口事件 | RS-07-admin-base, RS-13-audit-query | 2d |
 | `RS-17-web-shell` | React 19 + Ant Design 6 + esbuild 管理端骨架（ADR 0009）：SPA 路由、类型化 API client、主题 token 与 CSRF/鉴权 | RS-07-admin-base | 2d |
 | `RS-18-web-audit` | 审计页：过滤条、概览卡片、趋势图、虚拟列表、调用抽屉、eval 甘特与协议帧并排 | RS-17-web-shell, RS-19-web-resource, RS-13-audit-query, RS-14-audit-frames-export, RS-15-audit-stats, RS-16-sse | 2d |

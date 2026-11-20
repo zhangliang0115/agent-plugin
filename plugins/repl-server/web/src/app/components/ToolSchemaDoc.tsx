@@ -1,8 +1,8 @@
 /** Read-only tool documentation: metadata, flattened input schema and the raw JSON. */
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd';
 
-import { formatJson } from '../../lib/format.ts';
 import { schemaDoc, type SchemaField } from '../../lib/schema-doc.ts';
+import { JsonView } from './JsonView.tsx';
 
 export interface ToolSchemaDocTool {
   serverId: string;
@@ -158,11 +158,12 @@ export function ToolSchemaDoc({ tool }: { tool: ToolSchemaDocTool }): React.Reac
           {
             key: 'raw',
             label: '原始 input schema',
-            children: (
-              <pre className="code-block" style={{ maxHeight: 320, overflow: 'auto' }}>
-                {tool.schema === undefined ? '（该工具没有返回 schema）' : formatJson(tool.schema, 2)}
-              </pre>
-            ),
+            children:
+              tool.schema === undefined ? (
+                <Typography.Text type="secondary">（该工具没有返回 schema）</Typography.Text>
+              ) : (
+                <JsonView value={tool.schema} maxHeight={320} />
+              ),
           },
         ]}
       />

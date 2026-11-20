@@ -20,6 +20,33 @@ export function isAsyncResponse(response: unknown): boolean {
   return text !== null && /<repl-output[^>]*\basync="true"/u.test(text);
 }
 
+export interface AuditEventLike {
+  event?: unknown;
+  requestId?: unknown;
+  runId?: unknown;
+}
+
+/**
+ * `runId`s of the evals started by one JSON-RPC request. `eval_start` is emitted
+ * while handling `tools/call` and carries that request's id; every tool event of
+ * the eval reuses the same `runId`, so this is an exact link, not a time window.
+ */
+export function requestRunIds(
+  events: readonly AuditEventLike[],
+  requestId: string | number | null,
+): string[] {
+  if (requestId === null) return [];
+  const wanted = String(requestId);
+  const runIds: string[] = [];
+  for (const event of events) {
+    if (event.event !== 'eval_start') continue;
+    if (event.requestId === undefined || String(event.requestId) !== wanted) continue;
+    const runId = event.runId;
+    if (typeof runId === 'string' && runId !== '' && !runIds.includes(runId)) runIds.push(runId);
+  }
+  return runIds;
+}
+
 /** Pads a request/response timestamp pair so the event query covers both boundaries. */
 export function eventWindow(
   requestTs: unknown,

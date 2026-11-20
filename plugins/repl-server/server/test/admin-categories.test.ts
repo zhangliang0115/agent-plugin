@@ -6,6 +6,7 @@ import { AdminApiError } from '../src/admin/servers.ts';
 import {
   appendCategoryDictionary,
   createAdminCategoriesHandler,
+  isLockedCategoryKey,
   parseCategoryDictionary,
   readCategoryDictionary,
 } from '../src/admin/categories.ts';
@@ -141,25 +142,23 @@ test('appendCategoryDictionary adds only unknown keys and keeps existing labels'
   ]);
 });
 
-test('PUT /categories and GET agree when the submitted dictionary is the old default', async () => {
+test('PUT /categories rejects the old 15-entry default while the built-in dictionary is in effect', async () => {
   const store = memoryStore({}, 1);
   const handler = createAdminCategoriesHandler({ settings: store });
+  // The old default has no observability/devtools/ui-automation/cloud/other, so a
+  // full replacement with it would drop built-in categories.
   const put = await handler({
     method: 'PUT',
     path: '/categories',
     headers: { 'if-match': '"1"' },
     body: { categories: LEGACY_CATEGORY_DEFAULT },
   });
-  assert.equal(put?.status, 200);
-  assert.equal((put?.body as { categories: unknown[] }).categories.length, 10);
-
-  const get = await handler({ method: 'GET', path: '/categories' });
-  assert.deepEqual(get?.body, put?.body);
-  assert.deepEqual(
-    (await store.read()).settings['categoryDictionary'],
-    LEGACY_CATEGORY_DEFAULT,
-    'the submission is stored verbatim and upgraded on read',
+  assert.equal(put?.status, 422);
+  assert.equal(
+    (put?.body as { error?: { code?: string } } | undefined)?.error?.code,
+    'INVALID_CATEGORIES',
   );
+  assert.deepEqual((await store.read()).settings['categoryDictionary'], undefined);
 });
 
 test('appendCategoryDictionary refuses to exceed the 100-entry limit', () => {
@@ -184,6 +183,68 @@ test('an explicitly saved empty dictionary stays empty', async () => {
   const handler = createAdminCategoriesHandler({ settings: memoryStore({ categoryDictionary: [] }, 2) });
   const response = await handler({ method: 'GET', path: '/categories' });
   assert.deepEqual(response?.body, { categories: [], revision: 2 });
+});
+
+test('every built-in category key is locked, custom keys are not', () => {
+  for (const key of [
+    'database',
+    'observability',
+    'devtools',
+    'ui-automation',
+    'filesystem',
+    'search',
+    'messaging',
+    'cloud',
+    'ai',
+    'other',
+  ]) {
+    assert.equal(isLockedCategoryKey(key), true, key);
+  }
+  assert.equal(isLockedCategoryKey('sql'), false);
+});
+
+test('PUT /categories refuses to drop or relabel built-in categories', async () => {
+  const handler = createAdminCategoriesHandler({ settings: memoryStore({}, 1) });
+  const current = (await handler({ method: 'GET', path: '/categories' }))?.body as {
+    categories: Array<{ key: string; zh: string; en: string }>;
+  };
+
+  const dropped = await handler({
+    method: 'PUT',
+    path: '/categories',
+    headers: { 'if-match': '"1"' },
+    body: { categories: current.categories.filter((entry) => entry.key !== 'other') },
+  });
+  assert.equal(dropped?.status, 422);
+  assert.match(
+    String((dropped?.body as { error?: { message?: string } }).error?.message),
+    /system-managed/,
+  );
+
+  const relabelled = await handler({
+    method: 'PUT',
+    path: '/categories',
+    headers: { 'if-match': '"1"' },
+    body: {
+      categories: current.categories.map((entry) =>
+        entry.key === 'database' ? { ...entry, en: 'DB' } : entry,
+      ),
+    },
+  });
+  assert.equal(relabelled?.status, 422);
+
+  const kept = await handler({
+    method: 'PUT',
+    path: '/categories',
+    headers: { 'if-match': '"1"' },
+    body: {
+      categories: [
+        ...current.categories,
+        { key: 'sql', zh: 'SQL', en: 'SQL' },
+      ],
+    },
+  });
+  assert.equal(kept?.status, 200);
 });
 
 test('PUT /categories replaces the dictionary and preserves other settings', async () => {
