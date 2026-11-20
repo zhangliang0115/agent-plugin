@@ -154,6 +154,10 @@ export function AuditPage(): React.ReactElement {
   const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
   const [framesLoading, setFramesLoading] = useState(false);
   const [framesError, setFramesError] = useState<string | null>(null);
+  const [allFramesOpen, setAllFramesOpen] = useState(false);
+  const [allFrames, setAllFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
+  const [allFramesLoading, setAllFramesLoading] = useState(false);
+  const [allFramesError, setAllFramesError] = useState<string | null>(null);
 
   const aliveRef = useRef(true);
   const appliedRef = useRef<AuditFilters>(applied);
@@ -166,6 +170,7 @@ export function AuditPage(): React.ReactElement {
   const loadTokenRef = useRef(0);
   const statsTokenRef = useRef(0);
   const frameTokenRef = useRef(0);
+  const allFrameTokenRef = useRef(0);
   const streamOpenRef = useRef(false);
   const loadingRef = useRef(true);
   const pollTicksRef = useRef(0);
@@ -556,6 +561,7 @@ export function AuditPage(): React.ReactElement {
     filters: AuditFilters,
     mcp: string | null,
     id: string | number | undefined,
+    limit: number = FRAME_LIMIT,
   ): Promise<FramesResponse<ProtocolFramePair>> {
     return api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
       query: {
@@ -564,9 +570,37 @@ export function AuditPage(): React.ReactElement {
         to: toIso(filters.to),
         mcp: mcp ?? undefined,
         id,
-        limit: FRAME_LIMIT,
+        binding: filters.binding === '' ? undefined : filters.binding,
+        clientName: filters.clientName === '' ? undefined : filters.clientName,
+        clientVersion: filters.clientVersion === '' ? undefined : filters.clientVersion,
+        limit,
       },
     });
+  }
+
+  /** Protocol-only activity (connect, discover, tools/list) has no call row; open it directly. */
+  async function openAllFrames(): Promise<void> {
+    setAllFramesOpen(true);
+    setAllFrames(null);
+    setAllFramesError(null);
+    setAllFramesLoading(true);
+    const ticket = ++allFrameTokenRef.current;
+    try {
+      const response = await requestFrames(appliedRef.current, null, undefined, FRAME_LIMIT * 10);
+      if (!aliveRef.current || ticket !== allFrameTokenRef.current) return;
+      // The endpoint returns oldest-first; the drawer shows the most recent page.
+      const recent = response.frames.slice(-FRAME_LIMIT);
+      setAllFrames({
+        ...response,
+        frames: recent,
+        hasMore: response.hasMore || recent.length < response.frames.length,
+      });
+    } catch (failure) {
+      if (!aliveRef.current || ticket !== allFrameTokenRef.current) return;
+      setAllFramesError(failureText(failure));
+    } finally {
+      if (aliveRef.current && ticket === allFrameTokenRef.current) setAllFramesLoading(false);
+    }
   }
 
   const columns = useMemo<TableProps<AuditEvent>['columns']>(
@@ -667,7 +701,6 @@ export function AuditPage(): React.ReactElement {
   );
 
   const rows = useMemo(() => [...events].reverse(), [events]);
-  const framesNotice = framesTruncatedNotice(frames);
   const badge = liveBadge(applied, streamState);
   const summary = hasMore
     ? `已加载 ${formatNumber(events.length)} 条（上限 ${formatNumber(MAX_EVENTS)}，还有更多）`
@@ -680,6 +713,7 @@ export function AuditPage(): React.ReactElement {
         description="调用列表、协议帧与调用详情；筛选在服务端完成，实时视图最多保留 5000 条。"
         actions={
           <Space>
+            <Button onClick={() => void openAllFrames()}>协议帧</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshEvents}>
               刷新
             </Button>
@@ -1041,48 +1075,31 @@ export function AuditPage(): React.ReactElement {
                 description={framesError}
               />
             )}
-            {frames === null ? null : (
-              <Card
-                size="small"
-                title="协议帧"
-                extra={
-                  <Space>
-                    <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
-                    {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
-                      <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
-                    ) : null}
-                  </Space>
-                }
-              >
-                {framesNotice === null ? null : (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    style={{ marginBottom: 10 }}
-                    message={framesNotice}
-                  />
-                )}
-                {frames.frames.length === 0 ? (
-                  <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
-                ) : (
-                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    {frames.frames.slice(0, FRAME_LIMIT).map((frame, index) => (
-                      <FramePairCard
-                        key={`${frame.mcp}-${String(frame.id ?? '')}-${index}`}
-                        frame={frame}
-                      />
-                    ))}
-                  </Space>
-                )}
-                {frames.hasMore === true ? (
-                  <Text type="secondary" style={{ fontSize: 11.5 }}>
-                    还有更多帧；缩小时间范围或指定 mcp / id。
-                  </Text>
-                ) : null}
-              </Card>
-            )}
+            {frames === null ? null : <FramesCard frames={frames} />}
           </Space>
         )}
+      </Drawer>
+
+      <Drawer
+        title="协议帧（当前筛选）"
+        width={760}
+        open={allFramesOpen}
+        onClose={() => {
+          allFrameTokenRef.current += 1;
+          setAllFramesOpen(false);
+        }}
+      >
+        {allFramesLoading ? (
+          <Spin size="small" />
+        ) : allFramesError === null ? null : (
+          <Alert
+            type="error"
+            showIcon
+            message="协议帧读取失败"
+            description={allFramesError}
+          />
+        )}
+        {allFrames === null ? null : <FramesCard frames={allFrames} />}
       </Drawer>
     </div>
   );
@@ -1148,6 +1165,49 @@ function AuditStatusCell({ event }: { event: AuditEvent }): React.ReactElement {
       </Tag>
       {eventCancelled(event) ? <span className="muted">已取消</span> : null}
     </Space>
+  );
+}
+
+function FramesCard({
+  frames,
+}: {
+  frames: FramesResponse<ProtocolFramePair>;
+}): React.ReactElement {
+  const notice = framesTruncatedNotice(frames);
+  return (
+    <Card
+      size="small"
+      title="协议帧"
+      extra={
+        <Space>
+          <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
+          {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
+            <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
+          ) : null}
+        </Space>
+      }
+    >
+      {notice === null ? null : (
+        <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={notice} />
+      )}
+      {frames.frames.length === 0 ? (
+        <Empty description="没有匹配的协议帧。协议帧记录模式可能为 off，或这对请求/响应不在当前筛选的时间范围内。" />
+      ) : (
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          {frames.frames.slice(0, FRAME_LIMIT).map((frame, index) => (
+            <FramePairCard
+              key={`${frame.mcp}-${String(frame.id ?? '')}-${index}`}
+              frame={frame}
+            />
+          ))}
+        </Space>
+      )}
+      {frames.hasMore === true ? (
+        <Text type="secondary" style={{ fontSize: 11.5 }}>
+          还有更多帧；缩小时间范围或指定 mcp / id。
+        </Text>
+      ) : null}
+    </Card>
   );
 }
 
