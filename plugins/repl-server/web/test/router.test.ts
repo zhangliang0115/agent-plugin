@@ -8,6 +8,7 @@ test('parseRoute normalizes known paths and falls back to overview', () => {
   assert.deepEqual(parseRoute('#/audit'), { path: '/audit', tab: 'servers', server: null });
   assert.deepEqual(parseRoute('#/reports/'), { path: '/reports', tab: 'servers', server: null });
   assert.deepEqual(parseRoute('#/reports?status=open'), { path: '/reports', tab: 'servers', server: null });
+  assert.deepEqual(parseRoute('#/requests'), { path: '/requests', tab: 'servers', server: null });
   assert.deepEqual(parseRoute('#/nope'), { path: '/overview', tab: 'servers', server: null });
   assert.deepEqual(parseRoute(''), { path: '/overview', tab: 'servers', server: null });
 });
@@ -39,6 +40,7 @@ test('parseRoute reads the tools server filter', () => {
 
 test('routeHash emits a clean /manage hash for the default tab', () => {
   assert.equal(routeHash('/overview'), '#/overview');
+  assert.equal(routeHash('/requests'), '#/requests');
   assert.equal(routeHash('/manage'), '#/manage');
   assert.equal(routeHash('/manage', 'servers'), '#/manage');
   assert.equal(routeHash('/manage', 'alerts'), '#/manage?tab=alerts');

@@ -29,9 +29,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
+import { FrameColumn } from '../components/FramePayload.tsx';
 import { ApiError, framesTruncatedNotice, type EventStream, type FramesResponse, type StreamState } from '../../lib/api.ts';
 import {
-  formatBytes,
   formatDuration,
   formatId,
   formatJson,
@@ -154,10 +154,6 @@ export function AuditPage(): React.ReactElement {
   const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
   const [framesLoading, setFramesLoading] = useState(false);
   const [framesError, setFramesError] = useState<string | null>(null);
-  const [allFramesOpen, setAllFramesOpen] = useState(false);
-  const [allFrames, setAllFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
-  const [allFramesLoading, setAllFramesLoading] = useState(false);
-  const [allFramesError, setAllFramesError] = useState<string | null>(null);
 
   const aliveRef = useRef(true);
   const appliedRef = useRef<AuditFilters>(applied);
@@ -170,7 +166,6 @@ export function AuditPage(): React.ReactElement {
   const loadTokenRef = useRef(0);
   const statsTokenRef = useRef(0);
   const frameTokenRef = useRef(0);
-  const allFrameTokenRef = useRef(0);
   const streamOpenRef = useRef(false);
   const loadingRef = useRef(true);
   const pollTicksRef = useRef(0);
@@ -561,7 +556,6 @@ export function AuditPage(): React.ReactElement {
     filters: AuditFilters,
     mcp: string | null,
     id: string | number | undefined,
-    limit: number = FRAME_LIMIT,
   ): Promise<FramesResponse<ProtocolFramePair>> {
     return api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
       query: {
@@ -573,34 +567,9 @@ export function AuditPage(): React.ReactElement {
         binding: filters.binding === '' ? undefined : filters.binding,
         clientName: filters.clientName === '' ? undefined : filters.clientName,
         clientVersion: filters.clientVersion === '' ? undefined : filters.clientVersion,
-        limit,
+        limit: FRAME_LIMIT,
       },
     });
-  }
-
-  /** Protocol-only activity (connect, discover, tools/list) has no call row; open it directly. */
-  async function openAllFrames(): Promise<void> {
-    setAllFramesOpen(true);
-    setAllFrames(null);
-    setAllFramesError(null);
-    setAllFramesLoading(true);
-    const ticket = ++allFrameTokenRef.current;
-    try {
-      const response = await requestFrames(appliedRef.current, null, undefined, FRAME_LIMIT * 10);
-      if (!aliveRef.current || ticket !== allFrameTokenRef.current) return;
-      // The endpoint returns oldest-first; the drawer lists the most recent requests first.
-      const recent = response.frames.slice(-FRAME_LIMIT).reverse();
-      setAllFrames({
-        ...response,
-        frames: recent,
-        hasMore: response.hasMore || recent.length < response.frames.length,
-      });
-    } catch (failure) {
-      if (!aliveRef.current || ticket !== allFrameTokenRef.current) return;
-      setAllFramesError(failureText(failure));
-    } finally {
-      if (aliveRef.current && ticket === allFrameTokenRef.current) setAllFramesLoading(false);
-    }
   }
 
   const columns = useMemo<TableProps<AuditEvent>['columns']>(
@@ -713,7 +682,6 @@ export function AuditPage(): React.ReactElement {
         description="调用列表、协议帧与调用详情；筛选在服务端完成，实时视图最多保留 5000 条。"
         actions={
           <Space>
-            <Button onClick={() => void openAllFrames()}>请求记录</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshEvents}>
               刷新
             </Button>
@@ -1079,28 +1047,6 @@ export function AuditPage(): React.ReactElement {
           </Space>
         )}
       </Drawer>
-
-      <Drawer
-        title="请求记录（当前筛选，一行一次请求）"
-        width={960}
-        open={allFramesOpen}
-        onClose={() => {
-          allFrameTokenRef.current += 1;
-          setAllFramesOpen(false);
-        }}
-      >
-        {allFramesLoading ? (
-          <Spin size="small" />
-        ) : allFramesError === null ? null : (
-          <Alert
-            type="error"
-            showIcon
-            message="请求记录读取失败"
-            description={allFramesError}
-          />
-        )}
-        {allFrames === null ? null : <RequestFramesTable frames={allFrames} />}
-      </Drawer>
     </div>
   );
 }
@@ -1165,138 +1111,6 @@ function AuditStatusCell({ event }: { event: AuditEvent }): React.ReactElement {
       </Tag>
       {eventCancelled(event) ? <span className="muted">已取消</span> : null}
     </Space>
-  );
-}
-
-function RequestFramesTable({
-  frames,
-}: {
-  frames: FramesResponse<ProtocolFramePair>;
-}): React.ReactElement {
-  const notice = framesTruncatedNotice(frames);
-  const columns: TableProps<ProtocolFramePair>['columns'] = [
-    {
-      title: '时间',
-      key: 'time',
-      width: 92,
-      render: (_value, pair) => {
-        const event = pair.request ?? pair.response;
-        const time = event === null ? null : parseEventTime(event);
-        return (
-          <span className="mono" title={formatTimestamp(event?.ts ?? null)}>
-            {time === null ? '—' : formatTime(time)}
-          </span>
-        );
-      },
-    },
-    {
-      title: '客户端 / binding',
-      key: 'client',
-      width: 180,
-      ellipsis: true,
-      render: (_value, pair) => eventClientLabel(pair.request ?? pair.response ?? {}),
-    },
-    {
-      title: '方法',
-      key: 'method',
-      ellipsis: true,
-      render: (_value, pair) => (
-        <span className="mono">{pair.method ?? eventText(pair.request ?? undefined, 'method') ?? '—'}</span>
-      ),
-    },
-    {
-      title: 'id',
-      key: 'id',
-      width: 90,
-      ellipsis: true,
-      render: (_value, pair) => <span className="mono">{pair.id ?? '—'}</span>,
-    },
-    {
-      title: '状态',
-      key: 'status',
-      width: 90,
-      render: (_value, pair) =>
-        pair.response === null ? (
-          <Tag color="gold" bordered={false}>
-            无响应
-          </Tag>
-        ) : (
-          <Tag color={pair.ok === false ? 'red' : 'green'} bordered={false}>
-            {pair.ok === false ? 'error' : 'ok'}
-          </Tag>
-        ),
-    },
-    {
-      title: '耗时',
-      key: 'duration',
-      width: 86,
-      align: 'right',
-      render: (_value, pair) => <span className="mono">{formatDuration(pair.durMs ?? null)}</span>,
-    },
-    {
-      title: '请求 / 响应字节',
-      key: 'bytes',
-      width: 150,
-      align: 'right',
-      render: (_value, pair) => (
-        <span className="mono">
-          {formatBytes(asNumber(pair.request?.['bytes']))} /{' '}
-          {formatBytes(asNumber(pair.response?.['bytes']))}
-        </span>
-      ),
-    },
-  ];
-  return (
-    <Card
-      size="small"
-      title="请求记录"
-      extra={
-        <Space>
-          <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
-          {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
-            <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
-          ) : null}
-        </Space>
-      }
-    >
-      {notice === null ? null : (
-        <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={notice} />
-      )}
-      <Text type="secondary" style={{ fontSize: 11.5 }}>
-        一行一次请求；展开查看请求与响应报文（已脱敏，单帧最多 256KB）。
-      </Text>
-      <Table<ProtocolFramePair>
-        size="small"
-        style={{ marginTop: 8 }}
-        rowKey={(pair, index) => `${pair.mcp}-${String(pair.id ?? '')}-${index ?? 0}`}
-        dataSource={frames.frames}
-        columns={columns}
-        pagination={false}
-        scroll={{ x: 900 }}
-        expandable={{
-          expandedRowRender: (pair) => (
-            <Row gutter={12}>
-              <Col span={12}>
-                <FrameColumn label="请求报文" event={pair.request} />
-              </Col>
-              <Col span={12}>
-                <FrameColumn label="响应报文" event={pair.response} />
-              </Col>
-            </Row>
-          ),
-        }}
-        locale={{
-          emptyText: (
-            <Empty description="没有匹配的请求。放宽时间范围，或确认服务端已在 full 帧模式重启。" />
-          ),
-        }}
-      />
-      {frames.hasMore === true ? (
-        <Text type="secondary" style={{ fontSize: 11.5 }}>
-          还有更多请求；缩小时间范围或指定客户端 / binding。
-        </Text>
-      ) : null}
-    </Card>
   );
 }
 
@@ -1377,47 +1191,6 @@ function FramePairCard({ frame }: { frame: ProtocolFramePair }): React.ReactElem
         </Col>
       </Row>
     </Card>
-  );
-}
-
-function FrameColumn({
-  label,
-  event,
-}: {
-  label: string;
-  event: AuditEvent | null;
-}): React.ReactElement {
-  if (event === null) {
-    return (
-      <div>
-        <Text type="secondary" style={{ fontSize: 11.5, fontWeight: 550 }}>
-          {label}
-        </Text>
-        <div className="muted" style={{ fontSize: 12 }}>
-          （缺少这一侧）
-        </div>
-      </div>
-    );
-  }
-  const eventTruncation = frameTruncationLabel(event);
-  const payload = framePayload(event);
-  const payloadTruncation = payloadTruncationLabel(payload);
-  const head = truncatedHead(payload);
-  return (
-    <div style={{ minWidth: 0 }}>
-      <Text type="secondary" style={{ fontSize: 11.5, fontWeight: 550 }}>
-        {label}
-      </Text>
-      {eventTruncation === null && payloadTruncation === null ? null : (
-        <Space size={4} wrap>
-          {eventTruncation === null ? null : <Tag color="gold">{eventTruncation}</Tag>}
-          {payloadTruncation === null ? null : <Tag color="gold">{payloadTruncation}</Tag>}
-        </Space>
-      )}
-      <pre className="code-block" style={{ maxHeight: 240, overflow: 'auto' }}>
-        {head === null ? formatJson(payload, 2) : `${head}\n…（已截断）`}
-      </pre>
-    </div>
   );
 }
 
@@ -1804,42 +1577,4 @@ function exportStamp(): string {
 
 function failureText(error: unknown): string {
   return error instanceof ApiError ? `${error.message}（${error.code}）` : String(error);
-}
-
-// ---------------------------------------------------------------------------
-// Protocol frame truncation (`boundFramePayload` on the server)
-// ---------------------------------------------------------------------------
-
-function framePayload(event: AuditEvent): unknown {
-  if (event['params'] !== undefined) return event['params'];
-  if (event['result'] !== undefined) return event['result'];
-  if (event['error'] !== undefined) return event['error'];
-  return event;
-}
-
-function frameTruncationLabel(event: AuditEvent): string | null {
-  const truncated = event['truncated'] === true || event['payloadTruncated'] === true;
-  if (!truncated) return null;
-  const bytes =
-    asNumber(event['bytes']) ??
-    asNumber(event['truncatedBytes']) ??
-    asNumber(event['originalBytes']);
-  const sha = eventText(event, 'sha256');
-  return `已截断${bytes === null ? '' : ` ${formatBytes(bytes)}`}${
-    sha === null ? '' : ` · sha256 ${sha.slice(0, 12)}…`
-  }`;
-}
-
-function payloadTruncationLabel(payload: unknown): string | null {
-  if (!isRecord(payload) || payload['truncated'] !== true) return null;
-  const bytes = asNumber(payload['bytes']);
-  const sha = typeof payload['sha256'] === 'string' ? payload['sha256'] : null;
-  return `已截断${bytes === null ? '' : ` ${formatBytes(bytes)}`}${
-    sha === null ? '' : ` · sha256 ${sha.slice(0, 12)}…`
-  }`;
-}
-
-function truncatedHead(payload: unknown): string | null {
-  if (!isRecord(payload) || payload['truncated'] !== true) return null;
-  return typeof payload['head'] === 'string' ? payload['head'] : '';
 }

@@ -10,13 +10,14 @@ export interface PaletteItem {
   kind: '页面' | 'Server';
   label: string;
   hint: string;
-  path: '/overview' | '/audit' | '/reports' | '/manage';
+  path: '/overview' | '/audit' | '/reports' | '/requests' | '/manage';
   tab?: ManageTab;
 }
 
 export const PALETTE_PAGES: readonly PaletteItem[] = [
   { kind: '页面', label: '概览', hint: '监控', path: '/overview' },
   { kind: '页面', label: '审计', hint: '监控', path: '/audit' },
+  { kind: '页面', label: '请求记录', hint: '监控', path: '/requests' },
   { kind: '页面', label: '报告', hint: '监控', path: '/reports' },
   { kind: '页面', label: '服务端', hint: '系统管理', path: '/manage', tab: 'servers' },
   { kind: '页面', label: '工具', hint: '系统管理', path: '/manage', tab: 'tools' },

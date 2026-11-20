@@ -7,6 +7,7 @@ import {
   AppstoreOutlined,
   CompassOutlined,
   DashboardOutlined,
+  FileSearchOutlined,
   ImportOutlined,
   KeyOutlined,
   MoonOutlined,
@@ -28,6 +29,7 @@ import { CommandPalette } from './components/CommandPalette.tsx';
 import type { PaletteItem } from '../lib/command-palette.ts';
 import { OverviewPage } from './pages/OverviewPage.tsx';
 import { AuditPage } from './pages/AuditPage.tsx';
+import { RequestsPage } from './pages/RequestsPage.tsx';
 import { ReportsPage } from './pages/ReportsPage.tsx';
 import { ServersPage } from './pages/ServersPage.tsx';
 import { ToolsPage } from './pages/ToolsPage.tsx';
@@ -116,6 +118,7 @@ export function App(): React.ReactElement {
         children: [
           { key: '/overview', icon: <DashboardOutlined />, label: '概览' },
           { key: '/audit', icon: <AlertOutlined />, label: '审计' },
+          { key: '/requests', icon: <FileSearchOutlined />, label: '请求记录' },
           { key: '/reports', icon: <AppstoreOutlined />, label: '报告' },
         ],
       },
@@ -179,7 +182,9 @@ export function App(): React.ReactElement {
                       ? '监控 / 概览'
                       : route.path === '/audit'
                         ? '监控 / 审计'
-                        : '监控 / 报告'}
+                        : route.path === '/requests'
+                          ? '监控 / 请求记录'
+                          : '监控 / 报告'}
                 </b>
               </div>
               <button
@@ -242,6 +247,7 @@ export function App(): React.ReactElement {
 function Page({ route }: { route: RouteState }): React.ReactElement {
   if (route.path === '/reports') return <ReportsPage />;
   if (route.path === '/audit') return <AuditPage />;
+  if (route.path === '/requests') return <RequestsPage />;
   if (route.path === '/overview') return <OverviewPage />;
   switch (route.tab) {
     case 'servers':

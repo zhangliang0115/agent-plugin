@@ -14,7 +14,7 @@ export type ManageTab =
   | 'discover';
 
 export interface RouteState {
-  path: '/overview' | '/audit' | '/reports' | '/manage';
+  path: '/overview' | '/audit' | '/reports' | '/requests' | '/manage';
   tab: ManageTab;
   /** Server filter for the tools tab, from `?server=…`. */
   server: string | null;
@@ -43,7 +43,9 @@ export function parseRoute(hash: string): RouteState {
   const resolved = (valid ? tab : 'servers') as ManageTab;
   const server = params.get('server');
   return {
-    path: (path === '/audit' || path === '/reports' || path === '/manage' ? path : '/overview') as RouteState['path'],
+    path: (path === '/audit' || path === '/reports' || path === '/requests' || path === '/manage'
+      ? path
+      : '/overview') as RouteState['path'],
     tab: resolved,
     server: resolved === 'tools' && server !== null && server !== '' ? server : null,
   };
