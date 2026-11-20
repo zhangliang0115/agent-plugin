@@ -588,8 +588,8 @@ export function AuditPage(): React.ReactElement {
     try {
       const response = await requestFrames(appliedRef.current, null, undefined, FRAME_LIMIT * 10);
       if (!aliveRef.current || ticket !== allFrameTokenRef.current) return;
-      // The endpoint returns oldest-first; the drawer shows the most recent page.
-      const recent = response.frames.slice(-FRAME_LIMIT);
+      // The endpoint returns oldest-first; the drawer lists the most recent requests first.
+      const recent = response.frames.slice(-FRAME_LIMIT).reverse();
       setAllFrames({
         ...response,
         frames: recent,
@@ -713,7 +713,7 @@ export function AuditPage(): React.ReactElement {
         description="调用列表、协议帧与调用详情；筛选在服务端完成，实时视图最多保留 5000 条。"
         actions={
           <Space>
-            <Button onClick={() => void openAllFrames()}>协议帧</Button>
+            <Button onClick={() => void openAllFrames()}>请求记录</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshEvents}>
               刷新
             </Button>
@@ -1081,8 +1081,8 @@ export function AuditPage(): React.ReactElement {
       </Drawer>
 
       <Drawer
-        title="协议帧（当前筛选）"
-        width={760}
+        title="请求记录（当前筛选，一行一次请求）"
+        width={960}
         open={allFramesOpen}
         onClose={() => {
           allFrameTokenRef.current += 1;
@@ -1095,11 +1095,11 @@ export function AuditPage(): React.ReactElement {
           <Alert
             type="error"
             showIcon
-            message="协议帧读取失败"
+            message="请求记录读取失败"
             description={allFramesError}
           />
         )}
-        {allFrames === null ? null : <FramesCard frames={allFrames} />}
+        {allFrames === null ? null : <RequestFramesTable frames={allFrames} />}
       </Drawer>
     </div>
   );
@@ -1165,6 +1165,138 @@ function AuditStatusCell({ event }: { event: AuditEvent }): React.ReactElement {
       </Tag>
       {eventCancelled(event) ? <span className="muted">已取消</span> : null}
     </Space>
+  );
+}
+
+function RequestFramesTable({
+  frames,
+}: {
+  frames: FramesResponse<ProtocolFramePair>;
+}): React.ReactElement {
+  const notice = framesTruncatedNotice(frames);
+  const columns: TableProps<ProtocolFramePair>['columns'] = [
+    {
+      title: '时间',
+      key: 'time',
+      width: 92,
+      render: (_value, pair) => {
+        const event = pair.request ?? pair.response;
+        const time = event === null ? null : parseEventTime(event);
+        return (
+          <span className="mono" title={formatTimestamp(event?.ts ?? null)}>
+            {time === null ? '—' : formatTime(time)}
+          </span>
+        );
+      },
+    },
+    {
+      title: '客户端 / binding',
+      key: 'client',
+      width: 180,
+      ellipsis: true,
+      render: (_value, pair) => eventClientLabel(pair.request ?? pair.response ?? {}),
+    },
+    {
+      title: '方法',
+      key: 'method',
+      ellipsis: true,
+      render: (_value, pair) => (
+        <span className="mono">{pair.method ?? eventText(pair.request ?? undefined, 'method') ?? '—'}</span>
+      ),
+    },
+    {
+      title: 'id',
+      key: 'id',
+      width: 90,
+      ellipsis: true,
+      render: (_value, pair) => <span className="mono">{pair.id ?? '—'}</span>,
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 90,
+      render: (_value, pair) =>
+        pair.response === null ? (
+          <Tag color="gold" bordered={false}>
+            无响应
+          </Tag>
+        ) : (
+          <Tag color={pair.ok === false ? 'red' : 'green'} bordered={false}>
+            {pair.ok === false ? 'error' : 'ok'}
+          </Tag>
+        ),
+    },
+    {
+      title: '耗时',
+      key: 'duration',
+      width: 86,
+      align: 'right',
+      render: (_value, pair) => <span className="mono">{formatDuration(pair.durMs ?? null)}</span>,
+    },
+    {
+      title: '请求 / 响应字节',
+      key: 'bytes',
+      width: 150,
+      align: 'right',
+      render: (_value, pair) => (
+        <span className="mono">
+          {formatBytes(asNumber(pair.request?.['bytes']))} /{' '}
+          {formatBytes(asNumber(pair.response?.['bytes']))}
+        </span>
+      ),
+    },
+  ];
+  return (
+    <Card
+      size="small"
+      title="请求记录"
+      extra={
+        <Space>
+          <Tag bordered={false}>{`detail=${frames.detail}`}</Tag>
+          {frames.droppedFrames !== undefined && frames.droppedFrames > 0 ? (
+            <Tag color="red">丢帧 {formatNumber(frames.droppedFrames)}</Tag>
+          ) : null}
+        </Space>
+      }
+    >
+      {notice === null ? null : (
+        <Alert type="warning" showIcon style={{ marginBottom: 10 }} message={notice} />
+      )}
+      <Text type="secondary" style={{ fontSize: 11.5 }}>
+        一行一次请求；展开查看请求与响应报文（已脱敏，单帧最多 256KB）。
+      </Text>
+      <Table<ProtocolFramePair>
+        size="small"
+        style={{ marginTop: 8 }}
+        rowKey={(pair, index) => `${pair.mcp}-${String(pair.id ?? '')}-${index ?? 0}`}
+        dataSource={frames.frames}
+        columns={columns}
+        pagination={false}
+        scroll={{ x: 900 }}
+        expandable={{
+          expandedRowRender: (pair) => (
+            <Row gutter={12}>
+              <Col span={12}>
+                <FrameColumn label="请求报文" event={pair.request} />
+              </Col>
+              <Col span={12}>
+                <FrameColumn label="响应报文" event={pair.response} />
+              </Col>
+            </Row>
+          ),
+        }}
+        locale={{
+          emptyText: (
+            <Empty description="没有匹配的请求。放宽时间范围，或确认服务端已在 full 帧模式重启。" />
+          ),
+        }}
+      />
+      {frames.hasMore === true ? (
+        <Text type="secondary" style={{ fontSize: 11.5 }}>
+          还有更多请求；缩小时间范围或指定客户端 / binding。
+        </Text>
+      ) : null}
+    </Card>
   );
 }
 

@@ -195,6 +195,9 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const audit = createAuditRuntime({
     dir: join(dataDir, 'audit'),
     log,
+    // Full frames keep redacted request/response payloads for the request view;
+    // each payload is bounded to 256 KiB by the recorder.
+    frameMode: 'full',
     onEvent: (event) => {
       auditHub.publish('audit', event);
     },

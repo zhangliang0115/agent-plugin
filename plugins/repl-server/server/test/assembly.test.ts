@@ -1,6 +1,6 @@
 // hook-allow: localhost-only test fetch, no external egress
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -270,6 +270,37 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
   const searched = (await search.json()) as { result: { isError: boolean; content: Array<{ text: string }> } };
   assert.equal(searched.result.isError, false);
   assert.ok(Array.isArray(JSON.parse(searched.result.content[0]?.text ?? 'null')));
+});
+
+test('assembled server records full protocol frames with request and response payloads', async (t) => {
+  const app = await start();
+  t.after(app.close);
+
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  await discover.json();
+  await rpc(app.base, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, session);
+
+  // Closing flushes the audit writers before the files are read; the wrapper's
+  // `close` also removes the temp root, so flush the assembly directly.
+  await app.assembly.close();
+  const dir = join(app.root, 'repl-server', 'audit');
+  const files = (await readdir(dir)).filter(
+    (name) => name.startsWith('protocol-') && name.endsWith('.jsonl'),
+  );
+  assert.ok(files.length > 0);
+  const lines = (await readFile(join(dir, files[0]!), 'utf8')).trim().split('\n').filter(Boolean);
+  const frames = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  const request = frames.find(
+    (frame) => frame['event'] === 'proto_in' && frame['method'] === 'tools/list',
+  );
+  const response = frames.find(
+    (frame) => frame['event'] === 'proto_out' && frame['method'] === 'tools/list',
+  );
+  assert.ok(request !== undefined);
+  assert.ok(response !== undefined);
+  assert.ok(request['params'] !== undefined, 'full mode must keep request payloads');
+  assert.ok(response['result'] !== undefined, 'full mode must keep response payloads');
 });
 
 test('run_script description and instructions follow the client binding visibility', async (t) => {
