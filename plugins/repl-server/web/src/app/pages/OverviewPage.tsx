@@ -6,6 +6,7 @@ import {
   Card,
   Col,
   Empty,
+  Popconfirm,
   Progress,
   Row,
   Space,
@@ -22,7 +23,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { Mono, PageHeader } from '../components/common.tsx';
 import { ApiError } from '../../lib/api.ts';
-import { formatBytes, formatNumber, formatPercent, formatTimestamp, type Tone } from '../../lib/format.ts';
+import {
+  formatBytes,
+  formatDuration,
+  formatNumber,
+  formatPercent,
+  formatTimestamp,
+  type Tone,
+} from '../../lib/format.ts';
 import { navigate, type ManageTab } from '../router.ts';
 
 const { Text } = Typography;
@@ -71,6 +79,22 @@ interface BindingActivity {
   queuedCalls: number;
 }
 
+interface InFlightEval {
+  exec: string;
+  evalId: number;
+  binding: string | null;
+  workspace: string;
+  async: boolean;
+  startedAt: number;
+  ageMs: number;
+  timeoutMs?: number;
+}
+
+interface EvalSnapshot {
+  total: number;
+  items: InFlightEval[];
+}
+
 interface Snapshot {
   capacity: Record<string, number>;
   pool: PoolCounts;
@@ -78,6 +102,7 @@ interface Snapshot {
   servers: ServerSummary;
   bindings: BindingActivity[];
   resources: ResourceSnapshot | null;
+  evals: EvalSnapshot | null;
 }
 
 interface RuntimeSettings {
@@ -548,6 +573,12 @@ export function OverviewPage(): React.ReactElement {
 
       <BindingActivitySection bindings={snapshot.bindings} />
 
+      <EvalActivitySection
+        evals={snapshot.evals}
+        bindings={snapshot.bindings}
+        onCancelled={() => void load(false)}
+      />
+
       {onboarding.allDone ? (
         <Card size="small">
           <Space>
@@ -971,6 +1002,133 @@ function BindingActivitySection({
       />
     </Card>
   );
+}
+
+function EvalActivitySection({
+  evals,
+  bindings,
+  onCancelled,
+}: {
+  evals: EvalSnapshot | null;
+  bindings: readonly BindingActivity[];
+  onCancelled: () => void;
+}): React.ReactElement {
+  const api = useApi();
+  const { message } = AntApp.useApp();
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(() => new Set());
+
+  const labels = new Map<string, string | null>();
+  for (const entry of bindings) {
+    if (entry.binding !== null) labels.set(entry.binding, entry.label);
+  }
+  const items = evals?.items ?? [];
+
+  function setBusy(key: string, busy: boolean): void {
+    setCancelling((current) => {
+      const next = new Set(current);
+      if (busy) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+
+  async function cancel(row: InFlightEval): Promise<void> {
+    const key = evalKey(row);
+    if (cancelling.has(key)) return;
+    setBusy(key, true);
+    try {
+      await api.post(`/evals/${encodeURIComponent(row.exec)}/${row.evalId}/cancel`);
+      message.success(`已取消 eval ${row.evalId}`);
+      onCancelled();
+    } catch (error) {
+      message.error(`取消失败：${failureText(error)}`);
+    } finally {
+      setBusy(key, false);
+    }
+  }
+
+  return (
+    <Card
+      title="在飞 eval"
+      extra={
+        <Tag bordered={false}>
+          {evals === null ? '数据不可用' : `共 ${formatNumber(evals.total)} 个`}
+        </Tag>
+      }
+    >
+      <Table
+        size="small"
+        rowKey={evalKey}
+        dataSource={items}
+        pagination={false}
+        locale={{ emptyText: '当前没有在飞 eval' }}
+        columns={[
+          {
+            title: '执行会话',
+            dataIndex: 'exec',
+            render: (value: string) => <Mono>{value}</Mono>,
+          },
+          { title: 'evalId', dataIndex: 'evalId', align: 'right' },
+          {
+            title: 'Binding',
+            dataIndex: 'binding',
+            render: (_value: string | null, row: InFlightEval) => {
+              if (row.binding === null) return <Text type="secondary">未绑定</Text>;
+              const label = labels.get(row.binding);
+              return label === null || label === undefined ? (
+                <Mono>{row.binding}</Mono>
+              ) : (
+                <Text>{label}</Text>
+              );
+            },
+          },
+          {
+            title: 'workspace',
+            dataIndex: 'workspace',
+            render: (value: string) => <Mono>{value}</Mono>,
+          },
+          {
+            title: '已运行',
+            dataIndex: 'ageMs',
+            align: 'right',
+            render: (value: number) => formatDuration(value),
+          },
+          {
+            title: '类型',
+            dataIndex: 'async',
+            render: (value: boolean) => (
+              <Tag bordered={false}>{value ? 'async' : 'sync'}</Tag>
+            ),
+          },
+          {
+            title: '操作',
+            key: 'action',
+            render: (_value: unknown, row: InFlightEval) => {
+              const busy = cancelling.has(evalKey(row));
+              return (
+                <Popconfirm
+                  title={`取消 eval ${row.evalId}？`}
+                  description="协作取消失败时会在约 2 秒后重启该执行会话的 worker，同一执行会话内的其它在飞 eval 也会被终止。"
+                  okText="取消 eval"
+                  cancelText="返回"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => cancel(row)}
+                >
+                  <Button size="small" danger loading={busy} disabled={busy}>
+                    取消
+                  </Button>
+                </Popconfirm>
+              );
+            },
+          },
+        ]}
+      />
+    </Card>
+  );
+}
+
+function evalKey(row: InFlightEval): string {
+  return `${row.exec}:${row.evalId}`;
 }
 
 function ResourceMetric({
@@ -1467,7 +1625,33 @@ function normalizeSnapshot(value: unknown): Snapshot {
     },
     bindings: normalizeBindings(record['bindings']),
     resources: normalizeResources(record['resources']),
+    evals: normalizeEvals(record['evals']),
   };
+}
+
+function normalizeEvals(value: unknown): EvalSnapshot | null {
+  if (!isRecord(value) || !Array.isArray(value['items'])) return null;
+  const items: InFlightEval[] = [];
+  for (const entry of value['items']) {
+    if (!isRecord(entry)) continue;
+    const exec = typeof entry['exec'] === 'string' ? entry['exec'] : '';
+    const evalId = numberOrZero(entry['evalId']);
+    if (exec === '' || evalId <= 0) continue;
+    const item: InFlightEval = {
+      exec,
+      evalId,
+      binding: typeof entry['binding'] === 'string' ? entry['binding'] : null,
+      workspace: typeof entry['workspace'] === 'string' ? entry['workspace'] : '',
+      async: entry['async'] === true,
+      startedAt: numberOrZero(entry['startedAt']),
+      ageMs: numberOrZero(entry['ageMs']),
+    };
+    if (typeof entry['timeoutMs'] === 'number' && Number.isFinite(entry['timeoutMs'])) {
+      item.timeoutMs = entry['timeoutMs'];
+    }
+    items.push(item);
+  }
+  return { total: numberOrZero(value['total']), items };
 }
 
 function normalizeBindings(value: unknown): BindingActivity[] {

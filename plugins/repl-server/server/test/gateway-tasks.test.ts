@@ -121,7 +121,7 @@ test('an expired task reports TASK_EXPIRED', async (t) => {
   );
 });
 
-test('wait without ids observes this owner, counts working tasks in pending, and times out', async (t) => {
+test('wait with explicit ids counts working tasks in pending and times out', async (t) => {
   const parked = parkedCall();
   const gateway = createGateway(t, { callTool: parked.call });
 
@@ -132,7 +132,11 @@ test('wait without ids observes this owner, counts working tasks in pending, and
   `));
   await waitFor(parked.arrived);
 
-  const waited = (await gateway.waitTasks(IDENTITY.mcp, undefined, 100)) as WaitResult;
+  const waited = (await gateway.waitTasks(
+    IDENTITY.mcp,
+    [fast.taskId, slow.taskId],
+    100,
+  )) as WaitResult;
   assert.equal(waited.ok, true);
   assert.equal(waited.timedOut, true);
   assert.equal(waited.pending, 1);
@@ -142,7 +146,7 @@ test('wait without ids observes this owner, counts working tasks in pending, and
   // The completed result was consumed by the call above; the working one is
   // still queued. Release it and collect the rest.
   parked.release();
-  const finished = (await gateway.waitTasks(IDENTITY.mcp, undefined, 5_000)) as WaitResult;
+  const finished = (await gateway.waitTasks(IDENTITY.mcp, [slow.taskId], 5_000)) as WaitResult;
   assert.equal(finished.timedOut, false);
   assert.equal(finished.pending, 0);
   assert.deepEqual(finished.events.map((event) => event.taskId), [slow.taskId]);
@@ -183,7 +187,11 @@ test('the async dispatch receipt carries the real evalId', async (t) => {
   assert.ok(first.evalId > 0);
   assert.ok(second.evalId > first.evalId);
 
-  const waited = (await gateway.waitTasks(IDENTITY.mcp, undefined, 5_000)) as WaitResult;
+  const waited = (await gateway.waitTasks(
+    IDENTITY.mcp,
+    [first.taskId, second.taskId],
+    5_000,
+  )) as WaitResult;
   const events = new Map(waited.events.map((event) => [event.taskId, event]));
   assert.equal(events.get(first.taskId)?.evalId, first.evalId);
   assert.equal(events.get(second.taskId)?.evalId, second.evalId);

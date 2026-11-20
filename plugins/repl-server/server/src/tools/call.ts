@@ -62,7 +62,7 @@ interface RunScriptArguments {
 }
 
 interface WaitTasksArguments {
-  taskIds?: string[];
+  taskIds: string[];
   timeoutMs?: number;
 }
 
@@ -242,7 +242,7 @@ export async function callTool(
   input: unknown,
   ctx: ToolCallContext,
 ): Promise<ToolCallResponse> {
-  // MCP makes `arguments` optional for a call with no fields (search_tools, wait_tasks).
+  // MCP makes `arguments` optional; tools with required fields reject the empty object in validation.
   const args = input === undefined ? {} : input;
   switch (name) {
     case 'run_script':

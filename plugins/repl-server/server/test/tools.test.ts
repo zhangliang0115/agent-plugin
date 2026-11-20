@@ -111,9 +111,10 @@ test('the frozen schemas match docs/protocol.md §4', () => {
   assert.deepEqual(getToolDefinition('wait_tasks')?.inputSchema, {
     type: 'object',
     properties: {
-      taskIds: { type: 'array', items: { type: 'string' } },
+      taskIds: { type: 'array', items: { type: 'string' }, minItems: 1 },
       timeoutMs: { type: 'integer', minimum: 1000, maximum: 600000, default: 270000 },
     },
+    required: ['taskIds'],
     additionalProperties: false,
   });
   assert.deepEqual(getToolDefinition('report_problem')?.inputSchema, {
@@ -159,9 +160,11 @@ test('validateToolArguments enforces required fields, types and additionalProper
   assert.match(failure('describe_tools', {}), /names is required/);
   assert.match(failure('describe_tools', { names: [] }), /at least 1 item/);
   assert.match(failure('describe_tools', { names: Array.from({ length: 11 }, (_, index) => `t${index}`) }), /at most 10 item/);
+  assert.match(failure('wait_tasks', {}), /taskIds is required/);
+  assert.match(failure('wait_tasks', { taskIds: [] }), /at least 1 item/);
   assert.match(failure('wait_tasks', { taskIds: 't_1' }), /taskIds must be an array/);
-  assert.match(failure('wait_tasks', { timeoutMs: 999 }), /timeoutMs must be >= 1000/);
-  assert.match(failure('wait_tasks', { timeoutMs: 600001 }), /timeoutMs must be <= 600000/);
+  assert.match(failure('wait_tasks', { taskIds: ['t_1'], timeoutMs: 999 }), /timeoutMs must be >= 1000/);
+  assert.match(failure('wait_tasks', { taskIds: ['t_1'], timeoutMs: 600001 }), /timeoutMs must be <= 600000/);
   assert.match(failure('report_problem', {}), /title is required/);
   assert.match(failure('report_problem', { title: '', detail: 'd', severity: 'low' }), /at least 1 character/);
   assert.match(

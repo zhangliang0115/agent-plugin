@@ -37,7 +37,13 @@ import {
   eventLabel,
   eventSubject,
 } from '../../lib/audit-labels.ts';
-import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
+import {
+  listOptions,
+  mergeBindings,
+  mergeValues,
+  optionLabel,
+  type LabeledOption,
+} from '../../lib/filter-options.ts';
 import {
   formatDuration,
   formatId,
@@ -636,7 +642,7 @@ export function AuditPage(): React.ReactElement {
         key: 'client',
         width: 170,
         ellipsis: true,
-        render: (_value, event) => eventClientLabel(event),
+        render: (_value, event) => eventClientLabel(event, filterOptions.bindings),
       },
       {
         title: '服务端（server）',
@@ -1127,7 +1133,10 @@ export function AuditPage(): React.ReactElement {
                   {eventClientParts(selected).version || '—'}
                 </Descriptions.Item>
                 <Descriptions.Item label="binding">
-                  <span className="mono">{eventText(selected, 'binding') ?? 'unbound'}</span>
+                  <BindingLabel
+                    binding={eventText(selected, 'binding')}
+                    options={filterOptions.bindings}
+                  />
                 </Descriptions.Item>
                 <Descriptions.Item label="exec">
                   <span className="mono">{eventText(selected, 'exec') ?? '—'}</span>
@@ -1455,13 +1464,28 @@ function splitClientFilter(label: string): { name: string; version: string } {
   return { name: label.slice(0, slash), version: label.slice(slash + 1) };
 }
 
-function eventClientLabel(event: AuditEvent): string {
+function eventClientLabel(event: AuditEvent, bindings: readonly LabeledOption[]): string {
   if (event.event === 'ai_run') {
     const client = eventText(event, 'client') ?? 'admin';
     const serverId = eventText(event, 'serverId') ?? eventText(event, 'server');
     return serverId === null ? client : `${client} · ${serverId}`;
   }
-  return eventText(event, 'client') ?? eventText(event, 'binding') ?? '—';
+  const client = eventText(event, 'client');
+  const binding = eventText(event, 'binding');
+  const bindingLabel = binding === null ? null : optionLabel(binding, bindings);
+  if (client !== null && bindingLabel !== null) return `${client} · ${bindingLabel}`;
+  return client ?? bindingLabel ?? '—';
+}
+
+function BindingLabel({
+  binding,
+  options,
+}: {
+  binding: string | null;
+  options: readonly LabeledOption[];
+}): React.ReactElement {
+  if (binding === null) return <span className="mono muted">unbound</span>;
+  return <span className="mono">{optionLabel(binding, options)}</span>;
 }
 
 function eventModeLabel(event: AuditEvent): string {

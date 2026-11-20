@@ -46,7 +46,7 @@ import { findBindingByToken, getClientBinding } from './db/clients.ts';
 import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
 import { countToolsByServer, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
-import { ExecGateway, type IdleSweepResult } from './exec/gateway.ts';
+import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalOf, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
 import { PoolGates } from './pool/gates.ts';
 import { createPoolRuntime } from './pool/runtime.ts';
@@ -127,6 +127,9 @@ const SERVER_CLOSE_TIMEOUT_MS = 5_000;
 
 /** Background idle-lifecycle sweep (design 03 §2.3). */
 const SWEEP_INTERVAL_MS = 60_000;
+
+/** How often the oldest in-flight eval is checked against {@link STUCK_EVAL_WARN_MS}. */
+const EVAL_WATCHDOG_INTERVAL_MS = 60_000;
 
 /**
  * Stops accepting connections and waits for the listener to close. Idle
@@ -809,6 +812,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
 
   const overviewHandler = createAdminOverviewHandler({
     staticDir: WEB_DIST,
+    evals: () => gateway.inFlightEvals(),
+    cancelEval: (exec, evalId) => gateway.cancelEval(exec, evalId),
     overview: () => {
       const pool = poolRuntime.snapshot();
       const gatewayStats = gateway.stats();
@@ -951,6 +956,34 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   }, options.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 
+  // A stuck eval is one that stays the oldest in flight past the threshold; it
+  // keeps its key until it settles, so the same eval warns only once.
+  const warnedEvals = new Set<string>();
+  const evalWatchdogTimer = setInterval(() => {
+    if (closing) return;
+    const oldest = gateway.inFlightEvals(1).items[0];
+    if (oldest === undefined) {
+      warnedEvals.clear();
+      return;
+    }
+    const key = `${oldest.exec}:${oldest.evalId}`;
+    // The warned eval is always the oldest while it runs, so a different
+    // oldest means it settled and the next one may warn.
+    if (warnedEvals.size > 0 && !warnedEvals.has(key)) warnedEvals.clear();
+    if (warnedEvals.has(key) || stuckEvalOf([oldest]) === null) return;
+    warnedEvals.add(key);
+    log(`eval ${oldest.evalId} has been in flight for ${oldest.ageMs}ms`, {
+      level: 'warn',
+      scope: 'eval',
+      exec: oldest.exec,
+      evalId: oldest.evalId,
+      binding: oldest.binding,
+      workspace: oldest.workspace,
+      ageMs: oldest.ageMs,
+    });
+  }, EVAL_WATCHDOG_INTERVAL_MS);
+  evalWatchdogTimer.unref();
+
   return {
     server,
     db,
@@ -968,6 +1001,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       if (closePromise !== null) return closePromise;
       closing = true;
       clearInterval(sweepTimer);
+      clearInterval(evalWatchdogTimer);
       clearInterval(poolStateTimer);
       resourceMonitor.stop();
       closePromise = (async () => {

@@ -55,6 +55,24 @@ export interface ScriptOutcome {
   documents?: { base64: string }[];
 }
 
+/** One eval currently registered in an execution session. */
+export interface InFlightEvalView {
+  exec: string;
+  evalId: number;
+  binding: string | null;
+  workspace: string;
+  async: boolean;
+  startedAt: number;
+  ageMs: number;
+  timeoutMs?: number;
+}
+
+/** In-flight evals for the admin overview; `total` counts before `limit` truncation. */
+export interface InFlightEvalsView {
+  total: number;
+  items: InFlightEvalView[];
+}
+
 export interface TaskSnapshot {
   taskId: string;
   status: 'working' | 'input_required' | 'completed' | 'failed' | 'cancelled';
@@ -70,7 +88,7 @@ export interface TaskSnapshot {
 export interface ExecutionGateway {
   runScript(request: ScriptRequest): Promise<ScriptOutcome>;
   dispatchScript(request: ScriptRequest): Promise<{ taskId: string; evalId: number }>;
-  waitTasks(owner: string, taskIds: string[] | undefined, timeoutMs: number): Promise<unknown>;
+  waitTasks(owner: string, taskIds: string[], timeoutMs: number): Promise<unknown>;
   getTask(owner: string, taskId: string): Promise<TaskSnapshot | null>;
   cancelTask(owner: string, taskId: string): Promise<boolean>;
   destroyOwner(owner: string): Promise<void>;

@@ -78,7 +78,7 @@ class FakeCatalog implements Catalog {
 class FakeGateway implements ExecutionGateway {
   readonly runCalls: ScriptRequest[] = [];
   readonly dispatchCalls: ScriptRequest[] = [];
-  readonly waitCalls: Array<{ owner: string; taskIds: string[] | undefined; timeoutMs: number }> = [];
+  readonly waitCalls: Array<{ owner: string; taskIds: string[]; timeoutMs: number }> = [];
   runOutcome: ScriptOutcome = {
     content: '<repl-output eval="1"><result>ok</result></repl-output>',
     isError: false,
@@ -101,7 +101,7 @@ class FakeGateway implements ExecutionGateway {
     return this.dispatched;
   }
 
-  async waitTasks(owner: string, taskIds: string[] | undefined, timeoutMs: number): Promise<unknown> {
+  async waitTasks(owner: string, taskIds: string[], timeoutMs: number): Promise<unknown> {
     this.waitCalls.push({ owner, taskIds, timeoutMs });
     if (this.waitError !== null) throw this.waitError;
     return this.waitResult;
@@ -500,11 +500,11 @@ test('wait_tasks forwards the owner, task ids and timeout, and passes the result
     pending: 0,
   };
 
-  const result = asCallResult(await callTool('wait_tasks', {}, h.ctx));
+  const result = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_1'] }, h.ctx));
   assert.equal(result.isError, false);
   assert.deepEqual(parseText(result), h.gateway.waitResult);
   assert.deepEqual(h.gateway.waitCalls, [
-    { owner: 'mcp_1', taskIds: undefined, timeoutMs: 270_000 },
+    { owner: 'mcp_1', taskIds: ['ev_1'], timeoutMs: 270_000 },
   ]);
 
   const explicit = asCallResult(
@@ -518,7 +518,7 @@ test('wait_tasks forwards the owner, task ids and timeout, and passes the result
   });
 
   const bound = harness({ identity: BOUND_IDENTITY });
-  await callTool('wait_tasks', {}, bound.ctx);
+  await callTool('wait_tasks', { taskIds: ['ev_1'] }, bound.ctx);
   assert.equal(bound.gateway.waitCalls[0]?.owner, 'cb_1', 'bound clients are keyed by binding');
 });
 
@@ -545,14 +545,29 @@ test('wait_tasks marks ok:false results and thrown task errors as isError', asyn
   dataOnly.gateway.waitError = Object.assign(new Error('expired'), {
     data: { code: 'TASK_EXPIRED' },
   });
-  const expired = asCallResult(await callTool('wait_tasks', {}, dataOnly.ctx));
+  const expired = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_1'] }, dataOnly.ctx));
   assert.equal(expired.isError, true);
   assert.deepEqual(parseText(expired), { ok: false, error: { code: 'TASK_EXPIRED' } });
 });
 
 test('wait_tasks validation errors are tool-layer errors', async () => {
   const h = harness();
-  const result = asCallResult(await callTool('wait_tasks', { timeoutMs: 999 }, h.ctx));
+
+  const missing = asCallResult(await callTool('wait_tasks', {}, h.ctx));
+  assert.equal(missing.isError, true);
+  const missingError = parseText(missing) as { error: { code: string; message: string } };
+  assert.equal(missingError.error.code, 'INVALID_ARGUMENT');
+  assert.match(missingError.error.message, /taskIds is required/);
+
+  const empty = asCallResult(await callTool('wait_tasks', { taskIds: [] }, h.ctx));
+  assert.equal(empty.isError, true);
+  const emptyError = parseText(empty) as { error: { code: string; message: string } };
+  assert.equal(emptyError.error.code, 'INVALID_ARGUMENT');
+  assert.match(emptyError.error.message, /at least 1 item/);
+
+  const result = asCallResult(
+    await callTool('wait_tasks', { taskIds: ['ev_1'], timeoutMs: 999 }, h.ctx),
+  );
   assert.equal(result.isError, true);
   assert.equal((parseText(result) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');
   assert.equal(h.gateway.waitCalls.length, 0);

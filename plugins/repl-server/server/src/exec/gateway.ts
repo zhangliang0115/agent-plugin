@@ -8,6 +8,7 @@ import {
   LIMITS,
   TaskStore,
   clampBashArgs,
+  hardStop,
   newId,
   normalizeOutput,
   ReplError,
@@ -28,6 +29,8 @@ import type {
   Catalog,
   Clock,
   ExecutionGateway,
+  InFlightEvalView,
+  InFlightEvalsView,
   RequestIdentity,
   ScriptOutcome,
   ScriptRequest,
@@ -231,6 +234,27 @@ function toolServer(call: ToolCallRequest): string {
 function runFields(runtime: SessionRuntime, evalId: number): Record<string, unknown> {
   const runId = runtime.runIds.get(evalId);
   return { exec: runtime.record.id, ...(runId === undefined ? {} : { runId }) };
+}
+
+/** Age at which the oldest in-flight eval is reported as stuck. */
+export const STUCK_EVAL_WARN_MS = 30 * 60_000;
+
+/** Grace for a cooperative eval cancel before its worker is forcibly stopped. */
+export const EVAL_CANCEL_GRACE_MS = 2_000;
+
+/**
+ * The oldest eval in `items` once its age reaches `thresholdMs`, otherwise
+ * `null`. Pure so the watchdog threshold is testable without timers.
+ */
+export function stuckEvalOf(
+  items: readonly InFlightEvalView[],
+  thresholdMs: number = STUCK_EVAL_WARN_MS,
+): InFlightEvalView | null {
+  let oldest: InFlightEvalView | undefined;
+  for (const item of items) {
+    if (oldest === undefined || item.startedAt < oldest.startedAt) oldest = item;
+  }
+  return oldest !== undefined && oldest.ageMs >= thresholdMs ? oldest : null;
 }
 
 /** Default wall for evals that omit `timeout`; 0 means no wall. */
@@ -991,10 +1015,9 @@ export class ExecGateway implements ExecutionGateway {
     }
   }
 
-  async waitTasks(owner: string, taskIds: string[] | undefined, timeoutMs: number): Promise<unknown> {
-    const ids = taskIds ?? this.tasks.unconsumedIds(owner);
-    const waited = await this.tasks.wait(owner, ids, timeoutMs);
-    const consumed = this.tasks.consume(owner, ids);
+  async waitTasks(owner: string, taskIds: string[], timeoutMs: number): Promise<unknown> {
+    const waited = await this.tasks.wait(owner, taskIds, timeoutMs);
+    const consumed = this.tasks.consume(owner, taskIds);
     return {
       ok: true,
       timedOut: waited.timedOut && consumed.pending > 0,
@@ -1103,6 +1126,60 @@ export class ExecGateway implements ExecutionGateway {
       entry.inFlightEvals += record.inFlightEvals;
     }
     return [...byBinding.values()];
+  }
+
+  /**
+   * In-flight evals across every execution session, oldest first. `total` is
+   * the count before `limit`, so a truncated page still shows the real backlog.
+   */
+  inFlightEvals(limit = 200): InFlightEvalsView {
+    const now = this.now();
+    const items: InFlightEvalView[] = [];
+    for (const runtime of this.runtimes.values()) {
+      for (const active of runtime.session.activeEvals.values()) {
+        const item: InFlightEvalView = {
+          exec: runtime.record.id,
+          evalId: active.evalId,
+          binding: runtime.record.binding,
+          workspace: runtime.record.workspace,
+          async: active.async,
+          startedAt: active.startedAt,
+          ageMs: now - active.startedAt,
+        };
+        if (active.timeoutMs !== undefined) item.timeoutMs = active.timeoutMs;
+        items.push(item);
+      }
+    }
+    items.sort((a, b) => a.startedAt - b.startedAt);
+    return { total: items.length, items: items.slice(0, Math.max(0, limit)) };
+  }
+
+  /**
+   * Admin cancel: cooperative abort first, then a hard stop of the execution
+   * session's worker when the eval is still registered after the grace. The
+   * hard stop also terminates the session's other in-flight evals.
+   * Returns false only when the named eval is not live.
+   */
+  async cancelEval(exec: string, evalId: number): Promise<boolean> {
+    const runtime = this.runtimes.get(exec);
+    const active = runtime?.session.activeEvals.get(evalId);
+    if (runtime === undefined || active === undefined) return false;
+    this.abortEval(runtime, evalId);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        active.completed,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, EVAL_CANCEL_GRACE_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    const stillActive = runtime.session.activeEvals.get(evalId);
+    if (stillActive !== undefined) await hardStop(runtime.session, stillActive, 'wall');
+    return true;
   }
 
   /**

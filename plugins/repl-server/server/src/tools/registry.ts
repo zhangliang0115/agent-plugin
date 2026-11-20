@@ -76,7 +76,7 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names fail, and more than 10 names fails validation. Get names from search_tools.';
 
 const WAIT_TASKS_DESCRIPTION =
-  'Wait until the given eval tasks started with async: true finish (all unconsumed tasks when taskIds is omitted), consume their results, and return events plus a pending count.';
+  'Wait until the given eval tasks started with async: true finish, consume their results, and return events plus a pending count. taskIds is required: pass one or more task ids; the call never collects other tasks of the session.';
 
 const REPORT_PROBLEM_DESCRIPTION =
   'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
@@ -119,9 +119,10 @@ const DESCRIBE_TOOLS_SCHEMA: ToolInputSchema = deepFreeze({
 const WAIT_TASKS_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
-    taskIds: { type: 'array', items: { type: 'string' } },
+    taskIds: { type: 'array', items: { type: 'string' }, minItems: 1 },
     timeoutMs: { type: 'integer', minimum: 1_000, maximum: 600_000, default: 270_000 },
   },
+  required: ['taskIds'],
   additionalProperties: false,
 });
 

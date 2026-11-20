@@ -9,6 +9,11 @@ export function listOptions(values: readonly string[]): LabeledOption[] {
   return values.map((value) => ({ value, label: value }));
 }
 
+/** Display label for a value; falls back to the value itself when no option matches. */
+export function optionLabel(value: string, options: readonly LabeledOption[]): string {
+  return options.find((entry) => entry.value === value)?.label ?? value;
+}
+
 /** Returns the previous array when nothing new was added, so React skips the update. */
 export function mergeValues(previous: readonly string[], added: readonly string[]): string[] {
   const next = new Set(previous);

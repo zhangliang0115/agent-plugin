@@ -30,7 +30,13 @@ import {
   type StreamState,
 } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
-import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
+import {
+  listOptions,
+  mergeBindings,
+  mergeValues,
+  optionLabel,
+  type LabeledOption,
+} from '../../lib/filter-options.ts';
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
 import {
   eventWindow,
@@ -359,7 +365,7 @@ export function RequestsPage(): React.ReactElement {
       title: '客户端 / binding',
       key: 'client',
       ellipsis: true,
-      render: (_value, pair) => pairClientLabel(pair),
+      render: (_value, pair) => pairClientLabel(pair, options.bindings),
     },
     {
       title: '方法',
@@ -770,13 +776,17 @@ function timeOf(event: AuditEvent): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-function pairClientLabel(pair: ProtocolFramePair): string {
+function pairClientLabel(pair: ProtocolFramePair, bindings: readonly LabeledOption[]): string {
   const event = pair.request ?? pair.response;
   if (event === null) return '—';
   const name = text(event, 'clientName');
   const version = text(event, 'clientVersion');
-  if (name !== null) return version === null ? name : `${name}/${version}`;
-  return text(event, 'client') ?? text(event, 'binding') ?? '—';
+  const client =
+    name === null ? text(event, 'client') : version === null ? name : `${name}/${version}`;
+  const binding = text(event, 'binding');
+  const bindingLabel = binding === null ? null : optionLabel(binding, bindings);
+  if (client !== null && bindingLabel !== null) return `${client} · ${bindingLabel}`;
+  return client ?? bindingLabel ?? '—';
 }
 
 function text(event: FrameEvent, key: string): string | null {

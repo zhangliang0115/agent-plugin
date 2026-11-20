@@ -28,7 +28,7 @@
 run_script({ code, timeout?, async?, workspace?, visibleTools?, excludeTags? })
 search_tools({ query?, category?, tags?, max? })
 describe_tools({ names })
-wait_tasks({ taskIds?, timeoutMs? })
+wait_tasks({ taskIds, timeoutMs? })
 ```
 
 结果契约、并发档位、审计与容量见 learn-ai 的设计文档 01–03。

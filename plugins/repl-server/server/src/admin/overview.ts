@@ -2,6 +2,7 @@ import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 
 import { adminJson, type AdminHandler } from './servers.ts';
+import type { InFlightEvalsView } from '../ports.ts';
 import type { ResourceSnapshot } from './resources.ts';
 
 export interface BindingActivity {
@@ -24,6 +25,8 @@ export interface OverviewSnapshot {
   bindings?: BindingActivity[];
   /** Process-tree memory/CPU samples; optional so existing overview stubs still work. */
   resources?: ResourceSnapshot;
+  /** Live in-flight evals; omitted when the gateway is not wired. */
+  evals?: InFlightEvalsView;
 }
 
 export interface AdminOverviewDeps {
@@ -31,7 +34,14 @@ export interface AdminOverviewDeps {
   csrfToken?: () => string;
   /** Directory containing the built admin UI (server/dist/web). */
   staticDir?: string;
+  /** Live in-flight evals; omitted when the gateway is not wired. */
+  evals?: () => InFlightEvalsView;
+  /** Aborts one live eval; false when it already settled. */
+  cancelEval?: (exec: string, evalId: number) => boolean | Promise<boolean>;
 }
+
+/** `/evals/:exec/:evalId/cancel`, matched after the `/admin/api` prefix is stripped. */
+const EVAL_CANCEL_PATH = /^\/evals\/([^/]+)\/(\d+)\/cancel$/;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -69,7 +79,40 @@ export function createAdminOverviewHandler(deps: AdminOverviewDeps): AdminHandle
     const path = request.path.replace(/^\/admin\/api/, '').replace(/\/+$/, '') || '/';
 
     if (request.method === 'GET' && path === '/overview') {
-      return adminJson(200, deps.overview());
+      const snapshot = deps.overview();
+      return adminJson(
+        200,
+        deps.evals === undefined ? snapshot : { ...snapshot, evals: deps.evals() },
+      );
+    }
+
+    if (request.method === 'POST') {
+      const match = EVAL_CANCEL_PATH.exec(path);
+      if (match !== null) {
+        const rawExec = match[1] ?? '';
+        let exec = rawExec;
+        try {
+          exec = decodeURIComponent(rawExec);
+        } catch {
+          // A malformed escape can only name an eval that does not exist.
+        }
+        const evalId = Number(match[2]);
+        if (
+          deps.cancelEval !== undefined &&
+          exec !== '' &&
+          Number.isSafeInteger(evalId) &&
+          evalId > 0 &&
+          (await deps.cancelEval(exec, evalId))
+        ) {
+          return adminJson(200, { ok: true });
+        }
+        return adminJson(404, {
+          error: {
+            code: 'EVAL_NOT_FOUND',
+            message: `eval ${match[2]} is not in flight in ${exec}`,
+          },
+        });
+      }
     }
 
     if (request.method === 'GET' && path === '/csrf') {

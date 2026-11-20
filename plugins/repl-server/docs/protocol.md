@@ -223,9 +223,10 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 {
   "type": "object",
   "properties": {
-    "taskIds": { "type": "array", "items": { "type": "string" } },
+    "taskIds": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
     "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 600000, "default": 270000 }
   },
+  "required": ["taskIds"],
   "additionalProperties": false
 }
 ```
@@ -244,7 +245,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 }
 ```
 
-- 不传 `taskIds`：等本执行会话所有未收取任务；传了只等这些。
+- `taskIds` 必填，1 个或多个：只等这些任务，没有按 owner 全量收取的兜底。owner 是 `bindingId ?? mcpSessionId`，共享同一 binding 的多个项目因此不会互相消费任务。
 - 结果消费一次；重复取返回 `ALREADY_CONSUMED`。
 - 未知 id：`{ "ok": false, "error": { "code": "UNKNOWN_TASK", "unknownIds": [] } }`，同时 `isError: true`。
 - `status`：`completed` / `failed` / `cancelled`。
