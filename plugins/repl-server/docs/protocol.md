@@ -80,7 +80,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "extensions": { "io.modelcontextprotocol/tasks": {} } },
     "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.1.0" } },
-    "instructions": "<run_script 的完整说明，见 §5>",
+    "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
   }
@@ -97,7 +97,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 返回 5 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
 
-- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call`/`Find`/`Args` 优先保留，server 行从列表尾部截断。其余工具一句话（`report_problem` ≤500 字符）
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call`/`Find`/`Args` 优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
@@ -150,7 +150,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 }
 ```
 
-`ttlMs = 异步运行上限 7200000 + 终态保留 1800000`，从创建时刻起算。
+`ttlMs` 是任务映射的进程安全保留期（9000000 ms），从创建时刻起算；脚本本身没有运行时长上限。
 
 ## 4. 工具 schema
 
@@ -161,7 +161,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
   "type": "object",
   "properties": {
     "code": { "type": "string" },
-    "timeout": { "type": "integer", "minimum": 1000, "maximum": 7200000, "default": 30000 },
+    "timeout": { "type": "integer", "minimum": 1 },
     "async": { "type": "boolean", "default": false },
     "workspace": { "type": "string" },
     "visibleTools": { "type": "array", "items": { "type": "string" } },
@@ -172,7 +172,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 }
 ```
 
-- `timeout`：同步默认 30s、上限 600s；`async: true` 默认与上限 7200s。同步传 >600000 返回 `INVALID_ARGUMENT`（不静默截断）；`async: true` 省略 timeout 视为 7200000。
+- `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值也没有上限。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。
 - `workspace` 取 realpath 后作为执行会话 key；换 workspace 新建执行会话，变量与 `state` 不继承。
 - `visibleTools` 内置工具用裸名，MCP 工具用 `<server>.<tool>`；只收窄，不放大。
 
@@ -213,7 +213,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 }
 ```
 
-返回 `{ "tools": [{ "name", "inputSchema" }], "omitted"?: [] }`。**不截断单个 schema**；整批超 32000 字符按顺序装，单个 schema 自己超限时只返回它一个。
+返回 `{ "tools": [{ "name", "inputSchema" }] }`，按请求顺序返回全部 schema，不做字符预算截断。`names` 超过 10 个是参数校验失败（`INVALID_ARGUMENT`）；任一名字未知或对该客户端不可见时整次调用失败，返回 `UNKNOWN_TOOL`，不返回部分结果。
 
 ### `wait_tasks`
 
@@ -271,7 +271,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ## 5. `instructions`
 
-`instructions` 放完整提示词（02 §4.2 的模板），其中 MCP 段按当前请求可见的 server 列表替换，逐个列出 server id、category、工具数和 summary；不重复整份分类/标签词表，只说明过滤值见 `search_tools` 的 schema。`run_script.description` 只放 ≤2KB 的摘要。两者不重复。
+`instructions` 是静态短提示（≤1200 字符）：执行模型、工作流、错误约定，以及“不要猜工具名”；末尾只留指针“可见 MCP server 列表在 `run_script` 的 description 里”。具体 server 列表只在 `run_script.description`（≤2KB，见 §3.3），两者不重复。分类/标签过滤值见 `search_tools` 的 schema。
 
 ## 6. 任务方法
 
@@ -305,7 +305,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 - `async` / `task`：`async: true` 的派发回执
 - `reset="1"`：worker 重建后的第一条结果
 - `restored`：`state` 恢复成功
-- `truncated="1"`：L5 截断
+- `truncated="1"`：保留属性；文本结果与日志不再截断，媒体超限通过额外 content 块的数量体现
 - 文本中的 `&`、`<`、`>` 转义
 - 失败时出现 `<error>`；`<log>` 含 stdout 与 stderr
 
@@ -313,7 +313,8 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 | code | 场景 |
 |---|---|
-| `INVALID_ARGUMENT` | schema 校验失败、timeout 越界 |
+| `INVALID_ARGUMENT` | schema 校验失败、timeout 非正整数、`describe_tools` 超过 10 个名字 |
+| `UNKNOWN_TOOL` | `describe_tools` 的名字未知或对该客户端不可见 |
 | `WS_INVALID` | workspace 不存在或不是目录 |
 | `WS_LIMIT` | 超过每 MCP 会话的 workspace 上限 |
 | `CAPACITY_EXCEEDED` | 执行会话/绑定配额已满且无可淘汰 |

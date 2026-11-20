@@ -45,13 +45,6 @@ export class WorkerKilledError extends ReplError {
   }
 }
 
-export class BudgetExceededError extends ReplError {
-  constructor(limit: number) {
-    super('BUDGET_EXCEEDED', `tool call budget exceeded (${limit})`);
-    this.name = 'BudgetExceededError';
-  }
-}
-
 export class StaleEvalError extends ReplError {
   constructor() {
     super('STALE_EVAL', 'the eval has already finished');

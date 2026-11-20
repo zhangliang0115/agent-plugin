@@ -78,7 +78,7 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
   assert.equal(DISCOVER_CACHE_SCOPE, 'public');
   assert.equal(SERVER_NAME, 'repl-server');
   assert.equal(SERVER_VERSION, VERSION);
-  assert.ok(INSTRUCTIONS.includes('persistent JavaScript context'));
+  assert.ok(INSTRUCTIONS.includes('persistent sandbox'));
   assert.ok(INSTRUCTIONS.includes('tools.mcp.<server>.<tool>'));
   assert.ok(INSTRUCTIONS.includes('search_tools'));
 });

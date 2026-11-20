@@ -40,9 +40,6 @@ import {
   type SessionRemovalReason,
 } from './exec-sessions.ts';
 
-/** Envelope caps from L5; media and field normalization happen before rendering. */
-const ENVELOPE_LIMITS = { resultChars: 30_000, logChars: 30_000, errorChars: 2_000 };
-
 /** L1 per-call defaults (design 02 §1.1): file-class and other official tools, Bash, MCP. */
 export interface ToolCallTimeouts {
   officialMs: number;
@@ -182,8 +179,8 @@ interface EvalMedia {
 interface EvalDispatchContext {
   readonly filter: PendingEvalFilter | undefined;
   readonly binding: string | null;
-  /** Absolute epoch-ms deadline, used as the L1 upper bound. */
-  readonly deadline: number;
+  /** Absolute epoch-ms deadline, used as the L1 upper bound; absent when the eval has none. */
+  readonly deadline?: number;
 }
 
 /** One execution session plus the per-eval context of the evals running in it. */
@@ -269,16 +266,13 @@ function outcomeOf(
 ): ScriptOutcomeWithOmitted {
   if (settlement.asyncDispatched === true) {
     return {
-      content: renderEnvelope(
-        {
-          evalId: settlement.evalId,
-          async: true,
-          evalTaskId: settlement.evalTaskId,
-          reset: settlement.contextReset,
-          restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
-        },
-        ENVELOPE_LIMITS,
-      ),
+      content: renderEnvelope({
+        evalId: settlement.evalId,
+        async: true,
+        evalTaskId: settlement.evalTaskId,
+        reset: settlement.contextReset,
+        restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
+      }),
       isError: false,
     };
   }
@@ -298,18 +292,15 @@ function outcomeOf(
     Object.keys(normalized.truncated).length > 0 ||
     Object.values(settlement.truncated).some(Boolean);
   const outcome: ScriptOutcomeWithOmitted = {
-    content: renderEnvelope(
-      {
-        evalId: settlement.evalId,
-        log,
-        result: normalized.result,
-        error: settlement.ok ? undefined : settlement.error ?? settlement.outcome,
-        reset: settlement.contextReset,
-        restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
-        truncated,
-      },
-      ENVELOPE_LIMITS,
-    ),
+    content: renderEnvelope({
+      evalId: settlement.evalId,
+      log,
+      result: normalized.result,
+      error: settlement.ok ? undefined : settlement.error ?? settlement.outcome,
+      reset: settlement.contextReset,
+      restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
+      truncated,
+    }),
     isError: !settlement.ok,
   };
   if (normalized.images.length > 0) outcome.images = normalized.images;
@@ -586,18 +577,22 @@ export class ExecGateway implements ExecutionGateway {
   private withEvalContext<T>(
     request: ScriptRequest,
     filter: PendingEvalFilter | undefined,
-    deadline: number,
+    deadline: number | undefined,
     run: () => Promise<T>,
   ): Promise<T> {
     return this.evalScope.run(
-      { filter, binding: request.identity.binding, deadline },
+      {
+        filter,
+        binding: request.identity.binding,
+        ...(deadline === undefined ? {} : { deadline }),
+      },
       run,
     );
   }
 
   /** Timeout that `runEval` will apply; used to derive the L1 deadline up front. */
-  private evalTimeoutFor(runtime: SessionRuntime, request: ScriptRequest, asyncMode: boolean): number {
-    return resolveEvalTimeout(asyncMode, request.timeoutMs, runtime.session.limits);
+  private evalTimeoutFor(request: ScriptRequest): number | undefined {
+    return resolveEvalTimeout(request.timeoutMs);
   }
 
   /**
@@ -687,7 +682,8 @@ export class ExecGateway implements ExecutionGateway {
 
     const started = this.now();
     const binding = runtime.bindings.get(call.evalId) ?? null;
-    const evalDeadline = runtime.deadlines.get(call.evalId) ?? started + this.toolTimeouts.officialMs;
+    // No eval deadline means only the per-call L1 limit applies.
+    const evalDeadline = runtime.deadlines.get(call.evalId) ?? Number.POSITIVE_INFINITY;
     let args = call.args;
     let callDeadline: number;
 
@@ -820,13 +816,13 @@ export class ExecGateway implements ExecutionGateway {
     const { runtime, record } = await this.runtimeFor(request);
     try {
       const filter = this.filterFor(request);
-      const timeoutMs = this.evalTimeoutFor(runtime, request, false);
-      const deadline = this.now() + timeoutMs;
+      const timeoutMs = this.evalTimeoutFor(request);
+      const deadline = timeoutMs === undefined ? undefined : this.now() + timeoutMs;
       this.emitEvalStart(request, record, 'sync');
       const settlement = await this.withEvalContext(request, filter, deadline, () =>
         runEval(runtime.session, request.code, {
           async: false,
-          timeoutMs,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
         }),
       );
       this.emitEvalEnd(request, record, settlement);
@@ -849,8 +845,8 @@ export class ExecGateway implements ExecutionGateway {
     let taskId: string | undefined;
     try {
       const filter = this.filterFor(request);
-      const timeoutMs = this.evalTimeoutFor(runtime, request, true);
-      const deadline = this.now() + timeoutMs;
+      const timeoutMs = this.evalTimeoutFor(request);
+      const deadline = timeoutMs === undefined ? undefined : this.now() + timeoutMs;
       const owner = ownerKey(request.identity);
       this.pruneTaskTracking();
       const created = this.tasks.create(0, owner);
@@ -867,7 +863,7 @@ export class ExecGateway implements ExecutionGateway {
       const receipt = await this.withEvalContext(request, filter, deadline, () =>
         runEval(runtime.session, request.code, {
           async: true,
-          timeoutMs,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
           evalTaskId: created,
           onSettled,
         }),

@@ -13,10 +13,12 @@ import {
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import { toCallToolResult, type CallToolResult } from '../tools/registry.ts';
 
-/** Async execution cap (7200000) plus terminal retention (1800000) from docs/protocol.md §3.4. */
-export const TASK_ASYNC_MAX_MS = 7_200_000;
-export const TASK_RETENTION_MS = 1_800_000;
-export const TASK_TTL_MS = TASK_ASYNC_MAX_MS + TASK_RETENTION_MS;
+/**
+ * Process-safety retention for task records. Scripts have no execution cap, but
+ * the mapping table is bounded in memory and capacity; 2.5 hours covers the
+ * long jobs the MCP tasks extension is meant for.
+ */
+export const TASK_TTL_MS = 9_000_000;
 export const TASK_POLL_INTERVAL_MS = 500;
 
 /** A run longer than this becomes a task when the client declared the tasks extension. */

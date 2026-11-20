@@ -412,8 +412,9 @@ test('run_script description and instructions follow the client binding visibili
   assert.ok(!alpha.description.includes('Alpha database tools'), 'summary stays out of the 2KB line');
   assert.ok(!alpha.description.includes('beta'));
   assert.ok(!alpha.description.includes('issues'));
-  assert.ok(alpha.instructions.includes('- alpha [database] 1 tool — Alpha database tools'));
-  assert.ok(!alpha.instructions.includes('beta'));
+  assert.ok(alpha.instructions.includes("Visible MCP servers are listed in run_script's description."));
+  assert.ok(!alpha.instructions.includes('- alpha'));
+  assert.ok(!alpha.instructions.includes('- beta'));
 
   const alphaProperties = alpha.searchSchema['properties'] as Record<string, Record<string, unknown>>;
   assert.deepEqual(alphaProperties['server']?.['enum'], ['alpha']);
@@ -436,8 +437,9 @@ test('run_script description and instructions follow the client binding visibili
   const git = await look(gitClient.token);
   assert.ok(git.description.includes('beta  [vcs]  1 tools'));
   assert.ok(!git.description.includes('alpha'));
-  assert.ok(git.instructions.includes('- beta [vcs] 1 tool — Beta repository tools'));
-  assert.ok(!git.instructions.includes('alpha'));
+  assert.ok(git.instructions.includes("Visible MCP servers are listed in run_script's description."));
+  assert.ok(!git.instructions.includes('- beta'));
+  assert.ok(!git.instructions.includes('- alpha'));
   const gitProperties = git.searchSchema['properties'] as Record<string, Record<string, unknown>>;
   assert.deepEqual(gitProperties['server']?.['enum'], ['beta']);
   assert.deepEqual((gitProperties['tags']?.['items'] as Record<string, unknown>)?.['enum'], ['git']);
@@ -445,8 +447,9 @@ test('run_script description and instructions follow the client binding visibili
   const unrestricted = await look();
   assert.ok(unrestricted.description.includes('alpha  [database]'));
   assert.ok(unrestricted.description.includes('beta  [vcs]'));
-  assert.ok(unrestricted.instructions.includes('- alpha [database] 1 tool'));
-  assert.ok(unrestricted.instructions.includes('- beta [vcs] 1 tool'));
+  assert.ok(unrestricted.instructions.includes("Visible MCP servers are listed in run_script's description."));
+  assert.ok(!unrestricted.instructions.includes('- alpha'));
+  assert.ok(!unrestricted.instructions.includes('- beta'));
   assert.ok(Buffer.byteLength(unrestricted.description, 'utf8') <= 2048);
   const unrestrictedProperties = unrestricted.searchSchema['properties'] as Record<
     string,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildInstructions, INSTRUCTIONS } from '../src/mcp/discover.ts';
+import { INSTRUCTIONS } from '../src/mcp/discover.ts';
 import {
   buildRunScriptDescription,
   collectVisibleMcpServers,
@@ -18,7 +18,6 @@ function server(overrides: Partial<McpServerSource> & { id: string }): McpServer
     transport: 'stdio',
     enabled: true,
     category: null,
-    summary: null,
     tags: [],
     ...overrides,
   };
@@ -43,7 +42,7 @@ function visible(
 
 test('visible servers exclude disabled and builtin-transport rows', () => {
   const servers = [
-    server({ id: 'pg', category: 'database', summary: 'Postgres' }),
+    server({ id: 'pg', category: 'database' }),
     server({ id: 'off', enabled: false }),
     server({ id: '__official__', transport: 'builtin', tags: ['official'] }),
   ];
@@ -89,11 +88,10 @@ test('an idle server stays visible when its own tags match', () => {
   assert.equal(result[0]?.toolCount, 0);
 });
 
-test('server lines are compact and never print summary, tool names or env tags', () => {
+test('server lines are compact and never print tool names or env tags', () => {
   const missing = formatServerLine({
     id: 'pg',
     category: '',
-    summary: '',
     tags: [],
     toolCount: 2,
     toolNames: ['query', 'insert', 'list', 'migrate', 'drop'],
@@ -103,7 +101,6 @@ test('server lines are compact and never print summary, tool names or env tags',
   const bare = formatServerLine({
     id: 'pg',
     category: 'database',
-    summary: '',
     tags: [],
     toolCount: 0,
     toolNames: [],
@@ -113,20 +110,18 @@ test('server lines are compact and never print summary, tool names or env tags',
   const detailed = formatServerLine({
     id: 'gh',
     category: 'vcs',
-    summary: 'GitHub repository tools',
     tags: ['vcs', 'env.dev', 'env.test'],
     toolCount: 1,
     toolNames: ['issues'],
   });
   assert.equal(detailed, 'gh  [vcs]  1 tools');
-  assert.ok(!detailed.includes('GitHub'));
   assert.ok(!detailed.includes('issues'));
   assert.ok(!detailed.includes('env.'));
 });
 
 test('run_script description appends the visible servers and fixed guidance', () => {
   const servers = visible(
-    [server({ id: 'pg', category: 'database', summary: 'Postgres' })],
+    [server({ id: 'pg', category: 'database' })],
     [tool('pg', 'query')],
   );
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers);
@@ -167,31 +162,11 @@ test('over-budget server lists are truncated from the tail and guidance survives
   assert.ok(description.includes('Find: search_tools({ query, server?, category?, tags? })'));
 });
 
-test('buildInstructions lists visible servers with category, count and summary', () => {
-  const servers = visible(
-    [
-      server({ id: 'pg', category: 'database', summary: 'Postgres tools' }),
-      server({ id: 'gh', category: 'vcs', summary: 'GitHub tools', tags: ['env.dev'] }),
-      server({ id: 'off', enabled: false }),
-    ],
-    [tool('pg', 'query'), tool('gh', 'issues')],
-  );
-  const instructions = buildInstructions(INSTRUCTIONS, servers);
-
-  assert.ok(instructions.includes('MCP servers visible to this client:'));
-  assert.ok(instructions.includes('- pg [database] 1 tool — Postgres tools'));
-  assert.ok(instructions.includes('- gh [vcs] 1 tool — GitHub tools'));
-  assert.ok(!instructions.includes('[env.dev]'), 'env tags stay in the search_tools overview');
-  assert.ok(!instructions.includes('- off'));
-  assert.ok(instructions.includes('The search_tools schema lists'));
-  assert.ok(instructions.includes('the available server, category and tag filter values'));
-  assert.ok(!instructions.includes('database, vcs'), 'the category vocabulary is not repeated');
-  assert.ok(instructions.includes('## Return values'), 'the rest of the template is unchanged');
-  assert.ok(instructions.includes('## Top-level MCP tools'));
-});
-
-test('buildInstructions reports an empty visible set', () => {
-  const instructions = buildInstructions(INSTRUCTIONS, []);
-  assert.ok(instructions.includes('No MCP servers are visible to this client.'));
-  assert.ok(instructions.includes('tools.mcp.<server>.<tool>(args).'));
+test('instructions stay short and point at run_script for the server list', () => {
+  assert.ok([...INSTRUCTIONS].length <= 1_200, `instructions are ${[...INSTRUCTIONS].length} chars`);
+  assert.ok(INSTRUCTIONS.includes("Visible MCP servers are listed in run_script's description."));
+  assert.ok(INSTRUCTIONS.includes('Do not guess tool names. Unknown names fail.'));
+  assert.ok(!INSTRUCTIONS.includes('30000'));
+  assert.ok(!INSTRUCTIONS.includes('50000'));
+  assert.ok(!INSTRUCTIONS.includes('7200000'));
 });

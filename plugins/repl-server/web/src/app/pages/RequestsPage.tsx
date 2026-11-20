@@ -4,24 +4,33 @@ import {
   Button,
   Card,
   Col,
+  Drawer,
   Empty,
   Input,
   Row,
   Select,
   Space,
+  Switch,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from 'antd';
 import type { TableProps } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { FrameColumn, type FrameEvent } from '../components/FramePayload.tsx';
-import { ApiError, framesTruncatedNotice, type FramesResponse } from '../../lib/api.ts';
+import {
+  ApiError,
+  framesTruncatedNotice,
+  type FramesResponse,
+  type StreamState,
+} from '../../lib/api.ts';
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
+import { eventWindow, isAsyncResponse, isProtocolFrame } from '../../lib/request-detail.ts';
 
 const { Text } = Typography;
 
@@ -33,6 +42,23 @@ interface ProtocolFramePair {
   response: FrameEvent | null;
   durMs?: number;
   ok?: boolean;
+}
+
+interface AuditEvent {
+  ts?: string;
+  event?: string;
+  tool?: string;
+  server?: string;
+  method?: string;
+  outcome?: string;
+  ok?: boolean;
+  evalId?: number;
+  exec?: string;
+  ms?: number;
+  durMs?: number;
+  elapsedMs?: number;
+  error?: string;
+  [key: string]: unknown;
 }
 
 interface RequestFilters {
@@ -57,16 +83,38 @@ const DEFAULT_FILTERS: RequestFilters = {
   method: '',
 };
 
+const STREAM_LABELS: Record<StreamState, string> = {
+  connecting: '连接中',
+  open: '已连接',
+  reconnecting: '重连中',
+  fallback: '轮询中',
+  closed: '已关闭',
+};
+
 export function RequestsPage(): React.ReactElement {
   const api = useApi();
   const [filters, setFilters] = useState<RequestFilters>(DEFAULT_FILTERS);
   const [frames, setFrames] = useState<FramesResponse<ProtocolFramePair> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(true);
+  const [streamState, setStreamState] = useState<StreamState>('closed');
+  const [selected, setSelected] = useState<ProtocolFramePair | null>(null);
+  const [events, setEvents] = useState<AuditEvent[] | null>(null);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+
+  const filtersRef = useRef(filters);
+  const reloadTimerRef = useRef<number | null>(null);
+  const eventTicketRef = useRef(0);
+
+  useEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
 
   const load = useCallback(
-    async (next: RequestFilters): Promise<void> => {
-      setLoading(true);
+    async (next: RequestFilters, silent = false): Promise<void> => {
+      if (!silent) setLoading(true);
       setError(null);
       try {
         const from = new Date(Date.now() - Number(next.range) * 60_000).toISOString();
@@ -85,7 +133,7 @@ export function RequestsPage(): React.ReactElement {
       } catch (failure) {
         setError(failureText(failure));
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
       }
     },
     [api],
@@ -95,10 +143,71 @@ export function RequestsPage(): React.ReactElement {
     void load(DEFAULT_FILTERS);
   }, [load]);
 
+  const scheduleLiveReload = useCallback((): void => {
+    if (reloadTimerRef.current !== null) window.clearTimeout(reloadTimerRef.current);
+    reloadTimerRef.current = window.setTimeout(() => {
+      reloadTimerRef.current = null;
+      if (document.visibilityState === 'visible') void load(filtersRef.current, true);
+    }, 500);
+  }, [load]);
+
+  useEffect(() => {
+    if (!live) {
+      setStreamState('closed');
+      return;
+    }
+    const stream = api.stream('/audit/stream', {
+      eventTypes: ['audit', 'message'],
+      onEvent: (frame) => {
+        if (isProtocolFrame(frame.data)) scheduleLiveReload();
+      },
+      onGap: scheduleLiveReload,
+      onStateChange: setStreamState,
+      onFallbackPoll: scheduleLiveReload,
+    });
+    setStreamState(stream.state);
+    return () => {
+      stream.close();
+      if (reloadTimerRef.current !== null) {
+        window.clearTimeout(reloadTimerRef.current);
+        reloadTimerRef.current = null;
+      }
+    };
+  }, [api, live, scheduleLiveReload]);
+
   function update(patch: Partial<RequestFilters>): void {
     const next = { ...filters, ...patch };
     setFilters(next);
     void load(next);
+  }
+
+  async function openRequest(pair: ProtocolFramePair): Promise<void> {
+    setSelected(pair);
+    setEvents(null);
+    setEventsError(null);
+    setEventsLoading(true);
+    const ticket = ++eventTicketRef.current;
+    try {
+      // `tool_call`/`tool_result` carry no mcp/binding/exec fields and `evalId`
+      // is rejected without `exec`, so time is the only filter that keeps the
+      // trace complete. Async evals keep the tail open because their events
+      // are written after the response returns.
+      const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+        query: {
+          ...eventWindow(pair.request?.ts, pair.response?.ts, isAsyncResponse(pair.response)),
+          limit: 500,
+        },
+      });
+      if (ticket !== eventTicketRef.current) return;
+      const list = Array.isArray(response.events) ? response.events : [];
+      list.sort((left, right) => timeOf(left) - timeOf(right));
+      setEvents(list);
+    } catch (failure) {
+      if (ticket !== eventTicketRef.current) return;
+      setEventsError(failureText(failure));
+    } finally {
+      if (ticket === eventTicketRef.current) setEventsLoading(false);
+    }
   }
 
   const columns: TableProps<ProtocolFramePair>['columns'] = [
@@ -173,16 +282,29 @@ export function RequestsPage(): React.ReactElement {
       : `共 ${formatNumber(frames.frames.length)} 次请求${
           frames.hasMore === true ? '（还有更多，缩小时间范围）' : ''
         }`;
+  const eventCount = events === null ? null : events.length;
 
   return (
     <div className="page">
       <PageHeader
         title="请求记录"
-        description="一行一次 MCP 请求；展开查看脱敏后的请求与响应报文。连接、discover、tools/list 等没有执行事件的请求也在这里。"
+        description="一行一次 MCP 请求。点击一行查看本次请求的协议帧与审计事件；列表在实时模式下随协议帧自动刷新。"
         actions={
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load(filters)}>
-            刷新
-          </Button>
+          <Space size={10}>
+            <Tag color={streamState === 'open' ? 'green' : 'default'} bordered={false}>
+              {STREAM_LABELS[streamState]}
+            </Tag>
+            <Switch
+              size="small"
+              checked={live}
+              checkedChildren="实时"
+              unCheckedChildren="暂停"
+              onChange={setLive}
+            />
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load(filters)}>
+              刷新
+            </Button>
+          </Space>
         }
       />
 
@@ -241,18 +363,10 @@ export function RequestsPage(): React.ReactElement {
           loading={loading}
           pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 1_000 }}
-          expandable={{
-            expandedRowRender: (pair) => (
-              <Row gutter={12}>
-                <Col span={12}>
-                  <FrameColumn label="请求报文" event={pair.request} />
-                </Col>
-                <Col span={12}>
-                  <FrameColumn label="响应报文" event={pair.response} />
-                </Col>
-              </Row>
-            ),
-          }}
+          onRow={(pair) => ({
+            className: selected === pair ? 'row-clickable row-selected' : 'row-clickable',
+            onClick: () => void openRequest(pair),
+          })}
           locale={{
             emptyText: (
               <Empty description="没有匹配的请求。放宽时间范围，或确认服务端已在 full 帧模式重启。" />
@@ -260,8 +374,168 @@ export function RequestsPage(): React.ReactElement {
           }}
         />
       </Card>
+
+      <Drawer
+        open={selected !== null}
+        onClose={() => {
+          eventTicketRef.current += 1;
+          setSelected(null);
+          setEvents(null);
+        }}
+        width={920}
+        title={
+          selected === null ? (
+            '请求详情'
+          ) : (
+            <Space size={8}>
+              <span className="mono">{selected.method ?? 'request'}</span>
+              <span className="muted">#{selected.id ?? '—'}</span>
+              <Tag color={selected.ok === false ? 'red' : 'green'} bordered={false}>
+                {selected.response === null ? '无响应' : selected.ok === false ? 'error' : 'ok'}
+              </Tag>
+            </Space>
+          )
+        }
+      >
+        {selected === null ? null : (
+          <Tabs
+            items={[
+              {
+                key: 'frames',
+                label: '协议帧',
+                children: (
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <FrameColumn label="请求报文" event={selected.request} />
+                    </Col>
+                    <Col span={12}>
+                      <FrameColumn label="响应报文" event={selected.response} />
+                    </Col>
+                  </Row>
+                ),
+              },
+              {
+                key: 'events',
+                label: eventCount === null ? '事件' : `事件（${eventCount}）`,
+                children: (
+                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    {eventsError === null ? null : (
+                      <Alert type="error" showIcon message="事件读取失败" description={eventsError} />
+                    )}
+                    <Table<AuditEvent>
+                      size="small"
+                      rowKey={(event, index) => `${event.ts ?? ''}-${event.event ?? ''}-${index ?? 0}`}
+                      loading={eventsLoading}
+                      dataSource={events ?? []}
+                      pagination={false}
+                      columns={eventColumns}
+                      scroll={{ x: 760 }}
+                      locale={{
+                        emptyText: (
+                          <Empty description="本次请求没有执行事件。discover、tools/list、连接类请求通常只有协议帧。" />
+                        ),
+                      }}
+                    />
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        )}
+      </Drawer>
     </div>
   );
+}
+
+const eventColumns: TableProps<AuditEvent>['columns'] = [
+  {
+    title: '时间',
+    dataIndex: 'ts',
+    width: 170,
+    render: (value: unknown) => (
+      <span className="mono">{formatTimestamp(typeof value === 'string' ? value : null)}</span>
+    ),
+  },
+  {
+    title: '事件',
+    dataIndex: 'event',
+    width: 130,
+    render: (value: unknown) => <span className="mono">{typeof value === 'string' ? value : '—'}</span>,
+  },
+  {
+    title: '对象',
+    key: 'subject',
+    ellipsis: true,
+    render: (_value, event) => (
+      <span className="mono">
+        {stringField(event, 'tool') ??
+          stringField(event, 'method') ??
+          stringField(event, 'kind') ??
+          stringField(event, 'server') ??
+          '—'}
+      </span>
+    ),
+  },
+  {
+    title: 'eval',
+    key: 'eval',
+    width: 110,
+    render: (_value, event) =>
+      typeof event.evalId === 'number' ? (
+        <span className="mono">
+          {event.exec === undefined ? event.evalId : `${event.exec}/${event.evalId}`}
+        </span>
+      ) : (
+        <span className="muted">—</span>
+      ),
+  },
+  {
+    title: '状态',
+    key: 'status',
+    width: 90,
+    render: (_value, event) => eventStatusTag(event),
+  },
+  {
+    title: '耗时',
+    key: 'ms',
+    width: 90,
+    align: 'right',
+    render: (_value, event) => (
+      <span className="mono">
+        {formatDuration(asNumber(event.ms) ?? asNumber(event.durMs) ?? asNumber(event.elapsedMs))}
+      </span>
+    ),
+  },
+];
+
+function eventStatusTag(event: AuditEvent): React.ReactElement {
+  const status =
+    typeof event.status === 'string'
+      ? event.status
+      : typeof event.outcome === 'string'
+        ? event.outcome
+        : typeof event.ok === 'boolean'
+          ? event.ok
+            ? 'ok'
+            : 'error'
+          : '';
+  if (status === '') return <span className="muted">—</span>;
+  const color = status === 'error' || status === 'failed' ? 'red' : status === 'timeout' ? 'orange' : 'green';
+  return (
+    <Tag color={color} bordered={false}>
+      {status}
+    </Tag>
+  );
+}
+
+function stringField(event: AuditEvent, key: string): string | null {
+  const value = event[key];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+function timeOf(event: AuditEvent): number {
+  const time = typeof event.ts === 'string' ? Date.parse(event.ts) : Number.NaN;
+  return Number.isFinite(time) ? time : 0;
 }
 
 function pairClientLabel(pair: ProtocolFramePair): string {

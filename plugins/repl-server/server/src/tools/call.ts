@@ -3,7 +3,7 @@
 import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import type { ReportService } from '../reports/service.ts';
-import { DESCRIBE_BUDGET_CHARS, describeTools, type DescribeToolsInput } from './describe.ts';
+import { describeTools, type DescribeToolsInput } from './describe.ts';
 import { reportProblemCall } from './report.ts';
 import {
   getToolDefinition,
@@ -17,14 +17,9 @@ import {
   McpTaskStore,
   ownerOf,
   resolveDispatchMode,
-  TASK_ASYNC_MAX_MS,
-  TASK_TIMEOUT_THRESHOLD_MS,
   type CreateTaskResult,
-  type ToolDispatchMode,
 } from '../tasks/mcp-tasks.ts';
 
-const SYNC_DEFAULT_TIMEOUT_MS = 30_000;
-const SYNC_MAX_TIMEOUT_MS = 600_000;
 const WAIT_TASKS_DEFAULT_MS = 270_000;
 
 export interface ToolCallContext {
@@ -144,40 +139,16 @@ function failureFromError(error: unknown): CallToolResult {
   return runScriptFailure(errorCode(error), errorMessage(error));
 }
 
-interface ResolvedTimeout {
-  ok: boolean;
-  value: number;
-  message?: string;
-}
-
-function resolveTimeout(mode: ToolDispatchMode, requested: number | undefined): ResolvedTimeout {
-  if (mode === 'async') return { ok: true, value: requested ?? TASK_ASYNC_MAX_MS };
-  if (mode === 'task') return { ok: true, value: requested ?? TASK_TIMEOUT_THRESHOLD_MS };
-  const value = requested ?? SYNC_DEFAULT_TIMEOUT_MS;
-  if (value > SYNC_MAX_TIMEOUT_MS) {
-    return {
-      ok: false,
-      value,
-      message: `timeout ${value} exceeds the synchronous maximum ${SYNC_MAX_TIMEOUT_MS}; pass async: true`,
-    };
-  }
-  return { ok: true, value };
-}
-
 async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<ToolCallResponse> {
   const validation = validateToolArguments('run_script', input);
   if (!validation.ok) return runScriptFailure(validation.code, validation.message);
 
   const args = validation.value as unknown as RunScriptArguments;
   const mode = resolveDispatchMode('run_script', args, ctx.tasksDeclared === true);
-  const timeout = resolveTimeout(mode, args.timeout);
-  if (!timeout.ok) {
-    return runScriptFailure('INVALID_ARGUMENT', timeout.message ?? 'invalid timeout');
-  }
 
   const request: ScriptRequest = {
     code: args.code,
-    timeoutMs: timeout.value,
+    ...(args.timeout === undefined ? {} : { timeoutMs: args.timeout }),
     async: mode !== 'sync',
     identity: ctx.identity,
   };
@@ -217,10 +188,14 @@ async function describeToolsCall(input: unknown, ctx: ToolCallContext): Promise<
   const validation = validateToolArguments('describe_tools', input);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
   const args = validation.value as unknown as DescribeToolsInput;
-  return jsonResult(
-    describeTools(ctx.catalog.snapshot(), args.names, DESCRIBE_BUDGET_CHARS, ctx.visibility),
-    false,
-  );
+  const result = describeTools(ctx.catalog.snapshot(), args.names, ctx.visibility);
+  if (result.unknown !== undefined) {
+    return toolFailure(
+      'UNKNOWN_TOOL',
+      `unknown or invisible tool names: ${result.unknown.join(', ')}; use search_tools to find canonical names`,
+    );
+  }
+  return jsonResult({ tools: result.tools }, false);
 }
 
 function waitTasksFailure(error: unknown): { ok: false; error: Record<string, unknown> } | undefined {

@@ -58,23 +58,22 @@ function deepFreeze<T>(value: T): T {
 
 /**
  * Summary only; the full prompt lives in `server/discover` `instructions`.
- * It stays under the 2KB ceiling frozen in docs/protocol.md §3.3, and it must mention async in
- * both the schema and the description or the model never discovers the async path (01 §4.2).
+ * The visible MCP server list is appended per request by
+ * `buildRunScriptDescription`, so no server or built-in example is hardcoded here.
  */
-export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch several tool calls, loop over results, or combine outputs before answering. Only the returned value and the text passed to log() come back to you, wrapped in a <repl-output> envelope.
+export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch tool calls and return only what the answer needs.
 
-- Tools are async functions: await tools.<name>(args) for built-ins; MCP tools are tools.mcp.<server>.<tool>(args).
-- Top-level declarations persist across calls in the same workspace. Changing workspace starts a new execution session; variables and state do not carry over.
-- timeout is milliseconds: sync runs default to 30000 and max out at 600000. For longer work pass async: true, which dispatches immediately, defaults to and caps at 7200000, and returns <repl-output async="true" task="...">.
-- Collect an async result with wait_tasks using the task id from that envelope.
-- visibleTools (bare names for built-ins, <server>.<tool> for MCP) and excludeTags narrow only this call; they cannot widen access.
-- Use search_tools to find tool names and describe_tools for input schemas.`;
+- Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
+- Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
+- Pass async: true for long jobs, then collect the task with wait_tasks.
+- visibleTools and excludeTags narrow this call only; they cannot widen access.
+- Use search_tools to find canonical names and describe_tools for input schemas. Do not guess tool names.`;
 
 const SEARCH_TOOLS_DESCRIPTION =
-  'Search the tool catalog and return canonical tool names for run_script or describe_tools. An empty query without server returns the server overview (id, category, summary, tags, toolCount); an empty query with server returns that server\'s tools. A non-empty query searches tool names, effective tags and tool descriptions; server, category and tags only narrow the results, and tags is all-of. Filter values accept only the values listed in this request\'s schema enums.';
+  'Search this client\'s visible tools and return canonical names for run_script or describe_tools. An empty query without server returns the server overview; an empty query with server returns that server\'s tools. A non-empty query matches tool names, effective tags and descriptions; server, category and tags only narrow, and tags is all-of. Filter values must come from this request\'s schema enums.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
-  'Return full input schemas for up to 10 canonical tool names; later schemas are omitted only when the batch would exceed 32000 characters.';
+  'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names fail, and more than 10 names fails validation. Get names from search_tools.';
 
 const WAIT_TASKS_DESCRIPTION =
   'Wait until the given eval tasks started with async: true finish (all unconsumed tasks when taskIds is omitted), consume their results, and return events plus a pending count.';
@@ -86,7 +85,7 @@ const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
     code: { type: 'string' },
-    timeout: { type: 'integer', minimum: 1_000, maximum: 7_200_000, default: 30_000 },
+    timeout: { type: 'integer', minimum: 1 },
     async: { type: 'boolean', default: false },
     workspace: { type: 'string' },
     visibleTools: { type: 'array', items: { type: 'string' } },

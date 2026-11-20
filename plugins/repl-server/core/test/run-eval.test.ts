@@ -2,16 +2,9 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 
 import { LIMITS } from '../src/constants.ts';
-import {
-  BudgetExceededError,
-  EvalTimeoutError,
-  ReplError,
-  StaleEvalError,
-  WorkerKilledError,
-} from '../src/errors.ts';
+import { EvalTimeoutError, ReplError, StaleEvalError, WorkerKilledError } from '../src/errors.ts';
 import { EvalRegistry } from '../src/eval/eval-registry.ts';
 import {
-  DEFAULT_EXEC_SESSION_LIMITS,
   ExecSession,
   type EvalExecutor,
   type EvalExecutorOutcome,
@@ -111,7 +104,7 @@ function makeSession(
   return new ExecSession({
     id: 'es_test',
     createExecutor: () => executor,
-    limits: { minTimeoutMs: 5, graceMs: 30, terminateMs: 20, ...overrides },
+    limits: { graceMs: 30, terminateMs: 20, ...overrides },
     ...options,
   });
 }
@@ -123,21 +116,15 @@ function track(t: TestContext, session: ExecSession): ExecSession {
   return session;
 }
 
-test('resolveEvalTimeout follows the protocol table', () => {
-  assert.equal(resolveEvalTimeout(false, undefined), 30_000);
-  assert.equal(resolveEvalTimeout(true, undefined), 7_200_000);
-  assert.equal(resolveEvalTimeout(false, 5_000), 5_000);
-  assert.equal(resolveEvalTimeout(false, 0), 1_000);
-  assert.equal(resolveEvalTimeout(false, -10), 1_000);
-  assert.equal(resolveEvalTimeout(true, 7_200_000), 7_200_000);
+test('resolveEvalTimeout has no default or maximum', () => {
+  assert.equal(resolveEvalTimeout(), undefined);
+  assert.equal(resolveEvalTimeout(5_000), 5_000);
+  assert.equal(resolveEvalTimeout(7_200_001), 7_200_001);
 
   const isInvalid = (error: unknown): boolean => error instanceof ReplError && error.code === 'INVALID_ARGUMENT';
-  assert.throws(() => resolveEvalTimeout(false, 600_001), isInvalid);
-  assert.throws(() => resolveEvalTimeout(true, 7_200_001), isInvalid);
-  assert.throws(() => resolveEvalTimeout(false, Number.NaN), isInvalid);
-
-  // Injectable bounds are what the tests use to keep runs short.
-  assert.equal(resolveEvalTimeout(false, 50, { ...DEFAULT_EXEC_SESSION_LIMITS, minTimeoutMs: 1 }), 50);
+  assert.throws(() => resolveEvalTimeout(0), isInvalid);
+  assert.throws(() => resolveEvalTimeout(-10), isInvalid);
+  assert.throws(() => resolveEvalTimeout(Number.NaN), isInvalid);
 });
 
 test('synchronous evals run one at a time under the session lock', async (t) => {
@@ -281,14 +268,11 @@ test('tool calls require a live (epoch, evalId, callSeq) triple', async (t) => {
   assert.ok(reasons.includes('unknown_eval'));
 });
 
-test('the tool-call budget rejects the call after the injected limit', async (t) => {
+test('tool calls are counted but never rejected', async (t) => {
   const executor = new FakeExecutor();
-  assert.equal(DEFAULT_EXEC_SESSION_LIMITS.callsLimit, 50_000);
-  assert.equal(LIMITS.callsLimit, 50_000);
-
-  const session = track(t, makeSession(executor, { callsLimit: 2 }));
+  const session = track(t, makeSession(executor));
   const settled = deferred<EvalSettlement>();
-  const receipt = await runEval(session, 'budget', {
+  const receipt = await runEval(session, 'many-calls', {
     async: true,
     timeoutMs: 60_000,
     onSettled: (value) => settled.resolve(value),
@@ -297,17 +281,15 @@ test('the tool-call budget rejects the call after the injected limit', async (t)
   assert.ok(ev);
   const base = { evalId: ev.evalId, epoch: ev.epoch, tool: 'Bash', args: {} };
 
-  assert.ok(session.acceptToolCall({ ...base, callSeq: 1 }));
-  assert.ok(session.acceptToolCall({ ...base, callSeq: 2 }));
-  assert.throws(
-    () => session.acceptToolCall({ ...base, callSeq: 3 }),
-    (error: unknown) => error instanceof BudgetExceededError && error.code === 'BUDGET_EXCEEDED',
-  );
-  assert.equal(ev.budgetExhausted, true);
+  for (let seq = 1; seq <= 100; seq += 1) {
+    const call = session.acceptToolCall({ ...base, callSeq: seq });
+    assert.ok(call);
+    call.complete();
+  }
 
   executor.complete(ev.evalId, { ok: true, ms: 1 });
   const settlement = await settled.promise;
-  assert.deepEqual(settlement.budget, { calls: 2, callsLimit: 2 });
+  assert.deepEqual(settlement.budget, { calls: 100 });
 });
 
 test('the soft wall stops acceptance, aborts in-flight calls and rebuilds the worker', async (t) => {
@@ -517,7 +499,7 @@ test('the eval registry creates per key and disposes sessions on delete', async 
       new ExecSession({
         id: `es_${key}`,
         createExecutor: () => executor,
-        limits: { minTimeoutMs: 5, graceMs: 10, terminateMs: 20 },
+        limits: { graceMs: 10, terminateMs: 20 },
       }),
   });
   t.after(async () => {
@@ -555,7 +537,7 @@ test('rejected dispatch does not leak an in-flight slot', async (t) => {
   const session = track(t, makeSession(executor));
 
   await assert.rejects(
-    runEval(session, 'too-long', { timeoutMs: 600_001 }),
+    runEval(session, 'invalid-timeout', { timeoutMs: 0 }),
     (error: unknown) => error instanceof ReplError && error.code === 'INVALID_ARGUMENT',
   );
   assert.equal(session.inFlightEvals, 0);

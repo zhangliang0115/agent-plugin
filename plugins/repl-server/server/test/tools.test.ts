@@ -70,7 +70,7 @@ test('run_script description stays within the 2KB ceiling and mentions the async
   assert.ok(bytes <= 2048, `description is ${bytes} bytes`);
   assert.match(tool.description, /async/);
   assert.match(tool.description, /wait_tasks/);
-  assert.match(tool.description, /await tools\.<name>\(args\) for built-ins/);
+  assert.match(tool.description, /await tools\.<name>\(args\)/);
   assert.match(tool.description, /tools\.mcp\.<server>\.<tool>\(args\)/);
   assert.doesNotMatch(tool.description, /await Read\(/);
 });
@@ -80,7 +80,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     type: 'object',
     properties: {
       code: { type: 'string' },
-      timeout: { type: 'integer', minimum: 1000, maximum: 7200000, default: 30000 },
+      timeout: { type: 'integer', minimum: 1 },
       async: { type: 'boolean', default: false },
       workspace: { type: 'string' },
       visibleTools: { type: 'array', items: { type: 'string' } },
@@ -149,8 +149,7 @@ test('validateToolArguments enforces required fields, types and additionalProper
   assert.match(failure('run_script', []), /must be an object/);
   assert.match(failure('run_script', { code: 3 }), /code must be a string/);
   assert.match(failure('run_script', { code: 'x', extra: 1 }), /does not accept the argument "extra"/);
-  assert.match(failure('run_script', { code: 'x', timeout: 999 }), /timeout must be >= 1000/);
-  assert.match(failure('run_script', { code: 'x', timeout: 7200001 }), /timeout must be <= 7200000/);
+  assert.match(failure('run_script', { code: 'x', timeout: 0 }), /timeout must be >= 1/);
   assert.match(failure('run_script', { code: 'x', timeout: 1.5 }), /timeout must be an integer/);
   assert.match(failure('run_script', { code: 'x', async: 'yes' }), /async must be a boolean/);
   assert.match(failure('run_script', { code: 'x', visibleTools: [1] }), /visibleTools\[0\] must be a string/);
@@ -472,12 +471,12 @@ test('describe_tools returns complete schemas under canonical names', () => {
     { name: 'Read', inputSchema: { type: 'object', properties: {} } },
     { name: 'pg.query', inputSchema: schema },
   ]);
-  assert.deepEqual(result.omitted, ['missing', 'broken']);
+  assert.deepEqual(result.unknown, ['missing', 'broken']);
   assert.equal(result.tools[1]?.inputSchema, schema);
 });
 
-test('describe_tools omits entries that would exceed the batch budget', () => {
-  const big = 'x'.repeat(80);
+test('describe_tools never drops a requested schema for size', () => {
+  const big = 'x'.repeat(80_000);
   const snapshot: CatalogSnapshot = {
     revision: 1,
     tools: [
@@ -486,29 +485,12 @@ test('describe_tools omits entries that would exceed the batch budget', () => {
     ],
   };
 
-  const single = JSON.stringify({
-    name: 'a',
-    inputSchema: { type: 'object', description: big },
-  }).length;
-  const result = describeTools(snapshot, ['a', 'b'], single + 5);
-  assert.deepEqual(result.tools.map((tool) => tool.name), ['a']);
-  assert.deepEqual(result.omitted, ['b']);
+  const result = describeTools(snapshot, ['a', 'b']);
+  assert.deepEqual(result.tools.map((tool) => tool.name), ['a', 'b']);
+  assert.equal(result.unknown, undefined);
 });
 
-test('a single oversize schema is returned alone without an omission hint', () => {
-  const schema = { type: 'object', description: 'y'.repeat(500) };
-  const snapshot: CatalogSnapshot = {
-    revision: 1,
-    tools: [makeTool({ name: 'huge', kind: 'builtin', inputSchema: schema })],
-  };
-  const result = describeTools(snapshot, ['huge', 'huge'], 20);
-  assert.equal(result.tools.length, 1);
-  assert.equal(result.tools[0]?.name, 'huge');
-  assert.deepEqual(result.tools[0]?.inputSchema, schema);
-  assert.equal(result.omitted, undefined);
-});
-
-test('describe_tools omits tools hidden by the request visibility', () => {
+test('describe_tools reports tools hidden by the request visibility', () => {
   const snapshot: CatalogSnapshot = {
     revision: 1,
     tools: [
@@ -518,17 +500,17 @@ test('describe_tools omits tools hidden by the request visibility', () => {
     ],
   };
 
-  const serverBound = describeTools(snapshot, ['Read', 'pg.query', 'github.issues'], 32_000, {
+  const serverBound = describeTools(snapshot, ['Read', 'pg.query', 'github.issues'], {
     allowedServers: ['pg'],
   });
   assert.deepEqual(serverBound.tools.map((tool) => tool.name), ['Read', 'pg.query']);
-  assert.deepEqual(serverBound.omitted, ['github.issues']);
+  assert.deepEqual(serverBound.unknown, ['github.issues']);
 
-  const tagBound = describeTools(snapshot, ['Read', 'pg.query'], 32_000, {
+  const tagBound = describeTools(snapshot, ['Read', 'pg.query'], {
     allowedTags: [],
   });
   assert.deepEqual(tagBound.tools, []);
-  assert.deepEqual(tagBound.omitted, ['Read', 'pg.query']);
+  assert.deepEqual(tagBound.unknown, ['Read', 'pg.query']);
 });
 
 test('dynamic search_tools schema carries the visible server, category and tag enums', () => {
@@ -558,8 +540,8 @@ test('dynamic search_tools schema carries the visible server, category and tag e
   });
   assert.match(definition.description, /empty query without server returns the server overview/i);
   assert.match(definition.description, /empty query with server returns that server's tools/i);
-  assert.match(definition.description, /tool names, effective tags and tool descriptions/i);
-  assert.match(definition.description, /only narrow the results/i);
+  assert.match(definition.description, /tool names, effective tags and descriptions/i);
+  assert.match(definition.description, /only narrow/i);
   assert.match(definition.description, /all-of/);
   assert.match(definition.description, /schema enums/);
   assert.equal(Object.isFrozen(definition.inputSchema.properties.category), true);

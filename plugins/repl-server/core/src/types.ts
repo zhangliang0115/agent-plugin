@@ -75,7 +75,7 @@ export interface RunScriptResult {
   leftRunning: ProcRecord[];
   killed: KillRecord[];
   unattributed: UnattributedProcess[];
-  budget: { calls: number; callsLimit: number };
+  budget: { calls: number };
   errorInfo?: StructuredToolError;
 }
 

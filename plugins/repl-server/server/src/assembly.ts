@@ -54,7 +54,7 @@ import { createOfficialToolsSync } from './serve/official-sync.ts';
 import { createServeCallTool } from './serve/adapter.ts';
 import { loadLocalTokens, stateDbPath } from './local-tokens.ts';
 import { createMethodTable } from './mcp/methods.ts';
-import { buildInstructions, INSTRUCTIONS } from './mcp/discover.ts';
+import { INSTRUCTIONS } from './mcp/discover.ts';
 import {
   buildRunScriptDescription,
   collectVisibleMcpServers,
@@ -721,8 +721,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   };
 
   const dispatcher = createMethodTable<McpContext>({
-    instructions: (context) =>
-      buildInstructions(INSTRUCTIONS, toolSurfaceFor(context.identity).servers),
+    instructions: () => INSTRUCTIONS,
     toolsList: (_params, context) => {
       const surface = toolSurfaceFor(context.identity);
       return {

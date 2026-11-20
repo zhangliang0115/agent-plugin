@@ -10,11 +10,11 @@
  *   immediately; the result is delivered through `onSettled`.
  * - **Capacity.** Registration throws `CAPACITY_EXCEEDED` when the session
  *   already has `limits.inFlightLimit` evals in flight.
- * - **Timeouts.** Sync defaults to 30s / caps at 600s; async defaults to and
- *   caps at 7200s. Values below 1000ms are clamped up, values above the cap are
+ * - **Timeouts.** A script has no deadline unless the caller passes one.
+ *   `timeoutMs` must be a positive finite integer; otherwise it is
  *   `INVALID_ARGUMENT` (protocol §4: never silently truncate).
- * - **Walls.** The soft timer fires at the deadline (L2), the hard timer
- *   `graceMs` later (L3). Both are implemented in `stop.ts`.
+ * - **Walls.** When a deadline exists, the soft timer fires at it (L2) and the
+ *   hard timer `graceMs` later (L3). Both are implemented in `stop.ts`.
  *
  * The module deliberately has no audit/process code; settlements are plain data
  * that the assembly layer renders and records.
@@ -23,30 +23,18 @@
 import { EvalTimeoutError, ReplError, WorkerKilledError } from '../errors.ts';
 import type { TimeoutLayer } from '../types.ts';
 import {
-  DEFAULT_EXEC_SESSION_LIMITS,
   type ActiveEval,
   type EvalExecutorOutcome,
   type EvalSettlement,
   type EvalSettlementFields,
   type ExecSession,
-  type ExecSessionLimits,
 } from './exec-session.ts';
 import { hardStop, softStop } from './stop.ts';
-
-/** Subset of the session limits that decides an eval's timeout. */
-export type EvalTimeoutLimits = Pick<
-  ExecSessionLimits,
-  'minTimeoutMs' | 'syncDefaultMs' | 'syncMaxMs' | 'asyncDefaultMs' | 'asyncMaxMs'
->;
 
 export interface RunEvalOptions {
   /** Async dispatch: return a receipt at once and deliver the result to `onSettled`. */
   async?: boolean;
-  /**
-   * Explicit timeout in ms. Omitted: 30000 for sync, 7200000 for async.
-   * Below the 1000ms floor it is clamped up; above the mode's cap it rejects
-   * with `INVALID_ARGUMENT`.
-   */
+  /** Explicit timeout in ms; omitted means no wall-clock deadline. */
   timeoutMs?: number;
   /** Task-store id allocated by C08; echoed on the receipt and the settlement. */
   evalTaskId?: string;
@@ -58,30 +46,18 @@ export interface RunEvalOptions {
 }
 
 /**
- * Resolves the eval deadline. Separated out because the table in protocol §4 is
- * a hard contract: async omitted means the 7200s cap, not 30s.
+ * Resolves the eval deadline. `undefined` means the eval runs until it settles
+ * on its own; an explicit value is the only wall-clock bound.
  */
-export function resolveEvalTimeout(
-  asyncMode: boolean,
-  timeoutMs?: number,
-  limits: EvalTimeoutLimits = DEFAULT_EXEC_SESSION_LIMITS,
-): number {
-  const fallback = asyncMode ? limits.asyncDefaultMs : limits.syncDefaultMs;
-  const maximum = asyncMode ? limits.asyncMaxMs : limits.syncMaxMs;
-  if (timeoutMs === undefined) return fallback;
-
-  if (!Number.isFinite(timeoutMs)) {
-    throw new ReplError('INVALID_ARGUMENT', `timeout must be a finite number, got ${String(timeoutMs)}`);
-  }
-  if (timeoutMs > maximum) {
+export function resolveEvalTimeout(timeoutMs?: number): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
     throw new ReplError(
       'INVALID_ARGUMENT',
-      `${asyncMode ? 'async' : 'sync'} timeout ${timeoutMs}ms exceeds the ${maximum}ms limit`,
+      `timeout must be a positive finite number, got ${String(timeoutMs)}`,
     );
   }
-  const floored = Math.floor(timeoutMs);
-  if (floored < limits.minTimeoutMs) return limits.minTimeoutMs;
-  return floored;
+  return Math.floor(timeoutMs);
 }
 
 /**
@@ -101,7 +77,7 @@ export async function runEval(
   options: RunEvalOptions = {},
 ): Promise<EvalSettlement> {
   const asyncMode = options.async === true;
-  const timeoutMs = resolveEvalTimeout(asyncMode, options.timeoutMs, session.limits);
+  const timeoutMs = resolveEvalTimeout(options.timeoutMs);
 
   if (asyncMode) {
     return await session.lock.run(() => dispatchEval(session, code, timeoutMs, options));
@@ -122,7 +98,7 @@ function dispatchReceipt(ev: ActiveEval): EvalSettlement {
     truncated: {},
     contextReset: false,
     stateRestored: 'none',
-    budget: { calls: 0, callsLimit: ev.callsLimit },
+    budget: { calls: 0 },
     asyncDispatched: true,
   };
   if (ev.evalTaskId !== undefined) receipt.evalTaskId = ev.evalTaskId;
@@ -133,12 +109,12 @@ function dispatchReceipt(ev: ActiveEval): EvalSettlement {
 async function dispatchEval(
   session: ExecSession,
   code: string,
-  timeoutMs: number,
+  timeoutMs: number | undefined,
   options: RunEvalOptions,
 ): Promise<EvalSettlement> {
   const ev = await session.beginEval({
     async: true,
-    timeoutMs,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(options.evalTaskId === undefined ? {} : { evalTaskId: options.evalTaskId }),
   });
   const executor = session.executor;
@@ -174,12 +150,12 @@ async function dispatchEval(
 async function executeEval(
   session: ExecSession,
   code: string,
-  timeoutMs: number,
+  timeoutMs: number | undefined,
   options: RunEvalOptions,
 ): Promise<EvalSettlement> {
   const ev = await session.beginEval({
     async: false,
-    timeoutMs,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(options.evalTaskId === undefined ? {} : { evalTaskId: options.evalTaskId }),
   });
   const executor = session.executor;
@@ -199,6 +175,7 @@ async function executeEval(
 }
 
 function armTimers(session: ExecSession, ev: ActiveEval): void {
+  if (ev.deadline === undefined) return;
   const softDelay = Math.max(0, ev.deadline - session.now());
   ev.softTimer = setTimeout(() => {
     softStop(session, ev, 'soft');

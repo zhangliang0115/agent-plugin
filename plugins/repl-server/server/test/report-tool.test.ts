@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { INSTRUCTIONS } from '../src/mcp/discover.ts';
 import type { RequestIdentity } from '../src/ports.ts';
 import {
   ReportRateLimitError,
@@ -295,11 +294,4 @@ test('unwired and storage failures use the frozen tool error codes', async () =>
     ok: false,
     error: { code: 'REPORT_FAILED', message: 'disk full' },
   });
-});
-
-test('discover instructions describe report_problem as a top-level MCP tool', () => {
-  assert.ok(INSTRUCTIONS.includes('## Top-level MCP tools (not available inside run_script)'));
-  assert.ok(INSTRUCTIONS.includes('report_problem({ title, detail, severity, context? })'));
-  assert.ok(INSTRUCTIONS.includes('not as tools.report_problem'));
-  assert.ok(INSTRUCTIONS.includes('Never include credentials or secret values.'));
 });

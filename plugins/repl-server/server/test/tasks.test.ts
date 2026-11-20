@@ -10,9 +10,7 @@ import {
   isCreateTaskResult,
   McpTaskStore,
   resolveDispatchMode,
-  TASK_ASYNC_MAX_MS,
   TASK_POLL_INTERVAL_MS,
-  TASK_RETENTION_MS,
   TASK_TTL_MS,
   TaskMethodError,
   updateMcpTask,
@@ -103,9 +101,6 @@ async function taskErrorAsync(fn: () => Promise<unknown>): Promise<TaskMethodErr
 
 test('task constants come from the frozen protocol values', () => {
   assert.equal(TASK_TTL_MS, 9_000_000);
-  assert.equal(TASK_ASYNC_MAX_MS, 7_200_000);
-  assert.equal(TASK_RETENTION_MS, 1_800_000);
-  assert.equal(TASK_ASYNC_MAX_MS + TASK_RETENTION_MS, TASK_TTL_MS);
   assert.equal(TASK_POLL_INTERVAL_MS, 500);
 });
 

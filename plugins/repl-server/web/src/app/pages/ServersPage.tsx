@@ -75,6 +75,9 @@ interface ServerView {
   url: string | null;
   envKeys: string[];
   headerKeys: string[];
+  envSecrets: Record<string, string>;
+  headerSecrets: Record<string, string>;
+  secretArgs: Array<{ index: number; secret: string }>;
   enabled: boolean;
   connectMode: ConnectMode;
   summary: string | null;
@@ -269,6 +272,12 @@ export function ServersPage(): React.ReactElement {
       dataIndex: 'state',
       width: 100,
       render: (value: string) => <StateTag state={value} />,
+    },
+    {
+      title: '密钥',
+      key: 'secrets',
+      width: 150,
+      render: (_value: unknown, server: ServerView) => <SecretNameTags server={server} />,
     },
     {
       title: '启用',
@@ -985,6 +994,9 @@ export function ServersPage(): React.ReactElement {
               <Descriptions.Item label="header 键名" span={2}>
                 {selected.headerKeys.join(', ') || '—'}
               </Descriptions.Item>
+              <Descriptions.Item label="密钥引用" span={2}>
+                <SecretRefTags server={selected} />
+              </Descriptions.Item>
               <Descriptions.Item label="summary" span={2}>
                 {selected.summary ?? '—'}
               </Descriptions.Item>
@@ -1154,6 +1166,11 @@ export function ServersPage(): React.ReactElement {
               >
                 <Input.TextArea rows={2} placeholder={'Authorization\nX-Api-Key'} />
               </Form.Item>
+              {editing === null ? null : (
+                <Form.Item label="密钥引用（只读）">
+                  <SecretRefTags server={editing} />
+                </Form.Item>
+              )}
               <Form.Item name="connectMode" label="connectMode">
                 <Select
                   options={[
@@ -1602,6 +1619,59 @@ function aiErrorText(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function secretNames(server: ServerView): string[] {
+  return [
+    ...new Set([
+      ...Object.values(server.envSecrets ?? {}),
+      ...Object.values(server.headerSecrets ?? {}),
+      ...(server.secretArgs ?? []).map((entry) => entry.secret),
+    ]),
+  ];
+}
+
+function SecretNameTags({ server }: { server: ServerView }): React.ReactElement {
+  const names = secretNames(server);
+  if (names.length === 0) return <span className="muted">—</span>;
+  return (
+    <Space size={[4, 4]} wrap>
+      {names.slice(0, 2).map((name) => (
+        <Tag key={name} bordered={false} className="mono">
+          {name}
+        </Tag>
+      ))}
+      {names.length > 2 ? <span className="muted">+{names.length - 2}</span> : null}
+    </Space>
+  );
+}
+
+function secretRefLabels(server: ServerView): string[] {
+  const labels: string[] = [];
+  for (const [key, secret] of Object.entries(server.envSecrets ?? {})) {
+    labels.push(`env.${key} ← ${secret}`);
+  }
+  for (const [key, secret] of Object.entries(server.headerSecrets ?? {})) {
+    labels.push(`headers.${key} ← ${secret}`);
+  }
+  for (const entry of server.secretArgs ?? []) {
+    labels.push(`args[${entry.index}] ← ${entry.secret}`);
+  }
+  return labels;
+}
+
+function SecretRefTags({ server }: { server: ServerView }): React.ReactElement {
+  const labels = secretRefLabels(server);
+  if (labels.length === 0) return <span className="muted">—</span>;
+  return (
+    <Space size={[4, 4]} wrap>
+      {labels.map((label) => (
+        <Tag key={label} bordered={false} color="blue" className="mono">
+          {label}
+        </Tag>
+      ))}
+    </Space>
+  );
 }
 
 function missingSecrets(error: unknown): string[] {

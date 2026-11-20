@@ -28,6 +28,7 @@ import {
 } from '../discovery/types.ts';
 import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID } from '../db/servers.ts';
 import { systemClock, type Clock, type OfficialToolsSync } from '../ports.ts';
+import { isSecretRef } from '../secrets/resolve.ts';
 
 // ---------------------------------------------------------------------------
 // Shared admin HTTP primitives
@@ -510,6 +511,12 @@ export interface ServerView
   args: string[];
   envKeys: string[];
   headerKeys: string[];
+  /** env key → secret name, for keys backed by a `$secret` reference. */
+  envSecrets: Record<string, string>;
+  /** header key → secret name. */
+  headerSecrets: Record<string, string>;
+  /** `args` positions backed by a `$secret` reference. */
+  secretArgs: Array<{ index: number; secret: string }>;
   /** Rendered by this module's `viewServer` (`null` for static). */
   toolDiscovery?: ToolDiscoveryConfig | null;
   state: string;
@@ -1078,6 +1085,15 @@ function renderArg(arg: CommandArg): string {
   return typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`;
 }
 
+/** Maps only the keys whose value is a `$secret` reference; literals stay hidden. */
+function secretRefs(values: Record<string, SecretValue>): Record<string, string> {
+  const refs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (isSecretRef(value)) refs[key] = value.$secret;
+  }
+  return refs;
+}
+
 /** Projects a record into the value-free admin view. */
 function viewServer(record: ServerRecord, runtime: ServerRuntimeState | null): ServerView {
   const fallback = record.enabled
@@ -1095,6 +1111,11 @@ function viewServer(record: ServerRecord, runtime: ServerRuntimeState | null): S
     url: record.url,
     envKeys: Object.keys(record.env).sort(),
     headerKeys: Object.keys(record.headers).sort(),
+    envSecrets: secretRefs(record.env),
+    headerSecrets: secretRefs(record.headers),
+    secretArgs: record.args.flatMap((arg, index) =>
+      isSecretRef(arg) ? [{ index, secret: arg.$secret }] : [],
+    ),
     enabled: record.enabled,
     connectMode: record.connectMode,
     summary: record.summary,

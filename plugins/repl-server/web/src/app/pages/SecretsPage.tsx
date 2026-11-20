@@ -1,5 +1,5 @@
 /** Secrets page: write-only values for keys declared by server env/header references. */
-import { App as AntApp, Button, Card, Empty, Form, Input, Space, Table, Tag, Typography } from 'antd';
+import { App as AntApp, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useCallback, useEffect, useState } from 'react';
@@ -27,6 +27,8 @@ export function SecretsPage(): React.ReactElement {
   const [secrets, setSecrets] = useState<SecretStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [revealing, setRevealing] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<{ name: string; value: string } | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -50,13 +52,27 @@ export function SecretsPage(): React.ReactElement {
     field?.focus?.();
   }
 
+  async function reveal(name: string): Promise<void> {
+    setRevealing(name);
+    try {
+      const response = await api.post<{ name: string; value: string }>(
+        `/secrets/${encodeURIComponent(name)}/reveal`,
+      );
+      setRevealed({ name: response.name, value: response.value });
+    } catch (error) {
+      message.error(failureText(error));
+    } finally {
+      setRevealing(null);
+    }
+  }
+
   async function submit(values: SecretFormValues): Promise<void> {
     const name = values.name.trim();
     setSaving(true);
     try {
       await api.put(`/secrets/${encodeURIComponent(name)}`, { value: values.value });
       form.resetFields(['value']);
-      message.success(`已写入密钥 ${name}（值不回读）。`);
+      message.success(`已写入密钥 ${name}。`);
       await load();
     } catch (error) {
       message.error(failureText(error));
@@ -83,11 +99,21 @@ export function SecretsPage(): React.ReactElement {
     },
     {
       title: '操作',
-      width: 120,
+      width: 190,
       render: (_value, record) => (
-        <Button size="small" onClick={() => rotate(record.name)}>
-          写入/轮换
-        </Button>
+        <Space size={4}>
+          <Button
+            size="small"
+            disabled={!record.configured}
+            loading={revealing === record.name}
+            onClick={() => void reveal(record.name)}
+          >
+            查看
+          </Button>
+          <Button size="small" onClick={() => rotate(record.name)}>
+            写入/轮换
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -98,7 +124,7 @@ export function SecretsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="密钥"
-        description="写入 env / header 引用的密钥值，只写不读。GET /secrets 只返回键名与是否已设置；写入后无法回读，只能轮换。"
+        description="写入 env / header 引用的密钥值。列表只返回键名与是否已设置；点击“查看”会单独请求一次明文，响应不缓存，关闭窗口即从页面移除。"
         actions={
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
@@ -118,7 +144,7 @@ export function SecretsPage(): React.ReactElement {
             <Input className="mono" placeholder="DATABASE_URL" autoComplete="off" />
           </Form.Item>
           <Form.Item name="value" label="值" rules={[{ required: true, whitespace: true, message: '值不能为空' }]}>
-            <Input.Password placeholder="值只在写入时发送，永不回读" autoComplete="new-password" />
+            <Input.Password placeholder="值只在写入时发送；需要时可点“查看”" autoComplete="new-password" />
           </Form.Item>
           <Space>
             <Button type="primary" htmlType="submit" loading={saving}>
@@ -154,6 +180,26 @@ export function SecretsPage(): React.ReactElement {
           }}
         />
       </Card>
+
+      <Modal
+        open={revealed !== null}
+        title={revealed === null ? '查看密钥' : `查看密钥 ${revealed.name}`}
+        footer={<Button onClick={() => setRevealed(null)}>关闭</Button>}
+        onCancel={() => setRevealed(null)}
+        destroyOnHidden
+      >
+        {revealed === null ? null : (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Input.Password value={revealed.value} readOnly autoComplete="off" />
+            <Typography.Text type="secondary" copyable={{ text: revealed.value }}>
+              复制明文
+            </Typography.Text>
+            <Typography.Text type="secondary">
+              明文只在本次请求中返回；不要把密钥粘贴到报告或聊天里。
+            </Typography.Text>
+          </Space>
+        )}
+      </Modal>
     </div>
   );
 }

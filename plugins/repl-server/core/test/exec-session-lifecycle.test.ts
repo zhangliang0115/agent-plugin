@@ -71,7 +71,7 @@ function makeSession(
   return new ExecSession({
     id: 'es_lifecycle',
     createExecutor: () => executor,
-    limits: { minTimeoutMs: 5, graceMs: 20, terminateMs: 20 },
+    limits: { graceMs: 20, terminateMs: 20 },
     ...(options.serve === undefined ? {} : { serve: options.serve }),
     ...(options.events === undefined ? {} : { onEvent: (event) => options.events?.push(event) }),
   });

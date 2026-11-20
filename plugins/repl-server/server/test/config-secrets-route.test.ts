@@ -1,4 +1,4 @@
-/** GET /admin/api/secrets: stored keys plus every declared config key, values never read. */
+/** GET /admin/api/secrets lists keys; POST /secrets/:name/reveal is the only read. */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -115,4 +115,31 @@ test('GET /secrets unions stored names with env, header and arg declarations', a
   for (const forbidden of ['secret-value', 'stored-value', 'literal-value', 'production']) {
     assert.equal(serialized.includes(forbidden), false, `response leaked ${forbidden}`);
   }
+});
+
+test('POST /secrets/:name/reveal returns exactly one stored value', async (t) => {
+  const { handler } = await fixture(t);
+
+  const revealed = await handler({
+    method: 'POST',
+    path: '/admin/api/secrets/pg_db_url/reveal',
+  });
+  assert.deepEqual(revealed, { status: 200, body: { name: 'pg_db_url', value: 'postgres://secret-value' } });
+
+  const missing = await handler({
+    method: 'POST',
+    path: '/admin/api/secrets/not_set/reveal',
+  });
+  assert.equal(missing?.status, 404);
+  assert.equal((missing?.body as { error: { code: string } }).error.code, 'SECRET_NOT_FOUND');
+
+  const invalid = await handler({
+    method: 'POST',
+    path: '/admin/api/secrets/__proto__/reveal',
+  });
+  assert.equal(invalid?.status, 400);
+  assert.equal((invalid?.body as { error: { code: string } }).error.code, 'INVALID_FIELD');
+
+  const listed = await getSecrets(handler);
+  assert.equal(JSON.stringify(listed.body).includes('secret-value'), false);
 });

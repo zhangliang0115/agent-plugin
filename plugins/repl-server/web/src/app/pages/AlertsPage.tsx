@@ -176,7 +176,7 @@ export function AlertsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="告警"
-        description="配置企业微信 webhook 与最低严重级，预览内容并发送测试消息。webhook 只写不读；报告数据在“报告”页查看。"
+        description="配置企业微信 webhook 与最低严重级，预览内容并发送测试消息。webhook 值的查看与替换在“密钥”页；报告数据在“报告”页查看。"
         actions={
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
@@ -223,7 +223,7 @@ export function AlertsPage(): React.ReactElement {
               ) : (
                 <Form.Item
                   label="企业微信 webhook"
-                  extra={config.webhook.configured ? '输入新值可替换（留空保持不变）。' : '值只写不读。'}
+                  extra={config.webhook.configured ? '输入新值可替换（留空保持不变）。' : '保存后可在“密钥”页查看。'}
                 >
                   <Input.Password
                     value={webhookValue}

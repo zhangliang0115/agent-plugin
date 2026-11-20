@@ -31,14 +31,13 @@ export interface ServeClient {
 }
 
 /**
- * L1 per-call defaults from the design: 30s for file-class official tools and
- * 60s for third-party MCP calls. `LIMITS` has no dedicated tool-call entries
- * yet, so the MCP value is derived from the sync default; tests shrink both
- * through {@link ServeProxyOptions}.
+ * L1 per-call defaults: 30s for file-class official tools and 60s for
+ * third-party MCP calls. These bound one tool call, not an eval; tests shrink
+ * both through {@link ServeProxyOptions}.
  */
 export const DEFAULT_CALL_TIMEOUTS = {
-  officialMs: LIMITS.syncDefaultMs,
-  mcpMs: LIMITS.syncDefaultMs * 2,
+  officialMs: 30_000,
+  mcpMs: 60_000,
 } as const;
 
 export interface ServeProxyOptions {

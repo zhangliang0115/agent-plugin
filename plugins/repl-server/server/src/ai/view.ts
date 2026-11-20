@@ -1,9 +1,18 @@
 /** Admin-facing rendering of a server record without secret values (08 §3.5). @module */
 
-import type { ServerRecord, ServerView } from '../admin/servers.ts';
+import type { SecretValue, ServerRecord, ServerView } from '../admin/servers.ts';
+import { isSecretRef } from '../secrets/resolve.ts';
 
 function renderArg(arg: ServerRecord['args'][number]): string {
   return typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`;
+}
+
+function secretRefs(values: Record<string, SecretValue>): Record<string, string> {
+  const refs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (isSecretRef(value)) refs[key] = value.$secret;
+  }
+  return refs;
 }
 
 /**
@@ -27,6 +36,11 @@ export function renderServerView(record: ServerRecord): ServerView {
     url: record.url,
     envKeys: Object.keys(record.env).sort(),
     headerKeys: Object.keys(record.headers).sort(),
+    envSecrets: secretRefs(record.env),
+    headerSecrets: secretRefs(record.headers),
+    secretArgs: record.args.flatMap((arg, index) =>
+      isSecretRef(arg) ? [{ index, secret: arg.$secret }] : [],
+    ),
     enabled: record.enabled,
     connectMode: record.connectMode,
     summary: record.summary,

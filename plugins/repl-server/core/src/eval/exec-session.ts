@@ -19,7 +19,7 @@
  * @module
  */
 import { LIMITS } from '../constants.ts';
-import { BudgetExceededError, ReplError, StaleEvalError } from '../errors.ts';
+import { ReplError, StaleEvalError } from '../errors.ts';
 import type { TimeoutInfo, TimeoutLayer, ToolCallRequest, TruncationFlags } from '../types.ts';
 import { hardStop, type HardStopReport } from './stop.ts';
 
@@ -45,7 +45,7 @@ export interface EvalSettlement {
   contextReset: boolean;
   stateRestored: 'lastGood' | 'none';
   stateSnapshot?: 'too-large';
-  budget: { calls: number; callsLimit: number };
+  budget: { calls: number };
   evalTaskId?: string;
   stoppedBy?: 'user' | 'refusal';
   neverRan?: 'person' | 'other';
@@ -114,8 +114,9 @@ export interface ActiveEval {
   readonly evalId: number;
   readonly epoch: number;
   readonly async: boolean;
-  readonly timeoutMs: number;
-  readonly deadline: number;
+  /** Omitted means the eval has no wall-clock deadline. */
+  readonly timeoutMs?: number;
+  readonly deadline?: number;
   readonly startedAt: number;
   /** L2 soft wall clears this; no new tool calls are accepted afterwards. */
   accepting: boolean;
@@ -124,8 +125,6 @@ export interface ActiveEval {
   /** Call sequences that already produced a result, so a replay is dropped. */
   readonly completedCallSeqs: Set<number>;
   calls: number;
-  readonly callsLimit: number;
-  budgetExhausted: boolean;
   /** Set by `softStop`; drives "always rebuild after L2" in the run loop. */
   stopLayer?: TimeoutLayer;
   /** Set by `hardStop` so the same eval cannot trigger a second worker reset. */
@@ -158,7 +157,7 @@ export interface AcceptedToolCall {
 
 /** Wiring hook for audit and admin events; observer errors never escape. */
 export type EvalSessionEvent =
-  | { type: 'eval_start'; evalId: number; epoch: number; async: boolean; timeoutMs: number }
+  | { type: 'eval_start'; evalId: number; epoch: number; async: boolean; timeoutMs?: number }
   | { type: 'eval_settle'; settlement: EvalSettlement }
   | { type: 'tool_call_dropped'; evalId: number; epoch: number; callSeq: number; reason: ToolCallDropReason }
   | { type: 'worker_reset'; report: HardStopReport };
@@ -173,34 +172,13 @@ export interface ExecSessionLimits {
   terminateMs: number;
   /** In-flight evals per execution session. Defaults to `LIMITS.inFlightPerExecSession` (8). */
   inFlightLimit: number;
-  /** Tool calls per eval. Defaults to `LIMITS.callsLimit` (50000). */
-  callsLimit: number;
-  /** Smallest accepted explicit timeout. Protocol §4 freezes 1000ms. */
-  minTimeoutMs: number;
-  /** Default when a sync eval passes no timeout. Defaults to `LIMITS.syncDefaultMs`. */
-  syncDefaultMs: number;
-  /** Upper bound for a sync eval. Defaults to `LIMITS.syncMaxMs`. */
-  syncMaxMs: number;
-  /** Default when an async eval passes no timeout. Defaults to `LIMITS.asyncDefaultMs`. */
-  asyncDefaultMs: number;
-  /** Upper bound for an async eval. Defaults to `LIMITS.asyncMaxMs`. */
-  asyncMaxMs: number;
 }
-
-/** Minimum eval timeout. Frozen by docs/protocol.md §4; `LIMITS` has no field for it. */
-export const EVAL_MIN_TIMEOUT_MS = 1_000;
 
 export const DEFAULT_EXEC_SESSION_LIMITS: ExecSessionLimits = {
   syncMs: LIMITS.syncMs,
   graceMs: LIMITS.graceMs,
   terminateMs: LIMITS.terminateMs,
   inFlightLimit: LIMITS.inFlightPerExecSession,
-  callsLimit: LIMITS.callsLimit,
-  minTimeoutMs: EVAL_MIN_TIMEOUT_MS,
-  syncDefaultMs: LIMITS.syncDefaultMs,
-  syncMaxMs: LIMITS.syncMaxMs,
-  asyncDefaultMs: LIMITS.asyncDefaultMs,
-  asyncMaxMs: LIMITS.asyncMaxMs,
 };
 
 /** The serve handle a hard wall may restart. */
@@ -237,7 +215,8 @@ export interface ExecSessionOptions {
 
 export interface BeginEvalOptions {
   async: boolean;
-  timeoutMs: number;
+  /** Omitted means no wall-clock deadline. */
+  timeoutMs?: number;
   evalTaskId?: string;
 }
 
@@ -297,8 +276,7 @@ export class EvalLock {
  *
  * `beginEval` registers the eval and lazily creates/restarts the executor;
  * `settleEval` is the only terminal transition. Tool messages go through
- * `acceptToolCall`, which enforces the `(epoch, evalId, callSeq)` triple and the
- * L4 budget.
+ * `acceptToolCall`, which enforces the `(epoch, evalId, callSeq)` triple.
  */
 export class ExecSession {
   readonly id: string;
@@ -341,12 +319,6 @@ export class ExecSession {
     assertLimit('graceMs', limits.graceMs, 0);
     assertLimit('terminateMs', limits.terminateMs, 1);
     assertLimit('inFlightLimit', limits.inFlightLimit, 1);
-    assertLimit('callsLimit', limits.callsLimit, 1);
-    assertLimit('minTimeoutMs', limits.minTimeoutMs, 1);
-    assertLimit('syncDefaultMs', limits.syncDefaultMs, 1);
-    assertLimit('syncMaxMs', limits.syncMaxMs, 1);
-    assertLimit('asyncDefaultMs', limits.asyncDefaultMs, 1);
-    assertLimit('asyncMaxMs', limits.asyncMaxMs, 1);
     this.limits = limits;
     this.lastEvalAtValue = this.nowFn();
   }
@@ -431,16 +403,15 @@ export class ExecSession {
       evalId,
       epoch: this.workerEpochValue,
       async: options.async,
-      timeoutMs: options.timeoutMs,
-      deadline: startedAt + options.timeoutMs,
+      ...(options.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: options.timeoutMs, deadline: startedAt + options.timeoutMs }),
       startedAt,
       accepting: true,
       abort: new AbortController(),
       inflight: new Map(),
       completedCallSeqs: new Set(),
       calls: 0,
-      callsLimit: this.limits.callsLimit,
-      budgetExhausted: false,
       stopped: false,
       settled: false,
       completed: completion.promise,
@@ -450,7 +421,13 @@ export class ExecSession {
 
     this.active.set(evalId, ev);
     this.lastEvalAtValue = startedAt;
-    this.emit({ type: 'eval_start', evalId, epoch: ev.epoch, async: ev.async, timeoutMs: ev.timeoutMs });
+    this.emit({
+      type: 'eval_start',
+      evalId,
+      epoch: ev.epoch,
+      async: ev.async,
+      ...(ev.timeoutMs === undefined ? {} : { timeoutMs: ev.timeoutMs }),
+    });
     return ev;
   }
 
@@ -491,7 +468,7 @@ export class ExecSession {
       truncated: fields.truncated ?? {},
       contextReset: fields.contextReset ?? false,
       stateRestored: fields.stateRestored ?? 'none',
-      budget: { calls: ev.calls, callsLimit: ev.callsLimit },
+      budget: { calls: ev.calls },
     };
     if (fields.result !== undefined) settlement.result = fields.result;
     if (fields.error !== undefined) settlement.error = fields.error;
@@ -504,10 +481,8 @@ export class ExecSession {
     const layer = fields.layer;
     if (layer !== undefined) {
       settlement.layer = layer;
-      settlement.timeout = {
-        layer,
-        limitMs: layer === 'sync' ? this.limits.syncMs : ev.timeoutMs,
-      };
+      const limitMs = layer === 'sync' ? this.limits.syncMs : ev.timeoutMs;
+      if (limitMs !== undefined) settlement.timeout = { layer, limitMs };
     }
 
     ev.settlement = settlement;
@@ -521,8 +496,7 @@ export class ExecSession {
    *
    * Returns `undefined` — and emits `tool_call_dropped` — for an unknown eval, a
    * stale worker epoch, a soft-stopped eval, or a call sequence that is either
-   * still in flight or already completed. L4 overrun throws
-   * `BudgetExceededError`; the bridge turns that into the call's error result.
+   * still in flight or already completed.
    */
   acceptToolCall(request: ToolCallRequest): AcceptedToolCall | undefined {
     const ev = this.active.get(request.evalId);
@@ -546,11 +520,6 @@ export class ExecSession {
       this.drop(request, 'duplicate_call');
       return undefined;
     }
-    if (ev.calls >= ev.callsLimit) {
-      ev.budgetExhausted = true;
-      throw new BudgetExceededError(ev.callsLimit);
-    }
-
     ev.calls += 1;
     const controller = new AbortController();
     const call: InflightCall = {

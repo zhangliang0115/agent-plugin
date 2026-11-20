@@ -37,7 +37,8 @@ export interface RequestIdentity {
 
 export interface ScriptRequest {
   code: string;
-  timeoutMs: number;
+  /** Omitted means no wall-clock deadline. */
+  timeoutMs?: number;
   async: boolean;
   workspace?: string;
   visibleTools?: string[];

@@ -11,7 +11,6 @@ export interface McpServerSource {
   readonly transport: string;
   readonly enabled: boolean;
   readonly category: string | null;
-  readonly summary: string | null;
   readonly tags: readonly string[];
 }
 
@@ -28,8 +27,6 @@ export interface McpToolSource {
 export interface McpServerOverview {
   readonly id: string;
   readonly category: string;
-  /** Shown in discover `instructions`; never in the 2KB `run_script` description. */
-  readonly summary: string;
   readonly tags: readonly string[];
   readonly toolCount: number;
   readonly toolNames: readonly string[];
@@ -55,7 +52,6 @@ const FIXED_GUIDANCE = [
 ].join('\n');
 const ID_MAX_CHARS = 48;
 const CATEGORY_MAX_CHARS = 24;
-const ABOUT_MAX_CHARS = 80;
 
 /** Collapses untrusted admin/AI text to one line and clips it. */
 export function clipText(value: string | null | undefined, maxChars: number): string {
@@ -114,7 +110,6 @@ export function collectVisibleMcpServers(input: VisibleServerInput): McpServerOv
     overviews.push({
       id: server.id,
       category: clipText(server.category, CATEGORY_MAX_CHARS),
-      summary: clipText(server.summary, ABOUT_MAX_CHARS),
       tags: [...server.tags],
       toolCount: visibleTools.length,
       toolNames: visibleTools.map((tool) => tool.name),
@@ -125,8 +120,7 @@ export function collectVisibleMcpServers(input: VisibleServerInput): McpServerOv
 
 /**
  * One `## MCP servers` line: `<id>  [<category>]  <N> tools`. Summary, tool
- * names and tags stay out of the 2KB description; the overview in `search_tools`
- * carries them instead.
+ * names and tags stay out of the 2KB description; `search_tools` carries them.
  */
 export function formatServerLine(server: McpServerOverview): string {
   const id = clipText(server.id, ID_MAX_CHARS) || '(unnamed server)';

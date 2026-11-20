@@ -317,7 +317,7 @@ test('a client rejection after the timeout does not leak', async () => {
   }
 });
 
-test('default L1 timeouts follow constants.ts', () => {
-  assert.equal(DEFAULT_CALL_TIMEOUTS.officialMs, LIMITS.syncDefaultMs);
-  assert.equal(DEFAULT_CALL_TIMEOUTS.mcpMs, LIMITS.syncDefaultMs * 2);
+test('default L1 timeouts stay 30s and 60s', () => {
+  assert.equal(DEFAULT_CALL_TIMEOUTS.officialMs, 30_000);
+  assert.equal(DEFAULT_CALL_TIMEOUTS.mcpMs, 60_000);
 });

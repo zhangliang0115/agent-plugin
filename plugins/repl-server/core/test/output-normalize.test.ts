@@ -22,7 +22,7 @@ test('estimateTokens counts an astral character once', () => {
   assert.equal(estimateTokens('😀😀'), 2);
 });
 
-test('short fields pass through and nothing is flagged', () => {
+test('fields pass through and nothing is flagged', () => {
   const out = normalizeOutput({
     result: 'ok',
     stdout: 'out',
@@ -65,110 +65,14 @@ test('falls back to String for values JSON cannot serialize', () => {
   assert.match(String(normalizeOutput({ result: () => 1 }).result), /^\(\) =>/);
 });
 
-test('caps result at the field limit, keeping the head', () => {
-  const out = normalizeOutput({ result: 'abcdefghijklmno' }, { resultChars: 10 });
-  assert.equal(out.result, 'abcdefghij');
-  assert.deepEqual(out.truncated, { result: true });
-});
-
-test('caps each log stream at the field limit, keeping the tail', () => {
-  const out = normalizeOutput(
-    { stdout: '0123456789abcdef', stderr: 'abcdefghijklmnop' },
-    { resultChars: 8 },
-  );
-  assert.equal(out.stdout, '89abcdef');
-  assert.equal(out.stderr, 'ijklmnop');
-  assert.deepEqual(out.truncated, { stdout: true, stderr: true });
-});
-
-test('keeps the last log lines and flags the stream', () => {
-  const out = normalizeOutput({ stdout: 'l1\nl2\nl3\nl4\nl5\n' }, { logLines: 3 });
-  assert.equal(out.stdout, 'l3\nl4\nl5\n');
-  assert.deepEqual(out.truncated, { stdout: true });
-});
-
-test('a trailing newline does not invent a line', () => {
-  assert.equal(normalizeOutput({ stdout: 'a\nb\nc\n' }, { logLines: 3 }).stdout, 'a\nb\nc\n');
-  assert.deepEqual(normalizeOutput({ stdout: 'a\nb\nc\n' }, { logLines: 3 }).truncated, {});
-  assert.equal(normalizeOutput({ stdout: 'a\nb\nc' }, { logLines: 3 }).stdout, 'a\nb\nc');
-  assert.equal(normalizeOutput({ stdout: 'a\nb\nc' }, { logLines: 2 }).stdout, 'b\nc');
-});
-
-test('applies the line cap before the character cap', () => {
-  const out = normalizeOutput({ stdout: 'aaaa\nbbbb\ncccc' }, { logLines: 2, resultChars: 4 });
-  assert.equal(out.stdout, 'cccc');
-  assert.deepEqual(out.truncated, { stdout: true });
-});
-
-test('flags every field that was cut', () => {
-  const out = normalizeOutput(
-    { result: 'r'.repeat(20), stdout: 'a\nb\nc\nd\n', stderr: 'e'.repeat(20) },
-    { resultChars: 10, logLines: 2 },
-  );
-  assert.equal(out.result, 'r'.repeat(10));
-  assert.equal(out.stdout, 'c\nd\n');
-  assert.equal(out.stderr, 'e'.repeat(10));
-  assert.deepEqual(out.truncated, { result: true, stdout: true, stderr: true });
-});
-
-test('trims result to the token budget left by the logs', () => {
-  const out = normalizeOutput(
-    { result: 'r'.repeat(400), stdout: 's'.repeat(40) },
-    { resultChars: 1_000, logLines: 100, estimatedTokens: 50 },
-  );
-  // stdout is 10 tokens; the result gets 40 tokens, i.e. 160 ASCII characters.
-  assert.equal(out.stdout, 's'.repeat(40));
-  assert.equal(out.result, 'r'.repeat(160));
-  assert.deepEqual(out.truncated, { result: true });
-});
-
-test('empties result before cutting logs', () => {
-  const out = normalizeOutput(
-    { result: 'r'.repeat(400), stdout: 's'.repeat(40) },
-    { resultChars: 1_000, logLines: 100, estimatedTokens: 10 },
-  );
-  assert.equal(out.result, '');
-  assert.equal(out.stdout, 's'.repeat(40));
-  assert.deepEqual(out.truncated, { result: true });
-});
-
-test('keeps stderr and the tail of stdout when logs alone exceed the budget', () => {
-  const out = normalizeOutput(
-    { stdout: 'o'.repeat(400), stderr: 'e'.repeat(40) },
-    { resultChars: 1_000, logLines: 100, estimatedTokens: 20 },
-  );
-  // stderr (10 tokens) survives whole; stdout keeps its last 10 tokens (40 characters).
-  assert.equal(out.stderr, 'e'.repeat(40));
-  assert.equal(out.stdout, 'o'.repeat(40));
-  assert.deepEqual(out.truncated, { stdout: true });
-});
-
-test('uses the non-ASCII estimate so Chinese results stop at the token limit', () => {
-  const out = normalizeOutput({ result: '中'.repeat(60_000) });
-  assert.equal(out.result, '中'.repeat(20_000));
-  assert.deepEqual(out.truncated, { result: true });
-});
-
-test('default limits cap each text field at 30k characters', () => {
-  const out = normalizeOutput({ result: 'x'.repeat(30_001) });
-  assert.equal(out.result, 'x'.repeat(30_000));
-  assert.equal(out.truncated.result, true);
-});
-
-test('default limits keep the last 1000 log lines', () => {
-  const stdout = Array.from({ length: 1_001 }, (_value, index) => `line ${index}`).join('\n');
-  const out = normalizeOutput({ stdout });
-  const lines = out.stdout.split('\n');
-  assert.equal(lines.length, 1_000);
-  assert.equal(lines[0], 'line 1');
-  assert.equal(lines.at(-1), 'line 1000');
-  assert.equal(out.truncated.stdout, true);
-});
-
-test('never splits a surrogate pair when cutting', () => {
-  assert.equal(normalizeOutput({ result: 'a😀b' }, { resultChars: 2 }).result, 'a');
-  assert.equal(normalizeOutput({ result: 'a😀b' }, { resultChars: 3 }).result, 'a😀');
-  assert.equal(normalizeOutput({ stdout: 'a😀b' }, { resultChars: 2 }).stdout, 'b');
+test('text output is never truncated', () => {
+  const result = 'x'.repeat(1_000_000);
+  const stdout = Array.from({ length: 5_000 }, (_value, index) => `line ${index}`).join('\n');
+  const out = normalizeOutput({ result, stdout, stderr: 'e'.repeat(200_000) });
+  assert.equal(out.result, result);
+  assert.equal(out.stdout, stdout);
+  assert.equal(out.stderr, 'e'.repeat(200_000));
+  assert.deepEqual(out.truncated, {});
 });
 
 test('caps images at eight and counts the rest as omitted', () => {

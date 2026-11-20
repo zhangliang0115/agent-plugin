@@ -196,7 +196,7 @@ test('tools/call run_script runs synchronously by default and keeps media outsid
   const request = h.gateway.runCalls[0];
   assert.ok(request !== undefined);
   assert.equal(request.code, 'return 1');
-  assert.equal(request.timeoutMs, 30_000);
+  assert.equal(request.timeoutMs, undefined);
   assert.equal(request.async, false);
   assert.equal(request.identity, IDENTITY);
 });
@@ -222,16 +222,11 @@ test('run_script forwards workspace, visibleTools, excludeTags and the requested
   assert.deepEqual(request.excludeTags, ['destructive']);
 });
 
-test('sync timeouts above 600000 fail with INVALID_ARGUMENT instead of truncating', async () => {
+test('sync timeouts are not capped', async () => {
   const h = harness();
-  const over = asCallResult(await callTool('run_script', { code: 'x', timeout: 600_001 }, h.ctx));
-  assert.equal(over.isError, true);
-  assert.match(textOf(over), /<error>INVALID_ARGUMENT: .*synchronous maximum 600000/);
-  assert.equal(h.gateway.runCalls.length, 0);
-
-  const boundary = asCallResult(await callTool('run_script', { code: 'x', timeout: 600_000 }, h.ctx));
-  assert.equal(boundary.isError, false);
-  assert.equal(h.gateway.runCalls[0]?.timeoutMs, 600_000);
+  const result = asCallResult(await callTool('run_script', { code: 'x', timeout: 600_001 }, h.ctx));
+  assert.equal(result.isError, false);
+  assert.equal(h.gateway.runCalls[0]?.timeoutMs, 600_001);
 });
 
 test('argument validation failures are tool-layer errors', async () => {
@@ -244,9 +239,9 @@ test('argument validation failures are tool-layer errors', async () => {
   assert.equal(extra.isError, true);
   assert.match(textOf(extra), /does not accept the argument/);
 
-  const badTimeout = asCallResult(await callTool('run_script', { code: 'x', timeout: 999 }, h.ctx));
+  const badTimeout = asCallResult(await callTool('run_script', { code: 'x', timeout: 0 }, h.ctx));
   assert.equal(badTimeout.isError, true);
-  assert.match(textOf(badTimeout), /timeout must be &gt;= 1000/);
+  assert.match(textOf(badTimeout), /timeout must be &gt;= 1/);
   assert.equal(h.gateway.runCalls.length, 0);
 });
 
@@ -276,10 +271,10 @@ test('async: true always returns a normal result with an evalTaskId', async () =
   assert.equal(h.tasks.size, 0, 'async: true never creates an MCP task');
 });
 
-test('async: true without timeout defaults to the 7200000 ms cap', async () => {
+test('async: true without timeout has no deadline', async () => {
   const h = harness();
   await callTool('run_script', { code: 'x', async: true }, h.ctx);
-  assert.equal(h.gateway.dispatchCalls[0]?.timeoutMs, 7_200_000);
+  assert.equal(h.gateway.dispatchCalls[0]?.timeoutMs, undefined);
 });
 
 test('a declaring client gets a CreateTaskResult above 30000 ms', async () => {
@@ -332,17 +327,16 @@ test('the task decision follows the frozen table boundaries', async () => {
   assert.equal(headless.gateway.dispatchCalls.length, 0);
 });
 
-test('long timeouts are allowed for declaring clients but rejected for sync-only clients', async () => {
+test('long timeouts are accepted for every client', async () => {
   const declaring = harness({ tasksDeclared: true });
   const result = await callTool('run_script', { code: 'x', timeout: 700_000 }, declaring.ctx);
   assert.equal(isCreateTaskResult(result), true);
   assert.equal(declaring.gateway.dispatchCalls[0]?.timeoutMs, 700_000);
 
   const syncOnly = harness({ tasksDeclared: false });
-  const failure = asCallResult(await callTool('run_script', { code: 'x', timeout: 700_000 }, syncOnly.ctx));
-  assert.equal(failure.isError, true);
-  assert.match(textOf(failure), /INVALID_ARGUMENT/);
-  assert.equal(syncOnly.gateway.runCalls.length, 0);
+  const sync = asCallResult(await callTool('run_script', { code: 'x', timeout: 700_000 }, syncOnly.ctx));
+  assert.equal(sync.isError, false);
+  assert.equal(syncOnly.gateway.runCalls[0]?.timeoutMs, 700_000);
 });
 
 test('gateway failures become <repl-output><error> results', async () => {
@@ -404,26 +398,28 @@ test('search_tools and describe_tools report validation failures as isError JSON
   assert.equal(h.catalog.calls, 0);
 });
 
-test('describe_tools returns schemas and omitted names', async () => {
+test('describe_tools returns schemas and fails on unknown names', async () => {
   const h = harness();
   const result = asCallResult(
     await callTool('describe_tools', { names: ['Read', 'pg.query', 'missing'] }, h.ctx),
   );
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, true);
   assert.deepEqual(parseText(result), {
-    tools: [
-      { name: 'Read', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } } } },
-      {
-        name: 'pg.query',
-        inputSchema: {
-          type: 'object',
-          properties: { sql: { type: 'string' } },
-          required: ['sql'],
-        },
-      },
-    ],
-    omitted: ['missing'],
+    ok: false,
+    error: {
+      code: 'UNKNOWN_TOOL',
+      message: 'unknown or invisible tool names: missing; use search_tools to find canonical names',
+    },
   });
+});
+
+test('describe_tools rejects more than ten names at validation', async () => {
+  const h = harness();
+  const names = Array.from({ length: 11 }, (_value, index) => `tool_${index}`);
+  const result = asCallResult(await callTool('describe_tools', { names }, h.ctx));
+  assert.equal(result.isError, true);
+  assert.equal((parseText(result) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');
+  assert.match(textOf(result), /at most 10 item/);
 });
 
 test('search_tools applies the request visibility before matching', async () => {
@@ -453,17 +449,13 @@ test('search_tools applies the request visibility before matching', async () => 
   );
 });
 
-test('describe_tools omits tools outside the request visibility', async () => {
+test('describe_tools fails on tools outside the request visibility', async () => {
   const h = harness({ visibility: { allowedServers: ['github'], allowedTags: null } });
   const result = asCallResult(
     await callTool('describe_tools', { names: ['Read', 'pg.query'] }, h.ctx),
   );
-  assert.deepEqual(parseText(result), {
-    tools: [
-      { name: 'Read', inputSchema: { type: 'object', properties: { file_path: { type: 'string' } } } },
-    ],
-    omitted: ['pg.query'],
-  });
+  assert.equal(result.isError, true);
+  assert.equal((parseText(result) as { error: { code: string } }).error.code, 'UNKNOWN_TOOL');
 });
 
 test('search_tools rejects server, category and tags outside the per-request enums', async () => {

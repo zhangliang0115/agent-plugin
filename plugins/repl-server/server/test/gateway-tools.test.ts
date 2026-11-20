@@ -68,6 +68,22 @@ test('Bash args are clamped to the eval deadline and keep the 120s default', asy
   assert.equal(typeof call.deadline, 'number');
 });
 
+test('without an eval deadline Bash keeps its 120s default', async (t) => {
+  const { gateway, calls } = createGateway(t);
+  const base = request(`await tools.Bash({ command: 'echo hi' }); return 'done';`);
+  const noDeadline: ScriptRequest = {
+    code: base.code,
+    async: base.async,
+    identity: base.identity,
+  };
+  const outcome = await gateway.runScript(noDeadline);
+  assert.equal(outcome.isError, false, outcome.content);
+  const call = calls[0];
+  assert.ok(call !== undefined);
+  assert.equal(call.args['timeout'], 120_000);
+  assert.equal(typeof call.deadline, 'number');
+});
+
 test('a requested Bash timeout is clamped by the eval deadline', async (t) => {
   const { gateway, calls } = createGateway(t);
   const outcome = await gateway.runScript(

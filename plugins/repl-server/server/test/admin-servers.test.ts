@@ -644,7 +644,7 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
       body: {
         id: 'pg',
         command: 'npx',
-        args: ['-y', '@mcp/pg'],
+        args: ['-y', '@mcp/pg', { $secret: 'ARG_TOKEN' }],
         envKeys: ['DATABASE_URL'],
         headerKeys: ['Authorization'],
         tags: ['db', 'db', 'sql'],
@@ -661,6 +661,10 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
   assert.equal(server['state'], 'idle');
   assert.deepEqual(server['envKeys'], ['DATABASE_URL']);
   assert.deepEqual(server['headerKeys'], ['Authorization']);
+  assert.deepEqual(server['envSecrets'], { DATABASE_URL: 'DATABASE_URL' });
+  assert.deepEqual(server['headerSecrets'], { Authorization: 'Authorization' });
+  assert.deepEqual(server['secretArgs'], [{ index: 2, secret: 'ARG_TOKEN' }]);
+  assert.deepEqual(server['args'], ['-y', '@mcp/pg', '<secret:ARG_TOKEN>']);
   assert.equal('env' in server, false);
   assert.equal('headers' in server, false);
   assert.deepEqual(server['tags'], ['db', 'sql']);

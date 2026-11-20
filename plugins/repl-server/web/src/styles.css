@@ -277,6 +277,11 @@ body {
   white-space: nowrap;
 }
 
+/* List headers stay on one line; wide tables scroll horizontally instead. */
+.ant-table-thead > tr > th {
+  white-space: nowrap;
+}
+
 .ant-table-tbody > tr.row-clickable > td {
   cursor: pointer;
 }

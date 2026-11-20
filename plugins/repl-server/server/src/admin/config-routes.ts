@@ -10,8 +10,9 @@
  * - a valid import answers `200 { operationId, diff, missingSecrets? }` when it runs
  *   inline, or `202` when an operation registry defers it.
  *
- * Responses contain server ids and secret *key names* only; values never leave
- * the process.
+ * List/config responses contain server ids and secret *key names* only. A
+ * secret value leaves the process only through the explicit
+ * `POST /secrets/:name/reveal` action requested by the admin UI.
  * @module
  */
 
@@ -143,6 +144,25 @@ export function createAdminConfigRoutes(deps: AdminConfigRoutesDeps): AdminHandl
       return adminJson(200, {
         secrets: names.map((name) => ({ name, configured: stored.has(name) })),
       });
+    }
+
+    if (
+      request.method === 'POST' &&
+      segments.length === 3 &&
+      segments[0] === 'secrets' &&
+      segments[2] === 'reveal' &&
+      segments[1] !== undefined
+    ) {
+      const name = segments[1];
+      if (!isValidSecretName(name)) {
+        throw invalidField('name', 'must be a valid secret name');
+      }
+      const value = await deps.secrets.get(name);
+      if (value === undefined) {
+        throw new AdminApiError(404, 'SECRET_NOT_FOUND', `secret ${name} is not set`, { name });
+      }
+      // The admin HTTP layer already sends no-store for every JSON response.
+      return adminJson(200, { name, value });
     }
 
     if (request.method === 'PUT' && segments[0] === 'secrets' && segments[1] !== undefined) {
