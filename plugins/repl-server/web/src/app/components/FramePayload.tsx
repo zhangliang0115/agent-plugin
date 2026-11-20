@@ -34,11 +34,21 @@ export function FrameColumn({
   const payload = framePayload(event);
   const payloadTruncation = payloadTruncationLabel(payload);
   const head = truncatedHead(payload);
+  const text = head === null ? formatJson(payload, 2) : `${head}\n…（已截断）`;
   return (
     <div style={{ minWidth: 0 }}>
-      <Text type="secondary" style={{ fontSize: 11.5, fontWeight: 550 }}>
-        {label}
-      </Text>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <Text type="secondary" style={{ fontSize: 11.5, fontWeight: 550 }}>
+          {label}
+        </Text>
+        <Text
+          type="secondary"
+          copyable={{ text, tooltips: ['复制报文', '已复制'] }}
+          style={{ fontSize: 11.5 }}
+        >
+          复制
+        </Text>
+      </div>
       {eventTruncation === null && payloadTruncation === null ? null : (
         <Space size={4} wrap>
           {eventTruncation === null ? null : <Tag color="gold">{eventTruncation}</Tag>}
@@ -46,7 +56,7 @@ export function FrameColumn({
         </Space>
       )}
       <pre className="code-block" style={{ maxHeight: 240, overflow: 'auto' }}>
-        {head === null ? formatJson(payload, 2) : `${head}\n…（已截断）`}
+        {text}
       </pre>
     </div>
   );
