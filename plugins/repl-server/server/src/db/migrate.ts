@@ -3,7 +3,14 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createSchemaV1, createSchemaV2, createSchemaV4, createSchemaV6, SCHEMA_VERSION } from './schema.ts';
+import {
+  createSchemaV1,
+  createSchemaV2,
+  createSchemaV4,
+  createSchemaV6,
+  createSchemaV7,
+  SCHEMA_VERSION,
+} from './schema.ts';
 
 export interface OpenStateDbOptions {
   /** Create the parent directory (mode 0700) when it does not exist. Default true. */
@@ -74,6 +81,10 @@ export function migrate(db: DatabaseSync): number {
     if (current < 6) {
       applyV6(db);
       current = 6;
+    }
+    if (current < 7) {
+      applyV7(db);
+      current = 7;
     }
   });
   return current;
@@ -197,4 +208,11 @@ function applyV6(db: DatabaseSync): void {
   createSchemaV6(db);
   db.prepare("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 6');
+}
+
+/** Adds the admin-maintained resolution and close timestamp (06 §2.6). */
+function applyV7(db: DatabaseSync): void {
+  createSchemaV7(db);
+  db.prepare("UPDATE meta SET value = '7' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 7');
 }

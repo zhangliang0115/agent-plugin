@@ -18,6 +18,7 @@ import {
   ReportNotFoundError,
   ReportStatusConflictError,
   ReportValidationError,
+  normalizeResolution,
   type ReportService,
 } from '../reports/service.ts';
 import { decodeReportCursor } from '../reports/store.ts';
@@ -36,7 +37,7 @@ export interface AdminReportsDeps {
 }
 
 const CREATE_FIELDS: ReadonlySet<string> = new Set(['title', 'detail', 'severity', 'context']);
-const PATCH_FIELDS: ReadonlySet<string> = new Set(['status']);
+const PATCH_FIELDS: ReadonlySet<string> = new Set(['status', 'resolution']);
 const SOURCE_VALUES: readonly ReportSource[] = ['mcp', 'admin'];
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -66,12 +67,14 @@ export function reportListView(report: StoredReport): Record<string, unknown> {
   };
 }
 
-/** Detail projection: adds `detail` and the parsed `context`. */
+/** Detail projection: adds `detail`, the parsed `context` and the handling note. */
 export function reportDetailView(report: StoredReport): Record<string, unknown> {
   return {
     ...reportListView(report),
     detail: report.detail,
     context: report.context,
+    resolution: report.resolution,
+    resolvedAt: report.resolvedAt,
   };
 }
 
@@ -232,16 +235,39 @@ export function createAdminReportsHandler(deps: AdminReportsDeps): AdminHandler 
   async function patchReport(id: string, request: AdminRequest): Promise<AdminResponse> {
     const body = requireObjectBody(request);
     rejectUnknownFields(body, PATCH_FIELDS);
-    if (!('status' in body)) {
-      throw new AdminApiError(400, 'INVALID_BODY', 'status is required');
+    const hasStatus = 'status' in body;
+    const hasResolution = 'resolution' in body;
+    if (!hasStatus && !hasResolution) {
+      throw new AdminApiError(400, 'INVALID_BODY', 'status or resolution is required');
     }
-    const raw = body['status'];
-    if (typeof raw !== 'string' || !REPORT_STATUS_VALUES.includes(raw as ReportStatus)) {
-      throw invalidField('status', 'must be "open", "ack" or "closed"');
+    let status: ReportStatus | undefined;
+    if (hasStatus) {
+      const raw = body['status'];
+      if (typeof raw !== 'string' || !REPORT_STATUS_VALUES.includes(raw as ReportStatus)) {
+        throw invalidField('status', 'must be "open", "ack" or "closed"');
+      }
+      status = raw as ReportStatus;
     }
 
     try {
-      const report = await deps.reports.patchStatus(id, raw as ReportStatus);
+      // Validate both values before the first write, so a bad resolution cannot
+      // leave a half-applied status change behind (06 §5.2).
+      let resolution: string | null | undefined;
+      if (hasResolution) {
+        const raw = body['resolution'];
+        if (raw !== null && typeof raw !== 'string') {
+          throw invalidField('resolution', 'must be a string or null');
+        }
+        resolution = normalizeResolution(raw);
+      }
+      if (status === undefined) {
+        const report = await deps.reports.patchResolution(id, resolution ?? null);
+        return adminJson(200, { report: reportDetailView(report) });
+      }
+      let report = await deps.reports.patchStatus(id, status);
+      if (resolution !== undefined) {
+        report = await deps.reports.patchResolution(id, resolution);
+      }
       return adminJson(200, { report: reportDetailView(report) });
     } catch (error) {
       translate(error);

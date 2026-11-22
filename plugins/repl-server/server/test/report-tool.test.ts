@@ -56,6 +56,8 @@ function stored(overrides: Partial<StoredReport> = {}): StoredReport {
     alertAttempts: 0,
     alertUpdatedAt: null,
     alertedAt: null,
+    resolution: null,
+    resolvedAt: null,
     ...overrides,
   };
 }
@@ -80,6 +82,10 @@ class FakeReports implements ReportService {
   }
 
   async patchStatus(): Promise<StoredReport> {
+    return stored();
+  }
+
+  async patchResolution(): Promise<StoredReport> {
     return stored();
   }
 

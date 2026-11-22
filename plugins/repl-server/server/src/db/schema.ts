@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -205,6 +205,22 @@ export function createSchemaV6(db: DatabaseSync): void {
   );
   if (!columns.has('token_plain')) {
     db.exec('ALTER TABLE client_bindings ADD COLUMN token_plain TEXT');
+  }
+}
+
+/** Adds the admin-maintained resolution and the close timestamp (06 §2.6). */
+export function createSchemaV7(db: DatabaseSync): void {
+  const columns = new Set(
+    db
+      .prepare('PRAGMA table_info(reports)')
+      .all()
+      .map((row) => String(row['name'])),
+  );
+  if (!columns.has('resolution')) {
+    db.exec('ALTER TABLE reports ADD COLUMN resolution TEXT');
+  }
+  if (!columns.has('resolved_at')) {
+    db.exec('ALTER TABLE reports ADD COLUMN resolved_at TEXT');
   }
 }
 

@@ -71,6 +71,24 @@ export function wrapEvalSource(code: string): string {
   return `(async () => {\n${code}\n})()`;
 }
 
+/** Lines `wrapEvalSource` prepends before the user's first line. */
+const WRAPPER_LINES = 1;
+
+/**
+ * Appends the first `repl-eval-<id>.js` location from a V8 stack. The async
+ * IIFE adds one line, so the reported line is shifted back; stacks without an
+ * eval frame (tool errors, host failures) pass through unchanged.
+ */
+export function formatUserError(message: string, stack?: string): string {
+  if (stack === undefined || message.includes('(line ')) return message;
+  const match = /repl-eval-\d+\.js:(\d+)(?::(\d+))?/.exec(stack);
+  if (match === null) return message;
+  const line = Number(match[1]);
+  if (!Number.isSafeInteger(line) || line <= WRAPPER_LINES) return message;
+  const column = match[2] === undefined ? undefined : Number(match[2]);
+  return `${message} (line ${line - WRAPPER_LINES}${column === undefined ? '' : `, column ${column}`})`;
+}
+
 export function compileEvalScript(code: string, evalId: number): vm.Script {
   return new vm.Script(wrapEvalSource(code), { filename: `repl-eval-${evalId}.js` });
 }

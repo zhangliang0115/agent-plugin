@@ -67,6 +67,10 @@ export interface StoredReport {
   alertAttempts: number;
   alertUpdatedAt: string | null;
   alertedAt: string | null;
+  /** Admin-maintained handling note; never sent to alerts or audit (06 §2.2). */
+  resolution: string | null;
+  /** Set when the report last entered `closed`; cleared on reopen. */
+  resolvedAt: string | null;
 }
 
 /** Insert payload; ids, timestamps and the fingerprint are computed by the service. */
@@ -142,6 +146,8 @@ export interface ReportStore {
   get(id: string): StoredReport | null;
   list(filter: ReportFilter): ReportListPage;
   patchStatus(id: string, status: ReportStatus, at: string): StoredReport | null;
+  /** Writes the handling note only; `null` clears it. */
+  patchResolution(id: string, resolution: string | null, at: string): StoredReport | null;
   claimPendingAlerts(now: string, limit: number): StoredReport[];
   patchAlert(id: string, expected: AlertState, patch: AlertPatch): boolean;
   findDuplicate(ownerKey: string, fingerprint: string, since: string): StoredReport | null;

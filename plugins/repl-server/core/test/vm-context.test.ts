@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createVmContext, runEvalScript, wrapEvalSource } from '../src/worker/vm-context.ts';
+import {
+  compileEvalScript,
+  createVmContext,
+  formatUserError,
+  runEvalScript,
+  wrapEvalSource,
+} from '../src/worker/vm-context.ts';
 
 const SYNC_MS = 1_000;
 
@@ -16,6 +22,25 @@ test('the eval body supports top-level await and return', async () => {
     SYNC_MS,
   );
   assert.equal(value, 21);
+});
+
+test('formatUserError shifts V8 syntax-error lines past the async wrapper', () => {
+  let stack = '';
+  try {
+    compileEvalScript('const x = ;', 7);
+  } catch (error) {
+    stack = (error as Error).stack ?? '';
+  }
+  assert.match(stack, /repl-eval-7\.js:2/);
+  assert.equal(formatUserError('Unexpected token', stack), 'Unexpected token (line 1)');
+});
+
+test('formatUserError keeps columns, ignores non-eval stacks and already-located messages', () => {
+  const stack = 'Error: boom\n    at repl-eval-9.js:3:7\n    at repl-eval-9.js:4:3';
+  assert.equal(formatUserError('boom', stack), 'boom (line 2, column 7)');
+  assert.equal(formatUserError('MCP failed', 'Error: x\n    at gateway.ts:10:1'), 'MCP failed');
+  assert.equal(formatUserError('already (line 4)', stack), 'already (line 4)');
+  assert.equal(formatUserError('plain', undefined), 'plain');
 });
 
 test('state allows field assignment but rejects replacement', async () => {

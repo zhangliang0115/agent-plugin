@@ -198,13 +198,18 @@ test('admin submissions skip dedupe and rate limiting', async (t) => {
 test('report status follows the frozen state machine', async (t) => {
   const h = harness(t);
   const created = await h.service.create(input());
+  assert.equal(created.report.resolution, null);
+  assert.equal(created.report.resolvedAt, null);
 
   const acked = await h.service.patchStatus(created.report.id, 'ack');
   assert.equal(acked.status, 'ack');
+  assert.equal(acked.resolvedAt, null);
   const closed = await h.service.patchStatus(created.report.id, 'closed');
   assert.equal(closed.status, 'closed');
+  assert.ok(closed.resolvedAt !== null, 'closing stamps resolved_at');
   const reopened = await h.service.patchStatus(created.report.id, 'open');
   assert.equal(reopened.status, 'open');
+  assert.equal(reopened.resolvedAt, null, 'reopening clears resolved_at');
 
   await h.service.patchStatus(created.report.id, 'closed');
   await assert.rejects(
@@ -222,6 +227,42 @@ test('report status follows the frozen state machine', async (t) => {
     h.service.patchStatus('rep_missing', 'ack'),
     (error: unknown) => error instanceof ReportNotFoundError,
   );
+});
+
+test('resolution saves independently, trims, clears and audits metadata only', async (t) => {
+  const h = harness(t);
+  const created = await h.service.create(input());
+  const id = created.report.id;
+
+  const saved = await h.service.patchResolution(id, '  已升级依赖，复测通过  ');
+  assert.equal(saved.resolution, '已升级依赖，复测通过');
+  assert.equal(saved.status, 'open', 'resolution does not change status');
+  assert.equal(saved.resolvedAt, null);
+
+  const closed = await h.service.patchStatus(id, 'closed');
+  assert.equal(closed.resolution, '已升级依赖，复测通过', 'closing keeps the note');
+
+  const cleared = await h.service.patchResolution(id, '   ');
+  assert.equal(cleared.resolution, null);
+
+  await assert.rejects(
+    h.service.patchResolution(id, 'x'.repeat(4001)),
+    (error: unknown) => error instanceof ReportValidationError && error.field === 'resolution',
+  );
+  await assert.rejects(
+    h.service.patchResolution('rep_missing', 'x'),
+    (error: unknown) => error instanceof ReportNotFoundError,
+  );
+
+  const events = h.auditEvents.filter((event) => event['event'] === 'report_resolution');
+  assert.equal(events.length, 2);
+  assert.equal(events[0]?.['hasResolution'], true);
+  assert.equal(
+    events[0]?.['bytes'],
+    Buffer.byteLength('已升级依赖，复测通过', 'utf8'),
+  );
+  assert.equal(events[1]?.['hasResolution'], false);
+  assert.doesNotMatch(JSON.stringify(events), /已升级依赖|Bash|run_script/);
 });
 
 test('audit records report_status transitions without text', async (t) => {

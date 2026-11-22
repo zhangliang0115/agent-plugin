@@ -9,6 +9,7 @@ import {
   DEDUPE_WINDOW_MS,
   MAX_CONTEXT_BYTES,
   MAX_DETAIL_CODE_POINTS,
+  MAX_RESOLUTION_CODE_POINTS,
   MAX_TITLE_CODE_POINTS,
   RATE_LIMIT_MAX,
   RATE_LIMIT_WINDOW_MS,
@@ -95,6 +96,8 @@ export interface ReportService {
   list(filter: ReportFilter): Promise<ReportListPage>;
   /** Applies the 06 §2.3 state machine; a same-state PATCH is a no-op. */
   patchStatus(id: string, status: ReportStatus): Promise<StoredReport>;
+  /** Replaces the handling note independently of status; empty clears it (06 §2.3). */
+  patchResolution(id: string, resolution: string | null): Promise<StoredReport>;
   /** `failed` / `skipped` / `no_webhook` back to `pending` and kicks the dispatcher. */
   retryAlert(id: string): Promise<StoredReport>;
 }
@@ -187,6 +190,20 @@ export function validateReportInput(input: ReportInput): ValidatedReport {
   }
 
   return { title, detail, severity: input.severity, context, contextJson };
+}
+
+/** Trims the handling note and treats an empty result as "no note". */
+export function normalizeResolution(resolution: string | null): string | null {
+  if (resolution === null) return null;
+  const text = resolution.trim();
+  if (text === '') return null;
+  if (codePointLength(text) > MAX_RESOLUTION_CODE_POINTS) {
+    throw new ReportValidationError(
+      `resolution must be at most ${MAX_RESOLUTION_CODE_POINTS} characters`,
+      'resolution',
+    );
+  }
+  return text;
 }
 
 /** `sha256(severity + '\n' + title + '\n' + detail)` over trimmed storage values. */
@@ -317,6 +334,19 @@ export function createReportService(deps: ReportServiceDeps): ReportService {
         reportId: updated.id,
         from: current.status,
         to: updated.status,
+      });
+      return updated;
+    },
+
+    async patchResolution(id, resolution) {
+      const stored = normalizeResolution(resolution);
+      const updated = activeStore.patchResolution(id, stored, nowIso());
+      if (updated === null) throw new ReportNotFoundError(id);
+      record({
+        event: 'report_resolution',
+        reportId: updated.id,
+        bytes: Buffer.byteLength(stored ?? '', 'utf8'),
+        hasResolution: stored !== null,
       });
       return updated;
     },

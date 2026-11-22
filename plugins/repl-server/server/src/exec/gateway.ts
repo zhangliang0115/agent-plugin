@@ -8,6 +8,7 @@ import {
   LIMITS,
   TaskStore,
   clampBashArgs,
+  formatUserError,
   hardStop,
   newId,
   normalizeOutput,
@@ -409,7 +410,9 @@ function outcomeOf(
       evalId: settlement.evalId,
       log,
       result: normalized.result,
-      error: settlement.ok ? undefined : settlement.error ?? settlement.outcome,
+      error: settlement.ok
+        ? undefined
+        : formatUserError(settlement.error ?? settlement.outcome, settlement.stack),
       reset: settlement.contextReset,
       restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
       truncated,

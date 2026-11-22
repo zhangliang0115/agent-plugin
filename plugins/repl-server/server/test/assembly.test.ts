@@ -188,6 +188,30 @@ test('run_script executes JavaScript end to end', async (t) => {
   assert.match(body.result.content[0]?.text ?? '', /<repl-output eval="\d+"><result>42<\/result><\/repl-output>/);
 });
 
+test('run_script reports the user line for a syntax error', async (t) => {
+  const app = await start();
+  t.after(app.close);
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+
+  const call = await rpc(
+    app.base,
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'run_script', arguments: { code: 'const x = ;\nconsole.log(x)' } },
+    },
+    session,
+  );
+  const body = (await call.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  assert.equal(body.result.isError, true);
+  const text = body.result.content[0]?.text ?? '';
+  assert.match(text, /<error>Unexpected token '[^']*' \(line 1\)<\/error>/);
+});
+
 test('async run_script returns a task and wait_tasks collects it', async (t) => {
   const app = await start();
   t.after(app.close);

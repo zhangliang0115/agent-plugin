@@ -241,6 +241,66 @@ test('PATCH /reports/:id enforces the state machine and rejects unknown fields',
   assert.equal(missingId.status, 404);
 });
 
+test('PATCH /reports/:id saves and clears resolution independently of status', async (t) => {
+  const h = harness(t);
+  const created = await create(h);
+  const id = created['id'] as string;
+
+  const saved = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { resolution: '  已升级依赖，复测通过  ' },
+  });
+  assert.equal(saved.status, 200);
+  const savedReport = bodyOf(saved)['report'] as Record<string, unknown>;
+  assert.equal(savedReport['resolution'], '已升级依赖，复测通过');
+  assert.equal(savedReport['resolvedAt'], null);
+  assert.equal(savedReport['status'], 'open');
+
+  const closed = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { status: 'closed', resolution: '关闭时更新说明' },
+  });
+  assert.equal(closed.status, 200);
+  const closedReport = bodyOf(closed)['report'] as Record<string, unknown>;
+  assert.equal(closedReport['status'], 'closed');
+  assert.equal(closedReport['resolution'], '关闭时更新说明');
+  assert.equal(typeof closedReport['resolvedAt'], 'string');
+
+  const conflict = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { status: 'ack', resolution: '不应写入' },
+  });
+  assert.equal(conflict.status, 409);
+  const after = await h.service.get(id);
+  assert.equal(after?.resolution, '关闭时更新说明', 'a rejected status change writes nothing');
+
+  const cleared = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { resolution: '' },
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal((bodyOf(cleared)['report'] as Record<string, unknown>)['resolution'], null);
+
+  const missing = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: {},
+  });
+  assert.equal(missing.status, 400);
+  assert.equal((bodyOf(missing)['error'] as { code: string }).code, 'INVALID_BODY');
+
+  const badType = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { resolution: 1 },
+  });
+  assert.equal(badType.status, 400);
+  assert.equal((bodyOf(badType)['error'] as { code: string }).code, 'INVALID_FIELD');
+
+  const tooLong = await call(h.handler, 'PATCH', `/admin/api/reports/${id}`, {
+    body: { resolution: 'x'.repeat(4001) },
+  });
+  assert.equal(tooLong.status, 400);
+  assert.equal((bodyOf(tooLong)['error'] as { code: string }).code, 'INVALID_BODY');
+
+  const detail = await call(h.handler, 'GET', `/admin/api/reports/${id}`);
+  const detailReport = bodyOf(detail)['report'] as Record<string, unknown>;
+  assert.equal('resolution' in detailReport, true);
+  assert.equal('resolvedAt' in detailReport, true);
+});
+
 test('POST /reports/:id/retry-alert resets only retryable terminal states', async (t) => {
   const h = harness(t);
   const created = await create(h);

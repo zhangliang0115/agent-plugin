@@ -115,12 +115,12 @@ const REPORT_INDEX_NAMES = [
   'reports_alert_idx',
 ];
 
-test('a fresh database runs v1 through v6 and exposes every feature set', (t) => {
+test('a fresh database runs v1 through v7 and exposes every feature set', (t) => {
   const { db } = openFixture(t);
 
-  assert.equal(SCHEMA_VERSION, 6);
-  assert.equal(readUserVersion(db), 6);
-  assert.equal(getMeta(db, 'schema_version'), '6');
+  assert.equal(SCHEMA_VERSION, 7);
+  assert.equal(readUserVersion(db), 7);
+  assert.equal(getMeta(db, 'schema_version'), '7');
   assert.equal(count(db, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"), 1);
   assert.equal(count(db, 'SELECT count(*) AS n FROM servers'), 2, 'v1 seeds survive');
 
@@ -128,6 +128,8 @@ test('a fresh database runs v1 through v6 and exposes every feature set', (t) =>
   assert.ok(columns(db, 'tools').includes('discovered_via'));
   assert.ok(columns(db, 'reports').includes('client_name'));
   assert.ok(columns(db, 'reports').includes('client_version'));
+  assert.ok(columns(db, 'reports').includes('resolution'));
+  assert.ok(columns(db, 'reports').includes('resolved_at'));
   assert.ok(columns(db, 'client_bindings').includes('token_plain'));
   assert.equal(
     count(db, "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'reports'"),
@@ -151,8 +153,8 @@ test('an existing v1 database upgrades in place and keeps its rows', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 6);
-  assert.equal(getMeta(db, 'schema_version'), '6');
+  assert.equal(readUserVersion(db), 7);
+  assert.equal(getMeta(db, 'schema_version'), '7');
   assert.equal(getMeta(db, 'revision'), '5', 'the migrations must not reseed the catalog revision');
 
   const server = getServer(db, 'legacy');
@@ -196,8 +198,8 @@ test('repeated migrate is idempotent on an already migrated database', (t) => {
     }
   });
 
-  assert.equal(migrate(second), 6);
-  assert.equal(readUserVersion(second), 6);
+  assert.equal(migrate(second), 7);
+  assert.equal(readUserVersion(second), 7);
   assert.equal(count(second, 'SELECT count(*) AS n FROM reports'), 1);
   assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2, 'no duplicate seed rows');
   assert.equal(count(second, 'SELECT count(*) AS n FROM meta'), 2);
@@ -233,8 +235,8 @@ test('a v3 database backfills client_name/client_version from the legacy client 
     }
   });
 
-  assert.equal(readUserVersion(db), 6);
-  assert.equal(getMeta(db, 'schema_version'), '6');
+  assert.equal(readUserVersion(db), 7);
+  assert.equal(getMeta(db, 'schema_version'), '7');
   assert.equal(getMeta(db, 'revision'), '7', 'the migration must not reseed the catalog revision');
 
   const read = (id: string): { name: string; version: string } => {
@@ -263,8 +265,8 @@ test('v5 rewrites seed categories and leaves user servers untouched', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 6);
-  assert.equal(getMeta(db, 'schema_version'), '6');
+  assert.equal(readUserVersion(db), 7);
+  assert.equal(getMeta(db, 'schema_version'), '7');
   assert.equal(getMeta(db, 'revision'), '3', 'the migration must not reseed the catalog revision');
   assert.ok(columns(db, 'client_bindings').includes('token_plain'));
 
@@ -296,10 +298,10 @@ test('v5 rewrites seed categories and leaves user servers untouched', (t) => {
 test('a database newer than the supported schema is rejected', (t) => {
   const { file } = emptyFile(t);
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA user_version = 7');
+  db.exec('PRAGMA user_version = 8');
   db.close();
 
-  assert.throws(() => openStateDb(file), /newer than supported 6/);
+  assert.throws(() => openStateDb(file), /newer than supported 7/);
 });
 
 test('server discoveryJson round-trips as opaque JSON text', (t) => {

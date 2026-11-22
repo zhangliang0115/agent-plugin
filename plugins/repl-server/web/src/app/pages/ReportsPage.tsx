@@ -30,6 +30,8 @@ interface ReportView {
   alertedAt: string | null;
   detail?: string;
   context?: unknown;
+  resolution?: string | null;
+  resolvedAt?: string | null;
 }
 
 interface CreateValues {
@@ -66,6 +68,7 @@ export function ReportsPage(): React.ReactElement {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReportView | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [resolutionDraft, setResolutionDraft] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [form] = Form.useForm<CreateValues>();
 
@@ -108,6 +111,7 @@ export function ReportsPage(): React.ReactElement {
   useEffect(() => {
     if (selectedId === null) {
       setDetail(null);
+      setResolutionDraft('');
       return;
     }
     let cancelled = false;
@@ -116,7 +120,9 @@ export function ReportsPage(): React.ReactElement {
     void api
       .get<{ report: ReportView }>(`/reports/${encodeURIComponent(selectedId)}`)
       .then((response) => {
-        if (!cancelled) setDetail(response.report);
+        if (cancelled) return;
+        setDetail(response.report);
+        setResolutionDraft(response.report.resolution ?? '');
       })
       .catch((error: unknown) => {
         if (!cancelled) message.error(failureText(error));
@@ -163,10 +169,35 @@ export function ReportsPage(): React.ReactElement {
   async function changeStatus(next: ReportStatus): Promise<void> {
     if (detail === null) return;
     try {
-      await api.patch(`/reports/${encodeURIComponent(detail.id)}`, { status: next });
+      const body: Record<string, unknown> = { status: next };
+      const text = resolutionDraft.trim();
+      // An empty draft is not sent, so a status click cannot wipe a saved note.
+      if (text !== '') body['resolution'] = text;
+      const response = await api.patch<{ report: ReportView }>(
+        `/reports/${encodeURIComponent(detail.id)}`,
+        body,
+      );
       message.success(`报告状态已更新为 ${next}`);
       await load();
-      setDetail({ ...detail, status: next });
+      setDetail(response.report);
+      setResolutionDraft(response.report.resolution ?? '');
+    } catch (error) {
+      message.error(failureText(error));
+    }
+  }
+
+  async function saveResolution(): Promise<void> {
+    if (detail === null) return;
+    const text = resolutionDraft.trim();
+    try {
+      const response = await api.patch<{ report: ReportView }>(
+        `/reports/${encodeURIComponent(detail.id)}`,
+        { resolution: text === '' ? null : text },
+      );
+      message.success('处理说明已保存');
+      setDetail(response.report);
+      setResolutionDraft(response.report.resolution ?? '');
+      await load();
     } catch (error) {
       message.error(failureText(error));
     }
@@ -219,7 +250,7 @@ export function ReportsPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="报告"
-        description="问题报告与告警投递。点击一行在抽屉里查看详情；正文与 context 不进入告警消息。"
+        description="问题报告与告警投递。点击一行在抽屉里查看详情并记录处理说明；正文、context 与处理说明不进入告警消息。"
         actions={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => void load()}>
@@ -300,6 +331,11 @@ export function ReportsPage(): React.ReactElement {
               <Descriptions.Item label="送达">
                 {detail.alertedAt === null ? '—' : formatTimestamp(detail.alertedAt)}
               </Descriptions.Item>
+              <Descriptions.Item label="处理时间">
+                {detail.resolvedAt === undefined || detail.resolvedAt === null
+                  ? '—'
+                  : formatTimestamp(detail.resolvedAt)}
+              </Descriptions.Item>
             </Descriptions>
             <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
               {detail.detail ?? ''}
@@ -310,6 +346,21 @@ export function ReportsPage(): React.ReactElement {
             {detail.alertError === null ? null : (
               <Typography.Text type="danger">{detail.alertError}</Typography.Text>
             )}
+            <div>
+              <Typography.Text strong>处理说明</Typography.Text>
+              <Input.TextArea
+                rows={4}
+                maxLength={4000}
+                showCount
+                value={resolutionDraft}
+                onChange={(event) => setResolutionDraft(event.target.value)}
+                placeholder="记录处理方案、结论或环境配置；不会进入告警消息。"
+                style={{ marginTop: 6 }}
+              />
+              <Button style={{ marginTop: 8 }} onClick={() => void saveResolution()}>
+                保存处理说明
+              </Button>
+            </div>
             <Space wrap>
               {detail.status === 'open' ? <Button onClick={() => void changeStatus('ack')}>确认</Button> : null}
               {detail.status !== 'open' ? <Button onClick={() => void changeStatus('open')}>重新打开</Button> : null}

@@ -71,6 +71,8 @@ export function rowToReport(row: DbRow): StoredReport {
     alertAttempts: readNumber(row, 'alert_attempts'),
     alertUpdatedAt: nullableText(row, 'alert_updated_at'),
     alertedAt: nullableText(row, 'alerted_at'),
+    resolution: nullableText(row, 'resolution'),
+    resolvedAt: nullableText(row, 'resolved_at'),
   };
 }
 
@@ -186,9 +188,23 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
   }
 
   function patchStatus(id: string, status: ReportStatus, at: string): StoredReport | null {
+    // Entering `closed` stamps the resolution time; reopening clears it (06 §2.3).
+    const resolvedAt = status === 'closed' ? at : null;
     const result = db
-      .prepare('UPDATE reports SET status = ?, updated_at = ? WHERE id = ?')
-      .run(status, at, id);
+      .prepare('UPDATE reports SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?')
+      .run(status, resolvedAt, at, id);
+    if (Number(result.changes) === 0) return null;
+    return get(id);
+  }
+
+  function patchResolution(
+    id: string,
+    resolution: string | null,
+    at: string,
+  ): StoredReport | null {
+    const result = db
+      .prepare('UPDATE reports SET resolution = ?, updated_at = ? WHERE id = ?')
+      .run(resolution, at, id);
     if (Number(result.changes) === 0) return null;
     return get(id);
   }
@@ -301,6 +317,7 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
     get,
     list,
     patchStatus,
+    patchResolution,
     claimPendingAlerts,
     patchAlert,
     findDuplicate,

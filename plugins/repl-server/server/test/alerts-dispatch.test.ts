@@ -253,6 +253,8 @@ test('the message never contains detail, context or webhook values', () => {
     alertError: null,
     alertAttempts: 0,
     alertUpdatedAt: null,
+    resolution: null,
+    resolvedAt: null,
     alertedAt: null,
   };
   const content = buildWecomMarkdown(report);

@@ -10,6 +10,7 @@ export const RATE_LIMIT_MAX = 20;
 export const MAX_TITLE_CODE_POINTS = 200;
 export const MAX_DETAIL_CODE_POINTS = 20_000;
 export const MAX_CONTEXT_BYTES = 8192;
+export const MAX_RESOLUTION_CODE_POINTS = 4000;
 
 /** Per-attempt webhook timeout. */
 export const ALERT_SEND_TIMEOUT_MS = 5_000;
