@@ -13,6 +13,7 @@
  * @module
  */
 
+import { VERSION } from '@zhangliang0115/repl-server-core';
 import { mcpToolErrorFromResult } from '@zhangliang0115/repl-server-core/src/bridge/mcp-error.ts';
 import { isRecord } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
 import type { ServeToolResult } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
@@ -33,7 +34,7 @@ import { createStdioTransport } from './stdio.ts';
 export const INITIAL_PROTOCOL_VERSION = '2025-11-25';
 
 /** `clientInfo` advertised in `initialize`; any non-empty value is protocol-valid. */
-const CLIENT_INFO = { name: 'repl-server', version: '0.1.0' } as const;
+const CLIENT_INFO = { name: 'repl-server', version: VERSION } as const;
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
 

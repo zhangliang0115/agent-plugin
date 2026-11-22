@@ -131,14 +131,14 @@ test('run_script description appends the visible servers and fixed guidance', ()
   assert.match(description, /pg {2}\[database\] {2}1 tools/);
   assert.ok(!description.includes('Postgres'), 'the summary is not part of the description');
   assert.match(description, /Call: tools\.mcp\.<server>\.<tool>\(args\)/);
-  assert.match(description, /Find: search_tools\(\{ query, server\?, category\?, tags\? \}\)/);
-  assert.match(description, /Args: describe_tools\(\{ names \}\)/);
+  assert.match(description, /MCP-level discovery \(not tools\.\*\): search_tools\(\{ query, server\?, category\?, tags\? \}\)/);
+  assert.match(description, /describe_tools\(\{ names \}\) for schemas/);
 });
 
 test('run_script description says when no server is visible', () => {
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, []);
   assert.ok(description.includes('No MCP servers are visible to this client.'));
-  assert.ok(description.includes('Find: search_tools'));
+  assert.ok(description.includes('MCP-level discovery'));
   assert.ok(!description.includes('## Built-in tools'), 'an empty builtin list adds no section');
 });
 
@@ -168,7 +168,7 @@ test('over-budget builtin names are counted, not silently dropped', () => {
   assert.ok(description.includes('long_tool_000'));
   assert.ok(!description.includes('long_tool_299'));
   assert.match(description, /… \(\+\d+ more via search_tools\)/);
-  assert.ok(description.includes('Args: describe_tools({ names })'), 'guidance survives');
+  assert.ok(description.includes('describe_tools({ names }) for schemas'), 'guidance survives');
 });
 
 test('over-budget server lists are truncated from the tail and guidance survives', () => {
@@ -187,15 +187,18 @@ test('over-budget server lists are truncated from the tail and guidance survives
   assert.ok(description.startsWith(RUN_SCRIPT_DESCRIPTION), 'base rules must never be truncated');
   assert.ok(description.includes('srv000'));
   assert.ok(!description.includes('srv099'));
-  assert.ok(description.includes('Args: describe_tools({ names })'));
+  assert.ok(description.includes('describe_tools({ names }) for schemas'));
   assert.ok(description.includes('Call: tools.mcp.<server>.<tool>(args)'));
-  assert.ok(description.includes('Find: search_tools({ query, server?, category?, tags? })'));
+  assert.ok(description.includes('MCP-level discovery (not tools.*)'));
+  assert.ok(description.includes('search_tools({ query, server?, category?, tags? })'));
 });
 
 test('instructions stay short and point at run_script for the server list', () => {
   assert.ok([...INSTRUCTIONS].length <= 1_200, `instructions are ${[...INSTRUCTIONS].length} chars`);
   assert.ok(INSTRUCTIONS.includes("Visible built-in tools and MCP servers are listed in run_script's description."));
   assert.ok(INSTRUCTIONS.includes('Do not guess tool names. Unknown names fail.'));
+  assert.ok(INSTRUCTIONS.includes('MCP results are { text, images?, documents? } with raw text'));
+  assert.ok(RUN_SCRIPT_DESCRIPTION.includes('JSON.parse(result.text)'));
   assert.ok(!INSTRUCTIONS.includes('30000'));
   assert.ok(!INSTRUCTIONS.includes('50000'));
   assert.ok(!INSTRUCTIONS.includes('7200000'));

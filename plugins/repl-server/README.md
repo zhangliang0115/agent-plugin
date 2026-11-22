@@ -10,7 +10,7 @@
 
 ## 当前状态
 
-**骨架（0.1.0）**：包结构、`/health` 与构建脚本已就位；执行体、MCP 协议层、管理端按设计文档逐模块实现。
+**0.2.0**：MCP 端点、执行体、工具池与管理端已可运行；资源采样、审计与多客户端配额见设计文档 01–03。
 
 ## 包
 
@@ -22,13 +22,14 @@
 
 ## 工具面
 
-模型看到 4 个工具：
+模型看到 5 个工具：
 
 ```text
 run_script({ code, timeout?, async?, workspace?, visibleTools?, excludeTags? })
 search_tools({ query?, category?, tags?, max? })
 describe_tools({ names })
 wait_tasks({ taskIds, timeoutMs? })
+report_problem({ title, detail, severity, context? })
 ```
 
 结果契约、并发档位、审计与容量见 learn-ai 的设计文档 01–03。

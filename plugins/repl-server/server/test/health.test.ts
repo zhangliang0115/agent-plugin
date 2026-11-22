@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 
+import { VERSION } from '@zhangliang0115/repl-server-core';
+
 import { createHttpServer } from '../src/http.ts';
 
 async function listen(): Promise<{ server: ReturnType<typeof createHttpServer>; base: string }> {
@@ -17,7 +19,7 @@ test('GET /health reports ok and the plugin version', async (t) => {
   t.after(() => server.close());
   const response = await fetch(`${base}/health`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, version: '0.1.0' });
+  assert.deepEqual(await response.json(), { ok: true, version: VERSION });
 });
 
 test('unknown paths return a structured 404', async (t) => {

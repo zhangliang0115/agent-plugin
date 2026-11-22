@@ -79,7 +79,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "extensions": { "io.modelcontextprotocol/tasks": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.1.0" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.2.0" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -97,7 +97,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 返回 5 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
 
-- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call`/`Find`/`Args` 优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
@@ -107,7 +107,7 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 ### 3.4 `tools/call`
 
-五种工具名。只有 `run_script` 可能返回 task；`search_tools`、`describe_tools`、`wait_tasks`、`report_problem` 永远同步返回 `resultType: "complete"`。`report_problem` 是 MCP 顶层工具，不进 `run_script` 的 `tools`，不占 eval 预算。
+五种工具名。只有 `run_script` 可能返回 task；`search_tools`、`describe_tools`、`wait_tasks`、`report_problem` 永远同步返回 `resultType: "complete"`。`search_tools`、`describe_tools`、`wait_tasks`、`report_problem` 都是 MCP 顶层工具，不在 `run_script` 的 `tools` 对象里，脚本内不可调用；`run_script` 的 description 会写明发现类工具在脚本之外使用。`report_problem` 不占 eval 预算。
 
 #### 同步结果
 

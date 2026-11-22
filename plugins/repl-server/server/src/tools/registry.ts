@@ -67,7 +67,8 @@ export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox ag
 - Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
 - Pass async: true for long jobs, then collect the task with wait_tasks.
 - visibleTools and excludeTags narrow this call only; they cannot widen access.
-- Use search_tools to find canonical names and describe_tools for input schemas. Do not guess tool names.`;
+- Results: official tool JSON is parsed automatically; MCP tools return { text, images?, documents? } with raw text, so call JSON.parse(result.text) when the payload is JSON.
+- Use the MCP tools search_tools/describe_tools (outside the script) to find canonical names and input schemas. Do not guess tool names.`;
 
 const SEARCH_TOOLS_DESCRIPTION =
   'Search this client\'s visible tools and return canonical names for run_script or describe_tools. An empty query without server returns the server overview plus the __official__ group of bare-name tools; an empty query with server (including __official__) returns that group\'s tools. A non-empty query matches tool names, effective tags and descriptions; server, category and tags only narrow, and tags is all-of. Filter values must come from this request\'s schema enums.';

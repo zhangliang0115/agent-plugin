@@ -1,6 +1,6 @@
 # 安装 repl-server
 
-> server 类插件：没有宿主 adapter，按客户端分节。当前骨架只提供 `/health`，安装步骤在首个可运行版本后补齐验证输出；未实测的节标注「未实测」。
+> server 类插件：没有宿主 adapter，按客户端分节。未在真实客户端上完整走通的节标注「未实测」。
 
 ## Claude Code
 
@@ -16,6 +16,8 @@
 ```bash
 npm install -g @zhangliang0115/repl-server
 ```
+
+本地开发时，在仓库根目录构建后用 `node plugins/repl-server/server/dist/index.js --port 8787` 启动。
 
 ### 启动
 
@@ -47,7 +49,7 @@ repl-server --port 8787
 curl -s http://127.0.0.1:8787/health
 ```
 
-预期：`{"ok":true,"version":"0.1.0"}`
+预期：`{"ok":true,"version":"0.2.0"}`
 
 （未实测）
 

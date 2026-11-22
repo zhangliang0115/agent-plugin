@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+import { VERSION } from '@zhangliang0115/repl-server-core';
+
 export interface ServeClientOptions {
   command: string;
   args?: readonly string[];
@@ -74,7 +76,7 @@ export class ServeClient {
     await client.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'repl-server', version: '0.1.0' },
+      clientInfo: { name: 'repl-server', version: VERSION },
     });
     client.notify('notifications/initialized', {});
     return client;

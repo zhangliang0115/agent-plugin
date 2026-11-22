@@ -1,6 +1,6 @@
 /** Public surface of the host-independent repl-server runtime. @module */
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export * from './types.ts';
 export * from './errors.ts';

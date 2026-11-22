@@ -1,4 +1,4 @@
-// Bundles the server entry into a single ESM file with a shebang.
+// Bundles the server entry into a single ESM file; esbuild keeps the entry shebang.
 import { build } from 'esbuild';
 
 await build({
@@ -8,6 +8,5 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
-  banner: { js: '#!/usr/bin/env node' },
   logLevel: 'info',
 });
