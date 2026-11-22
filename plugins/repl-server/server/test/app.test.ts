@@ -42,9 +42,11 @@ async function listen(options: {
   sessions?: TransportSessionRegistry;
   dispatcher?: JsonRpcDispatcher<McpContext>;
   identity?: AppOptions['identity'];
+  allowedHosts?: AppOptions['allowedHosts'];
 } = {}): Promise<{ server: ReturnType<typeof createApp>; base: string }> {
   const server = createApp({
     identity: options.identity ?? { mode: 'loose', bindings: { findByTokenHash: async () => null } },
+    ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
     sessions: options.sessions ?? new TransportSessionRegistry(),
     gateway: options.gateway ?? gateway,
     catalog,
@@ -222,6 +224,28 @@ test('/health and /mcp reject a non-local Host header with 403', async (t) => {
   // A local host with a port is still accepted (the port is stripped).
   const local = await rawRequest(base, '/health', { headers: { host: `localhost:${port}` } });
   assert.equal(local.status, 200);
+});
+
+test('a custom allowedHosts list admits the tailnet name for /health and /mcp', async (t) => {
+  const { server, base } = await listen({
+    allowedHosts: ['*.ts.net', '127.0.0.1', 'localhost'],
+  });
+  t.after(() => server.close());
+
+  const port = new URL(base).port;
+  const tailnetHost = `sh-mac.tail27b036.ts.net:${port}`;
+  const health = await rawRequest(base, '/health', { headers: { host: tailnetHost } });
+  assert.equal(health.status, 200);
+
+  const discover = await rawRequest(base, '/mcp', {
+    method: 'POST',
+    headers: { host: tailnetHost, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover' }),
+  });
+  assert.equal(discover.status, 200);
+
+  const evil = await rawRequest(base, '/health', { headers: { host: `evil.example:${port}` } });
+  assert.equal(evil.status, 403);
 });
 
 test('DELETE /mcp destroys the transport scope', async (t) => {

@@ -7,7 +7,10 @@
 - 第三方 MCP 连接池、内置/官方工具、懒发现、并发闸门与密钥引用；管理端覆盖服务端、工具、客户端、密钥、标签、分类、告警、AI 配置、导入导出与发现。
 - 管理端 Web：概览（资源采样、实时并发、在飞 eval）、审计事件、请求记录与协议帧、报告。
 - 审计 JSONL、协议帧记录、资源采样落盘（`~/.agents/repl-server/metrics/`，14 天/200MB 保留）。
+- 远程访问：`--host`/`REPL_SERVER_HOST` 改绑定地址，`--allowed-hosts`/`REPL_SERVER_ALLOWED_HOSTS` 配置 Host 允许列表（支持 `*` 与 `*.ts.net`）；非 loopback 绑定强制 `--strict-auth`；管理端自动登录只对 loopback 默认开启，`--admin-require-token` 可显式关闭。
 ### 修复
+- 构建产物补齐 worker 入口 `dist/entry.js` 与 keeper `dist/keeper.mjs`，修复从 `dist` 启动后 `run_script` 的 WORKER_KILLED 和 `claude mcp serve` 启动失败。
+- 审计事件补齐规范字段：`tool_call` 的 `args`/`argsBytes`/`mode`/`seq`，`tool_result` 的 `outBytes`/`errorCode`/`ms`/`queueMs`，`eval_start` 的 `async`/`timeoutMs`，`eval_end` 的 `layer`/`calls`/`resultBytes`；事件抽屉增加输入/输出区。
 - 管理端取消 eval 写 `eval_cancel` 审计事件；`eval_end` 的 `error`/`worker_dead` 在审计状态中显示为失败。
 - 卡死 eval 告警覆盖全部在飞 eval，每个 eval 只告警一次；约 2 秒未结算的取消会强制终止该执行会话的 worker。
 - 内置工具 schema 在升级时按定义刷新；`wait_tasks` 的 `taskIds` 改为必填。

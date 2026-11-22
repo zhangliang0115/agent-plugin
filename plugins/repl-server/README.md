@@ -6,7 +6,7 @@
 - 安装：见 [INSTALL.md](INSTALL.md)。
 - 变更记录：[CHANGELOG.md](CHANGELOG.md)。
 - 设计：learn-ai 仓库 `claude-code/自建设计/01–05`。
-- 网络：默认只监听 `127.0.0.1:8787`；脚本里的工具访问它们各自的地址。
+- 网络：默认只监听 `127.0.0.1:8787`；脚本里的工具访问它们各自的地址。远程访问需显式 `--host` + `--allowed-hosts` + `--strict-auth`，见 [docs/protocol.md](docs/protocol.md) §1.1。
 
 ## 当前状态
 

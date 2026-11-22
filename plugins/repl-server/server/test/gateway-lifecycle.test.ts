@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 
 import { ExecGateway, type ExecGatewayOptions } from '../src/exec/gateway.ts';
-import type { Clock, RequestIdentity, ScriptRequest } from '../src/ports.ts';
+import type { Catalog, Clock, RequestIdentity, ScriptRequest } from '../src/ports.ts';
 
 const IDENTITY: RequestIdentity = {
   identity: 'unbound',
@@ -106,7 +106,14 @@ test('an idle sweep recycles the session after 60 minutes but keeps the task tab
 
 test('eval and tool audits carry the request id and a shared runId', async (t) => {
   const events: Array<Record<string, unknown>> = [];
+  const catalog: Catalog = {
+    snapshot: () => ({
+      revision: 1,
+      tools: [{ name: 'echo', kind: 'builtin', concurrency: 'serial', inputSchema: {}, enabled: true }],
+    }),
+  };
   const gateway = createGateway(t, {
+    catalog,
     onAudit: (event) => {
       events.push(event as unknown as Record<string, unknown>);
     },
@@ -124,6 +131,10 @@ test('eval and tool audits carry the request id and a shared runId', async (t) =
   const toolResult = events.find((event) => event['event'] === 'tool_result');
   const end = events.find((event) => event['event'] === 'eval_end');
   assert.equal(start?.['requestId'], 7);
+  assert.equal(start?.['async'], false);
+  assert.equal(start?.['timeoutMs'], 60_000);
+  assert.equal(start?.['evalId'], 1);
+  assert.equal(typeof start?.['epoch'], 'number');
   const runId = start?.['runId'];
   assert.equal(typeof runId, 'string');
   for (const event of [toolCall, toolResult, end]) {
@@ -132,7 +143,47 @@ test('eval and tool audits carry the request id and a shared runId', async (t) =
   assert.equal(toolCall?.['exec'], start?.['exec']);
   assert.equal(typeof toolCall?.['exec'], 'string');
   assert.equal(toolCall?.['server'], '__official__');
+
+  assert.equal(toolCall?.['seq'], 1);
+  assert.equal(toolCall?.['mode'], 'serial');
+  assert.deepEqual(toolCall?.['args'], {});
+  assert.equal(toolCall?.['argsBytes'], 2);
+  assert.equal(typeof toolCall?.['queuedAt'], 'number');
+
   assert.equal(toolResult?.['server'], '__official__');
+  assert.equal(toolResult?.['seq'], 1);
+  assert.equal(toolResult?.['queueMs'], 0);
+  assert.equal(typeof toolResult?.['ms'], 'number');
+  assert.equal(typeof toolResult?.['startedAt'], 'number');
+  assert.equal(typeof toolResult?.['endedAt'], 'number');
+  assert.equal(typeof toolResult?.['outBytes'], 'number');
+  assert.ok((toolResult?.['outBytes'] as number) > 0);
+
+  assert.equal(end?.['calls'], 1);
+  assert.equal(typeof end?.['resultBytes'], 'number');
+  assert.ok((end?.['resultBytes'] as number) > 0);
+});
+
+test('tool_result records the thrown error code', async (t) => {
+  const events: Array<Record<string, unknown>> = [];
+  const gateway = createGateway(t, {
+    callTool: async () => {
+      throw Object.assign(new Error('boom'), { code: 'TOOL_BOOM' });
+    },
+    onAudit: (event) => {
+      events.push(event as unknown as Record<string, unknown>);
+    },
+  });
+
+  const outcome = await gateway.runScript({
+    ...request('try { await tools.echo({}); } catch (error) { return String(error); }'),
+    async: false,
+  });
+  assert.equal(outcome.isError, false);
+
+  const toolResult = events.find((event) => event['event'] === 'tool_result');
+  assert.equal(toolResult?.['ok'], false);
+  assert.equal(toolResult?.['errorCode'], 'TOOL_BOOM');
 });
 
 test('a serve idle for 15 minutes is released while the session stays', async (t) => {

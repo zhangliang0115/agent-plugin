@@ -5,6 +5,7 @@ import { threadId } from 'node:worker_threads';
 import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-server-core';
 
 import { assemble } from './assembly.ts';
+import { isLoopbackBindAddress, parseHostAllowlist, type HostAllowlist } from './auth/tokens.ts';
 import { createLog } from './log.ts';
 import { stateDbPath } from './local-tokens.ts';
 import { runStdioBridge } from './stdio-bridge.ts';
@@ -13,6 +14,9 @@ const log = createLog((line) => console.error(line), { threadId });
 
 interface CliOptions {
   port: number;
+  host: string;
+  allowedHosts: HostAllowlist;
+  adminAutoLogin: boolean;
   strictAuth: boolean;
   stdio: boolean;
   url: string;
@@ -31,9 +35,27 @@ function readOptions(argv: readonly string[]): CliOptions {
     log(`invalid port ${JSON.stringify(raw)}`, { level: 'error', scope: 'server' });
     process.exit(2);
   }
+  const host = (stringArg(argv, '--host') ?? process.env['REPL_SERVER_HOST'] ?? '127.0.0.1').trim();
+  if (host === '') {
+    log('--host must not be empty', { level: 'error', scope: 'server' });
+    process.exit(2);
+  }
+  const strictAuth = argv.includes('--strict-auth');
+  if (!isLoopbackBindAddress(host) && !strictAuth) {
+    log(
+      `refusing to bind ${host} without --strict-auth: unbound /mcp requests would be accepted`,
+      { level: 'error', scope: 'server' },
+    );
+    process.exit(2);
+  }
   return {
     port,
-    strictAuth: argv.includes('--strict-auth'),
+    host,
+    allowedHosts: parseHostAllowlist(
+      stringArg(argv, '--allowed-hosts') ?? process.env['REPL_SERVER_ALLOWED_HOSTS'],
+    ),
+    adminAutoLogin: !argv.includes('--admin-require-token') && isLoopbackBindAddress(host),
+    strictAuth,
     stdio: argv.includes('--stdio'),
     url: stringArg(argv, '--url') ?? 'http://127.0.0.1:8787/mcp',
     tokenFile: stringArg(argv, '--token-file'),
@@ -48,7 +70,7 @@ if (options.stdio) {
     log,
   });
 } else {
-  const host = '127.0.0.1';
+  const host = options.host;
   const root = process.env['AGENTS_HOME'];
   const dataRoot = join(stateDbPath(root === undefined ? undefined : `${root}/repl-server`), '..');
   const bootId = newId('boot');
@@ -62,7 +84,15 @@ if (options.stdio) {
     process.exit(1);
   }
 
-  const assembly = await assemble({ strictAuth: options.strictAuth, bootId, log });
+  const assembly = await assemble({
+    host: options.host,
+    port: options.port,
+    allowedHosts: options.allowedHosts,
+    adminAutoLogin: options.adminAutoLogin,
+    strictAuth: options.strictAuth,
+    bootId,
+    log,
+  });
 
   assembly.server.listen(options.port, host, () => {
     // stdout is reserved for the stdio bridge; logs go to stderr.

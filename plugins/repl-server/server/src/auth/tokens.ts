@@ -39,16 +39,65 @@ export function parseBearer(header: string | null | undefined): BearerHeader {
 /** Lowercased host without its port; IPv6 literals are returned whole (and therefore rejected). */
 export function normalizeHost(host: string): string {
   const trimmed = host.trim().toLowerCase();
-  if (trimmed.startsWith('[')) return trimmed;
+  if (trimmed.startsWith('[')) {
+    const end = trimmed.indexOf(']');
+    return end === -1 ? trimmed : trimmed.slice(0, end + 1);
+  }
   const colon = trimmed.indexOf(':');
   return colon === -1 ? trimmed : trimmed.slice(0, colon);
 }
 
-/** DNS-rebinding guard from protocol.md §1: only `127.0.0.1` / `localhost`, port stripped. */
-export function isAllowedHost(host: string | null | undefined): boolean {
+/** Exact normalized hosts, `*.suffix` entries, or `*` for any host. */
+export type HostAllowlist = readonly string[] | '*';
+
+export const DEFAULT_HOST_ALLOWLIST: readonly string[] = ['127.0.0.1', 'localhost'];
+
+/** Parses `--allowed-hosts` / `REPL_SERVER_ALLOWED_HOSTS`; empty falls back to the default. */
+export function parseHostAllowlist(value: string | undefined): HostAllowlist {
+  if (value === undefined) return DEFAULT_HOST_ALLOWLIST;
+  const trimmed = value.trim();
+  if (trimmed === '') return DEFAULT_HOST_ALLOWLIST;
+  if (trimmed === '*') return '*';
+  const entries = trimmed
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  return entries.length === 0 ? DEFAULT_HOST_ALLOWLIST : entries;
+}
+
+/**
+ * DNS-rebinding guard from protocol.md §1. The default is loopback-only;
+ * a non-loopback bind must pass an explicit allowlist (for example
+ * `*.ts.net,127.0.0.1,localhost`). Ports are stripped before matching.
+ */
+export function isAllowedHost(
+  host: string | null | undefined,
+  allowedHosts: HostAllowlist = DEFAULT_HOST_ALLOWLIST,
+): boolean {
   if (host === null || host === undefined) return false;
   const normalized = normalizeHost(host);
-  return normalized === '127.0.0.1' || normalized === 'localhost';
+  if (normalized === '') return false;
+  if (allowedHosts === '*') return true;
+  return allowedHosts.some((entry) => {
+    const allowed = normalizeHost(entry);
+    if (allowed === '*') return true;
+    if (allowed.startsWith('*.')) {
+      const suffix = allowed.slice(1);
+      return normalized === allowed.slice(2) || normalized.endsWith(suffix);
+    }
+    return normalized === allowed;
+  });
+}
+
+/** True for bind addresses that only serve this machine. */
+export function isLoopbackBindAddress(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return (
+    normalized === '127.0.0.1'
+    || normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '[::1]'
+  );
 }
 
 /** True when `Origin` names the same host:port as the request `Host` header. */
@@ -175,6 +224,8 @@ export interface AdminAuthConfig {
   adminToken: string;
   /** CSRF token issued for the current cookie session. */
   csrfToken?: string | null;
+  /** Host allowlist; defaults to loopback-only. */
+  allowedHosts?: HostAllowlist;
 }
 
 export type AdminAuthResult =
@@ -195,7 +246,7 @@ export function authorizeAdminRequest(
   request: AdminAuthRequest,
   config: AdminAuthConfig,
 ): AdminAuthResult {
-  if (!isAllowedHost(request.host)) {
+  if (!isAllowedHost(request.host, config.allowedHosts)) {
     return {
       ok: false,
       status: 403,

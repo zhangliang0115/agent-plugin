@@ -1182,11 +1182,97 @@ export function AuditPage(): React.ReactElement {
               />
             </Card>
 
+            <EventIO event={selected} />
           </Space>
         )}
       </Drawer>
     </div>
   );
+}
+
+/** Event-type-specific input/output fields; result bodies stay in Requests → Frames. */
+function EventIO({ event }: { event: AuditEvent }): React.ReactElement | null {
+  if (event.event === 'tool_call') {
+    return (
+      <Card size="small" title="输入 / 输出">
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="输入参数" span={2}>
+            {event.args === undefined ? '—' : <JsonView value={event.args} maxHeight={220} />}
+          </Descriptions.Item>
+          <Descriptions.Item label="参数字节">{formatNumber(asNumber(event.argsBytes))}</Descriptions.Item>
+          <Descriptions.Item label="模式">{eventText(event, 'mode') ?? '—'}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+    );
+  }
+  if (event.event === 'tool_result') {
+    return (
+      <Card size="small" title="输入 / 输出">
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="输出字节">{formatNumber(asNumber(event.outBytes))}</Descriptions.Item>
+          <Descriptions.Item label="错误码">{eventText(event, 'errorCode') ?? '—'}</Descriptions.Item>
+          <Descriptions.Item label="排队 / 耗时">
+            {`${formatDuration(asNumber(event.queueMs))} / ${formatDuration(eventDuration(event))}`}
+          </Descriptions.Item>
+          <Descriptions.Item label="状态">
+            {eventStatus(event) === '' ? '—' : eventStatus(event)}
+          </Descriptions.Item>
+          {event.error === undefined ? null : (
+            <Descriptions.Item label="错误" span={2}>
+              <JsonView value={event.error} maxHeight={160} />
+            </Descriptions.Item>
+          )}
+        </Descriptions>
+        <Text type="secondary" style={{ fontSize: 11.5 }}>
+          审计只保存结果字节与错误码，正文不落盘；完整请求/响应见「请求记录 → 协议帧」。
+        </Text>
+      </Card>
+    );
+  }
+  if (event.event === 'eval_start') {
+    return (
+      <Card size="small" title="输入 / 输出">
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="代码字节">{formatNumber(asNumber(event.codeBytes))}</Descriptions.Item>
+          <Descriptions.Item label="超时（ms）">{formatNumber(asNumber(event.timeoutMs))}</Descriptions.Item>
+          <Descriptions.Item label="异步">
+            {event.async === undefined ? '—' : event.async === true ? '是' : '否'}
+          </Descriptions.Item>
+          <Descriptions.Item label="codeSha256">
+            <span className="mono">{eventText(event, 'codeSha256') ?? '—'}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="代码前缀" span={2}>
+            <pre
+              className="mono"
+              style={{ whiteSpace: 'pre-wrap', margin: 0, maxHeight: 220, overflow: 'auto' }}
+            >
+              {eventText(event, 'codePrefix') ?? '—'}
+            </pre>
+          </Descriptions.Item>
+        </Descriptions>
+      </Card>
+    );
+  }
+  if (event.event === 'eval_end') {
+    return (
+      <Card size="small" title="输入 / 输出">
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="结果">
+            {stateLabel(eventText(event, 'outcome') ?? '—')}
+          </Descriptions.Item>
+          <Descriptions.Item label="结果字节">{formatNumber(asNumber(event.resultBytes))}</Descriptions.Item>
+          <Descriptions.Item label="工具调用数">{formatNumber(asNumber(event.calls))}</Descriptions.Item>
+          <Descriptions.Item label="超时层">{eventText(event, 'layer') ?? '—'}</Descriptions.Item>
+          {event.error === undefined ? null : (
+            <Descriptions.Item label="错误" span={2}>
+              <span className="mono">{eventText(event, 'error') ?? '—'}</span>
+            </Descriptions.Item>
+          )}
+        </Descriptions>
+      </Card>
+    );
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

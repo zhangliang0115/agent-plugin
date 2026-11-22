@@ -31,6 +31,13 @@ import {
 } from './exec-session.ts';
 import { hardStop, softStop } from './stop.ts';
 
+export interface EvalStartInfo {
+  evalId: number;
+  epoch: number;
+  async: boolean;
+  timeoutMs?: number;
+}
+
 export interface RunEvalOptions {
   /** Async dispatch: return a receipt at once and deliver the result to `onSettled`. */
   async?: boolean;
@@ -38,6 +45,11 @@ export interface RunEvalOptions {
   timeoutMs?: number;
   /** Task-store id allocated by C08; echoed on the receipt and the settlement. */
   evalTaskId?: string;
+  /**
+   * Called once after registration, before the script runs. Observer errors
+   * are swallowed so audit wiring cannot poison an eval.
+   */
+  onStart?: (start: EvalStartInfo) => void;
   /**
    * Called exactly once when the eval settles, sync or async. Observer errors
    * are swallowed so a task-store failure cannot poison an eval.
@@ -105,6 +117,20 @@ function dispatchReceipt(ev: ActiveEval): EvalSettlement {
   return receipt;
 }
 
+function notifyStart(options: RunEvalOptions, ev: ActiveEval): void {
+  if (options.onStart === undefined) return;
+  try {
+    options.onStart({
+      evalId: ev.evalId,
+      epoch: ev.epoch,
+      async: ev.async,
+      ...(ev.timeoutMs === undefined ? {} : { timeoutMs: ev.timeoutMs }),
+    });
+  } catch {
+    // Observer errors must not poison an eval.
+  }
+}
+
 /** Async path: register, hand the code to the executor, release the lock. */
 async function dispatchEval(
   session: ExecSession,
@@ -117,6 +143,7 @@ async function dispatchEval(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(options.evalTaskId === undefined ? {} : { evalTaskId: options.evalTaskId }),
   });
+  notifyStart(options, ev);
   const executor = session.executor;
   if (executor === null) {
     const settlement = session.settleEval(ev, {
@@ -158,6 +185,7 @@ async function executeEval(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(options.evalTaskId === undefined ? {} : { evalTaskId: options.evalTaskId }),
   });
+  notifyStart(options, ev);
   const executor = session.executor;
   if (executor === null) {
     return session.settleEval(ev, {

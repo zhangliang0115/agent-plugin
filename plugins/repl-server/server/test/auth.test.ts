@@ -13,13 +13,17 @@ import {
 import {
   authorizeAdminRequest,
   createCsrfToken,
+  DEFAULT_HOST_ALLOWLIST,
   isAllowedHost,
+  isLoopbackBindAddress,
   isSameOrigin,
   parseBearer,
+  parseHostAllowlist,
   sha256Hex,
   timingSafeEqualString,
   verifyCsrf,
   type AdminAuthResult,
+  type HostAllowlist,
 } from '../src/auth/tokens.ts';
 
 const CLIENT_TOKEN = 'client-token-abc';
@@ -277,6 +281,40 @@ test('admin: host check strips the port and rejects rebinding-style hosts', () =
   assert.equal(isAllowedHost('[::1]:8787'), false);
   assert.equal(isAllowedHost(undefined), false);
   assert.equal(isAllowedHost(''), false);
+});
+
+test('admin: custom host allowlists accept a tailnet suffix without opening other names', () => {
+  const tailnet: HostAllowlist = ['*.ts.net', '127.0.0.1', 'localhost'];
+  assert.equal(isAllowedHost('sh-mac.tail27b036.ts.net:8787', tailnet), true);
+  assert.equal(isAllowedHost('SH-MAC.TAIL27B036.TS.NET', tailnet), true);
+  assert.equal(isAllowedHost('ts.net', tailnet), true);
+  assert.equal(isAllowedHost('evil.example:8787', tailnet), false);
+  assert.equal(isAllowedHost('evilts.net', tailnet), false);
+  assert.equal(isAllowedHost('sh-mac.tail27b036.ts.net', '*'), true);
+  assert.equal(isAllowedHost('evil.example', ['*']), true);
+  assert.equal(isAllowedHost('[::1]:8787', ['[::1]']), true);
+});
+
+test('admin: parseHostAllowlist keeps the default for empty input and supports wildcards', () => {
+  assert.deepEqual(parseHostAllowlist(undefined), DEFAULT_HOST_ALLOWLIST);
+  assert.deepEqual(parseHostAllowlist('  '), DEFAULT_HOST_ALLOWLIST);
+  assert.deepEqual(parseHostAllowlist(' , '), DEFAULT_HOST_ALLOWLIST);
+  assert.equal(parseHostAllowlist('*'), '*');
+  assert.deepEqual(parseHostAllowlist('127.0.0.1, localhost ,*.ts.net'), [
+    '127.0.0.1',
+    'localhost',
+    '*.ts.net',
+  ]);
+});
+
+test('admin: loopback bind detection covers IPv4, names and IPv6', () => {
+  assert.equal(isLoopbackBindAddress('127.0.0.1'), true);
+  assert.equal(isLoopbackBindAddress('localhost'), true);
+  assert.equal(isLoopbackBindAddress('::1'), true);
+  assert.equal(isLoopbackBindAddress('[::1]'), true);
+  assert.equal(isLoopbackBindAddress('0.0.0.0'), false);
+  assert.equal(isLoopbackBindAddress('100.87.103.111'), false);
+  assert.equal(isLoopbackBindAddress('sh-mac.tail27b036.ts.net'), false);
 });
 
 test('admin: same-origin comparison uses the host header, including the port', () => {

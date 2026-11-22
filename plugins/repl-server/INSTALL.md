@@ -25,6 +25,28 @@ npm install -g @zhangliang0115/repl-server
 repl-server --port 8787
 ```
 
+### 远程访问（Tailscale 等）
+
+默认只绑 loopback。绑定非 loopback 地址时必须同时开严格鉴权：
+
+```bash
+repl-server --host 0.0.0.0 \
+  --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
+  --strict-auth --admin-require-token
+```
+
+- `--allowed-hosts` 只放行列出的 `Host`，Tailscale 域名可写成 `*.ts.net`。
+- 严格模式下 `/mcp` 必须带已注册的 client token；全局 `mcp-token` 和无 token 都返回 401。
+- 管理端不再自动登录，打开 `http://<node>.<tailnet>.ts.net:8787/admin?token=<admin-token>` 换 session。
+- MCP 客户端 URL 换成 `http://<node>.<tailnet>.ts.net:8787/mcp`，token 不变。
+- 需要 HTTPS 时让 Tailscale Serve 终止 TLS（不影响已有的 443 规则）：
+
+  ```bash
+  tailscale serve --bg --https=8443 http://127.0.0.1:8787
+  ```
+
+  然后用 `https://<node>.<tailnet>.ts.net:8443/mcp`。服务本身只讲 HTTP，证书和 TLS 都由 Serve 处理。
+
 ### 配置 MCP
 
 在 Claude Code 的用户级或项目级 MCP 配置里加：
@@ -63,4 +85,4 @@ curl -s http://127.0.0.1:8787/health
 
 - `EADDRINUSE`：端口被占用，换 `--port`。
 - 401：token 未知或已撤销；重新创建绑定。
-- 管理端打不开：确认 `admin-token` 与 `Host` 是 `127.0.0.1`/`localhost`。
+- 管理端打不开：确认 `Host` 在 `--allowed-hosts` 里；远程访问时还要在 URL 带 `?token=<admin-token>`。

@@ -13,7 +13,7 @@
 | `/admin/*` | 管理 API 与静态页 | `admin-token` 或同源 Cookie |
 | `/health` | 存活检查 | 无 |
 
-只绑 `127.0.0.1`，校验 `Host` 为 `127.0.0.1` / `localhost`（比较时先剥端口）。
+默认只绑 `127.0.0.1`，校验 `Host` 为 `127.0.0.1` / `localhost`（比较时先剥端口）。远程访问用 `--host` 改绑定地址，用 `--allowed-hosts` 显式放行域名（逗号分隔，支持 `*` 和 `*.ts.net` 后缀）；非 loopback 绑定必须同时给 `--strict-auth`，否则拒绝启动。
 
 `/admin/api/reports`、`/admin/api/alerts/*`、`/admin/api/servers/:id/tools/discover`、`/admin/api/ai/*` 是管理面 HTTP 端点，**不属于本文的 MCP 契约**；其请求/响应形状以 `claude-code/自建设计/` 06–08 为准。
 
@@ -22,10 +22,17 @@
 ```bash
 repl-server --port 8787            # HTTP daemon；--port 0 允许，实际端口写 stderr
 repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
+
+# 远程 / 反代：绑定所有地址，只放行本机与 tailnet 域名
+repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
+  --strict-auth --admin-require-token
 ```
 
 - 数据根：`AGENTS_HOME`，默认 `~/.agents`；状态在 `$AGENTS_HOME/repl-server/`。
-- 严格模式：`--strict-auth`；默认宽松。
+- 严格模式：`--strict-auth`；默认宽松。非 loopback 绑定时宽松模式会直接拒绝启动。
+- `--admin-require-token`：关闭管理端自动登录。默认只在 loopback 绑定时，静态 GET 会用 `admin-token` 自动换 session；非 loopback 绑定默认关闭。关闭后打开管理端用 `/admin?token=<admin-token>` 或启动日志里的一次性 bootstrap token 交换 session。
+- `--allowed-hosts '*'` 关闭 Host 校验，只应在前面已有可信反向代理或私有网络时使用。
+- 服务本身只讲 HTTP；远程 HTTPS 由 Tailscale Serve 等反代终止 TLS（例如 `tailscale serve --bg --https=8443 http://127.0.0.1:8787`，再用 `https://<node>.<tailnet>.ts.net:8443/mcp`）。
 - `claude` 二进制：`REPL_CLAUDE_BIN` > `PATH` 里的 `claude`。
 - stdio 模式是 1:1 bridge：要求 daemon 已运行，stdin/stdout 只走 JSON-RPC，server-initiated requests（roots/list、elicitation）双向转发；缺 token 或 daemon 不可达时以退出码 2 结束并写 stderr。
 - 单实例锁：`$AGENTS_HOME/repl-server/state.db.lock`，内容 `{pid, startedAt}`。启动时若 PID 不存在或不是 repl-server，按 stale 重写；并发启动仍用 `O_EXCL` 保证只有一个赢家。

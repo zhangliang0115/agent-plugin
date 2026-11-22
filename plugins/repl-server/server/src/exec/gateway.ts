@@ -16,6 +16,7 @@ import {
   resolveEvalTimeout,
   runEval,
   Sandbox,
+  summarizeArgs,
   type EvalExecutor,
   type EvalSettlement,
   type OutputDocument,
@@ -27,6 +28,7 @@ import {
 
 import type {
   Catalog,
+  CatalogTool,
   Clock,
   ExecutionGateway,
   InFlightEvalView,
@@ -37,6 +39,7 @@ import type {
   TaskSnapshot,
 } from '../ports.ts';
 import { resolveWorkspace, type WorkspaceFileSystem } from '../sessions/workspace.ts';
+import { canonicalToolName as catalogToolName } from '../tools/registry.ts';
 import { type CapacityLimits } from './capacity.ts';
 import {
   ExecSessionRegistry,
@@ -230,10 +233,37 @@ function toolServer(call: ToolCallRequest): string {
   return call.server ?? OFFICIAL_TOOL_SERVER;
 }
 
-/** Correlation fields shared by the tool events of one eval. */
+/** Correlation and identity fields shared by the tool events of one eval. */
 function runFields(runtime: SessionRuntime, evalId: number): Record<string, unknown> {
   const runId = runtime.runIds.get(evalId);
-  return { exec: runtime.record.id, ...(runId === undefined ? {} : { runId }) };
+  const record = runtime.record;
+  return {
+    exec: record.id,
+    mcp: record.mcpSessionId,
+    binding: record.binding,
+    ...(record.clientLabel === '' ? {} : { client: record.clientLabel }),
+    ...(runId === undefined ? {} : { runId }),
+  };
+}
+
+/** Serialized byte length for audit metadata; never throws on hostile values. */
+function jsonBytes(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text === undefined ? undefined : Buffer.byteLength(text, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Machine-readable error code when the thrown value carries one. */
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code !== '') return code;
+  }
+  return undefined;
 }
 
 /** Age at which the oldest in-flight eval is reported as stuck. */
@@ -753,6 +783,14 @@ export class ExecGateway implements ExecutionGateway {
     return this.takeMedia(runtime, settlement.evalId);
   }
 
+  /** Declared concurrency tier from the catalog, when the snapshot has it. */
+  private toolModeOf(call: ToolCallRequest): CatalogTool['concurrency'] | undefined {
+    const snapshot = this.catalog?.snapshot();
+    if (snapshot === undefined) return undefined;
+    const name = canonicalToolName(call);
+    return snapshot.tools.find((tool) => catalogToolName(tool) === name)?.concurrency;
+  }
+
   /**
    * Applies an eval's filter before the call reaches the injected transport,
    * clamps Bash to the eval deadline and enforces the L1 per-call budget with a
@@ -763,12 +801,16 @@ export class ExecGateway implements ExecutionGateway {
     const filter = runtime.filters.get(call.evalId);
     if (filter !== undefined) {
       const hiddenByNames = filter.visible !== undefined && !filter.visible.has(name);
-      if (hiddenByNames || filter.excludedByTag.has(name)) {
+      const excludedByTag = filter.excludedByTag.has(name);
+      if (hiddenByNames || excludedByTag) {
         this.emitAudit({
           event: 'tool_denied',
           evalId: call.evalId,
+          seq: call.callSeq,
           tool: name,
           server: toolServer(call),
+          reason: hiddenByNames ? 'not_visible' : 'excluded_tag',
+          rule: hiddenByNames ? 'visibleTools' : 'excludeTags',
           workspace: runtime.record.workspace,
           ...runFields(runtime, call.evalId),
         });
@@ -807,22 +849,40 @@ export class ExecGateway implements ExecutionGateway {
       signal.removeEventListener('abort', forwardAbort);
     };
 
+    const mode = this.toolModeOf(call);
+    const argsBytes = jsonBytes(args);
     this.emitAudit({
       event: 'tool_call',
       evalId: call.evalId,
+      seq: call.callSeq,
       tool: name,
       server: toolServer(call),
+      ...(mode === undefined ? {} : { mode }),
+      queuedAt: started,
+      args: summarizeArgs(name, args),
+      ...(argsBytes === undefined ? {} : { argsBytes }),
       workspace: runtime.record.workspace,
       ...runFields(runtime, call.evalId),
     });
-    const finish = (ok: boolean, error?: unknown): void => {
+    const finish = (ok: boolean, error?: unknown, value?: unknown): void => {
+      const endedAt = this.now();
+      const ms = endedAt - started;
+      const outBytes = jsonBytes(value);
+      const errorCode = errorCodeOf(error);
       this.emitAudit({
         event: 'tool_result',
         evalId: call.evalId,
+        seq: call.callSeq,
         tool: name,
         server: toolServer(call),
         ok,
-        durMs: this.now() - started,
+        queueMs: 0,
+        ms,
+        startedAt: started,
+        endedAt,
+        durMs: ms,
+        ...(outBytes === undefined ? {} : { outBytes }),
+        ...(errorCode === undefined ? {} : { errorCode }),
         ...runFields(runtime, call.evalId),
         ...(error === undefined ? {} : { error: { message: (error as Error).message ?? String(error) } }),
       });
@@ -841,7 +901,7 @@ export class ExecGateway implements ExecutionGateway {
       return raceAbort(Promise.resolve(outcome), controller.signal)
         .then((value) => {
           this.collectMedia(runtime, call.evalId, value);
-          finish(true);
+          finish(true, undefined, value);
           return value;
         })
         .catch((error: unknown) => {
@@ -880,12 +940,17 @@ export class ExecGateway implements ExecutionGateway {
     exec: ExecSessionRecord<SessionRuntime, unknown>,
     mode: 'sync' | 'async',
     runId: string,
+    start: { evalId: number; epoch: number; timeoutMs?: number },
   ): void {
     this.emitAudit({
       event: 'eval_start',
       exec: exec.id,
       runId,
+      evalId: start.evalId,
+      epoch: start.epoch,
       mode,
+      async: mode === 'async',
+      ...(start.timeoutMs === undefined ? {} : { timeoutMs: start.timeoutMs }),
       workspace: exec.workspace,
       ...this.identityFields(request),
       ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
@@ -901,6 +966,7 @@ export class ExecGateway implements ExecutionGateway {
     settlement: EvalSettlement,
     runId: string,
   ): void {
+    const resultBytes = jsonBytes(settlement.result) ?? 0;
     this.emitAudit({
       event: 'eval_end',
       exec: exec.id,
@@ -910,6 +976,9 @@ export class ExecGateway implements ExecutionGateway {
       ...this.identityFields(request),
       ok: settlement.ok,
       outcome: settlement.outcome,
+      ...(settlement.layer === undefined ? {} : { layer: settlement.layer }),
+      calls: settlement.budget?.calls ?? 0,
+      resultBytes,
       ms: settlement.ms,
       ...(settlement.error === undefined ? {} : { error: String(settlement.error) }),
     });
@@ -929,11 +998,11 @@ export class ExecGateway implements ExecutionGateway {
       const timeoutMs = this.evalTimeoutFor(request);
       const deadline = timeoutMs === undefined ? undefined : this.now() + timeoutMs;
       const runId = randomUUID();
-      this.emitEvalStart(request, record, 'sync', runId);
       const settlement = await this.withEvalContext(request, filter, deadline, runId, () =>
         runEval(runtime.session, request.code, {
           async: false,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          onStart: (start) => this.emitEvalStart(request, record, 'sync', runId, start),
         }),
       );
       this.emitEvalEnd(request, record, settlement, runId);
@@ -964,7 +1033,6 @@ export class ExecGateway implements ExecutionGateway {
       taskId = created;
       this.taskLinks.set(created, { sessionId: record.id, owner });
       const runId = randomUUID();
-      this.emitEvalStart(request, record, 'async', runId);
 
       const onSettled = (settled: EvalSettlement): void => {
         this.finishTask(created, runtime, settled);
@@ -977,6 +1045,7 @@ export class ExecGateway implements ExecutionGateway {
           async: true,
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
           evalTaskId: created,
+          onStart: (start) => this.emitEvalStart(request, record, 'async', runId, start),
           onSettled,
         }),
       );

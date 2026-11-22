@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { parseCookieHeader, serializeCookie } from '../src/auth/tokens.ts';
+import { parseCookieHeader, serializeCookie, type HostAllowlist } from '../src/auth/tokens.ts';
 import { handleAdminHttp } from '../src/admin/http-adapter.ts';
 import { createAdminOverviewHandler } from '../src/admin/overview.ts';
 import {
@@ -41,6 +41,8 @@ async function listen(options: {
   session?: AdminSession;
   staticDir?: string;
   handlers?: readonly AdminHandler[];
+  adminAutoLogin?: boolean;
+  allowedHosts?: HostAllowlist;
 }): Promise<Harness> {
   const handlers: AdminHandler[] = [...(options.handlers ?? [])];
   if (options.staticDir !== undefined) {
@@ -64,6 +66,8 @@ async function listen(options: {
         handlers,
         adminToken: ADMIN_TOKEN,
         ...(options.session === undefined ? {} : { session: options.session }),
+        ...(options.adminAutoLogin === undefined ? {} : { adminAutoLogin: options.adminAutoLogin }),
+        ...(options.allowedHosts === undefined ? {} : { allowedHosts: options.allowedHosts }),
         log: () => undefined,
       });
       if (!handled && !res.headersSent) {
@@ -331,6 +335,46 @@ test('admin static assets load without credentials and mint a session on first l
   assert.equal(script.status, 200);
   assert.match(script.headers.get('content-type') ?? '', /text\/javascript/);
   assert.equal(script.headers.getSetCookie().length, 0);
+});
+
+test('with auto-login disabled, static GETs set no cookie but the bootstrap token still works', async (t) => {
+  const staticDir = await createStaticDir();
+  const session = createAdminSession({ adminToken: ADMIN_TOKEN });
+  const harness = await listen({ session, staticDir, adminAutoLogin: false });
+  t.after(() => harness.close());
+
+  const page = await fetch(`${harness.base}/admin`);
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.getSetCookie().length, 0);
+  assert.equal(session.size(), 0);
+
+  const response = await bootstrap(harness.base, session.bootstrapToken ?? '');
+  assert.equal(response.status, 302);
+  const cookie = sessionCookie(response);
+  const api = await fetch(`${harness.base}/admin/api/csrf`, { headers: { cookie } });
+  assert.equal(api.status, 200);
+});
+
+test('a custom Host allowlist admits a tailnet name and still rejects others', async (t) => {
+  const staticDir = await createStaticDir();
+  const session = createAdminSession({ adminToken: ADMIN_TOKEN });
+  const harness = await listen({
+    session,
+    staticDir,
+    allowedHosts: ['*.ts.net', '127.0.0.1', 'localhost'],
+  });
+  t.after(() => harness.close());
+
+  const port = new URL(harness.base).port;
+  const ok = await rawGet(harness.base, '/admin', { host: `sh-mac.tail27b036.ts.net:${port}` });
+  assert.equal(ok.status, 200);
+
+  const denied = await rawGet(harness.base, '/admin', { host: `evil.example:${port}` });
+  assert.equal(denied.status, 403);
+  assert.equal(
+    (JSON.parse(denied.body) as { error: { code: string } }).error.code,
+    'FORBIDDEN_HOST',
+  );
 });
 
 test('admin API requests without a cookie or Bearer are 401', async (t) => {

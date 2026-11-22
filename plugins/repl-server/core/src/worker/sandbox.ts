@@ -175,7 +175,8 @@ export class Sandbox {
     const limits = options.limits ?? {};
     this.sessionId = options.sessionId ?? 'sandbox';
     if (options.entryUrl === undefined) {
-      this.entryUrl = new URL('./entry.ts', import.meta.url);
+      // Source runs load entry.ts; the server bundle ships a sibling entry.js.
+      this.entryUrl = new URL(import.meta.url.endsWith('.js') ? './entry.js' : './entry.ts', import.meta.url);
     } else if (typeof options.entryUrl === 'string') {
       this.entryUrl = new URL(options.entryUrl, import.meta.url);
     } else {

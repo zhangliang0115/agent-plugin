@@ -25,6 +25,7 @@ import { createAuditRuntime } from './audit/runtime.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
 import { createAiService } from './ai/index.ts';
+import { isLoopbackBindAddress, type HostAllowlist } from './auth/tokens.ts';
 import { splitClientLabel } from './client-info.ts';
 import { createDbReportStore } from './reports/store.ts';
 import { createReportService } from './reports/service.ts';
@@ -80,6 +81,13 @@ export interface AssemblyOptions {
   root?: string;
   port?: number;
   host?: string;
+  /** Host allowlist for `/health`, `/mcp` and `/admin`; defaults to loopback-only. */
+  allowedHosts?: HostAllowlist;
+  /**
+   * Static admin auto-login convenience. Defaults to true for loopback and must
+   * be false for any remote bind or reverse proxy.
+   */
+  adminAutoLogin?: boolean;
   strictAuth?: boolean;
   /** Boot id shared with the startup sweep; keeps serve ledgers consistent. */
   bootId?: string;
@@ -872,7 +880,13 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     },
   });
 
+  // Programmatic callers get the same safety default as the CLI: only a loopback
+  // bind may trade the admin token for a session on a static GET.
+  const adminAutoLogin =
+    options.adminAutoLogin ?? isLoopbackBindAddress(options.host ?? '127.0.0.1');
+
   const appOptions: AppOptions = {
+    allowedHosts: options.allowedHosts,
     identity: resolveIdentityConfig({
       mode: options.strictAuth === true ? 'strict' : 'loose',
       globalToken: tokens.mcpToken,
@@ -900,6 +914,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     admin: async (req, res, url) =>
       await handleAdminHttp(req, res, url, {
         adminToken: tokens.adminToken,
+        allowedHosts: options.allowedHosts,
+        adminAutoLogin,
         session: adminSession,
         sse: { events: eventsHub, audit: auditHub },
         handlers: [...adminHandlers, overviewHandler],

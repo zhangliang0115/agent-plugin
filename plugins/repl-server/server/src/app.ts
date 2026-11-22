@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import { createLog, type LogFn } from './log.ts';
-import { isAllowedHost } from './auth/tokens.ts';
+import { isAllowedHost, type HostAllowlist } from './auth/tokens.ts';
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
 import { parseClientInfo } from './client-info.ts';
 import type { JsonRpcDispatcher } from './mcp/jsonrpc.ts';
@@ -26,6 +26,8 @@ export interface McpContext {
 
 export interface AppOptions {
   identity: IdentityConfig;
+  /** Host allowlist for `/health` and `/mcp`; defaults to loopback-only. */
+  allowedHosts?: HostAllowlist;
   sessions: TransportSessionRegistry;
   gateway: ExecutionGateway;
   catalog: Catalog;
@@ -107,7 +109,10 @@ export function createApp(options: AppOptions): Server {
     try {
       // DNS-rebinding guard for the public surfaces; the admin layer applies
       // the same check on its own path (protocol.md §1).
-      if ((url.pathname === '/health' || url.pathname === '/mcp') && !isAllowedHost(req.headers.host)) {
+      if (
+        (url.pathname === '/health' || url.pathname === '/mcp')
+        && !isAllowedHost(req.headers.host, options.allowedHosts)
+      ) {
         sendJson(res, 403, {
           error: { code: 'FORBIDDEN_HOST', message: `host not allowed: ${req.headers.host ?? '<missing>'}` },
         });

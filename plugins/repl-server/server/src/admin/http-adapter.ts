@@ -1,7 +1,7 @@
 import type { LogFn } from '../log.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { authorizeAdminRequest, isAllowedHost } from '../auth/tokens.ts';
+import { authorizeAdminRequest, isAllowedHost, type HostAllowlist } from '../auth/tokens.ts';
 import { errorResponse, type AdminHandler, type AdminRequest } from './servers.ts';
 import { createAdminBootstrapHandler, type AdminSession } from './session.ts';
 import type { EventHub } from './events.ts';
@@ -9,6 +9,14 @@ import type { EventHub } from './events.ts';
 export interface AdminHttpOptions {
   handlers: readonly AdminHandler[];
   adminToken: string;
+  /** Host allowlist; defaults to loopback-only. */
+  allowedHosts?: HostAllowlist;
+  /**
+   * Local convenience: a static GET without a session exchanges the admin token
+   * for one. Must be false when the admin surface is reachable from another
+   * machine (non-loopback bind or a reverse proxy such as Tailscale Serve).
+   */
+  adminAutoLogin?: boolean;
   /**
    * Cookie-session layer for the browser UI. Without it, `/admin` static assets are still
    * served but every `/admin/api/*` request needs Bearer `admin-token`, exactly as before
@@ -151,7 +159,7 @@ export async function handleAdminHttp(
   const host = header(req, 'host');
 
   // DNS-rebinding guard for every admin surface, including static assets and bootstrap.
-  if (!isAllowedHost(host)) {
+  if (!isAllowedHost(host, options.allowedHosts)) {
     send(res, 403, {
       error: { code: 'FORBIDDEN_HOST', message: `host not allowed: ${host ?? '<missing>'}` },
     });
@@ -176,8 +184,9 @@ export async function handleAdminHttp(
         return true;
       }
       // Local admin has no password: the first static GET without a live session cookie
-      // trades the configured admin token for one, so the SPA enters directly.
-      if (options.session.authenticate(cookie) === null) {
+      // trades the configured admin token for one, so the SPA enters directly. Remote
+      // binds must require the bootstrap token instead.
+      if (options.adminAutoLogin !== false && options.session.authenticate(cookie) === null) {
         const state = options.session.exchange(options.adminToken);
         if (state !== null) extraHeaders = { 'set-cookie': options.session.cookie(state) };
       }
@@ -195,7 +204,11 @@ export async function handleAdminHttp(
       csrfToken: header(req, 'x-csrf-token'),
       sessionAuthenticated: state !== null,
     },
-    { adminToken: options.adminToken, csrfToken: state?.csrfToken ?? null },
+    {
+      adminToken: options.adminToken,
+      csrfToken: state?.csrfToken ?? null,
+      allowedHosts: options.allowedHosts,
+    },
   );
 
   if (!auth.ok) {
