@@ -25,12 +25,12 @@ repl-server --stdio --url http://127.0.0.1:8787/mcp --token-file <path>
 
 # 远程 / 反代：绑定所有地址，只放行本机与 tailnet 域名
 repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
-  --strict-auth --admin-require-token
+  --strict-auth
 ```
 
 - 数据根：`AGENTS_HOME`，默认 `~/.agents`；状态在 `$AGENTS_HOME/repl-server/`。
 - 严格模式：`--strict-auth`；默认宽松。非 loopback 绑定时宽松模式会直接拒绝启动。
-- `--admin-require-token`：关闭管理端自动登录。默认只在 loopback 绑定时，静态 GET 会用 `admin-token` 自动换 session；非 loopback 绑定默认关闭。关闭后打开管理端用 `/admin?token=<admin-token>` 或启动日志里的一次性 bootstrap token 交换 session。
+- `--admin-require-token`：关闭管理端自动登录。默认对来自 loopback 的请求生效（本机浏览器，或 Tailscale Serve 等本机反代），静态 GET 会用 `admin-token` 自动换 session；直连 8787 的远程客户端仍需 token。关闭自动登录后，打开管理端用 `/admin?token=<admin-token>` 或启动日志里的一次性 bootstrap token 交换 session。
 - `--allowed-hosts '*'` 关闭 Host 校验，只应在前面已有可信反向代理或私有网络时使用。
 - 服务本身只讲 HTTP；远程 HTTPS 由 Tailscale Serve 等反代终止 TLS（例如 `tailscale serve --bg --https=8443 http://127.0.0.1:8787`，再用 `https://<node>.<tailnet>.ts.net:8443/mcp`）。
 - `claude` 二进制：`REPL_CLAUDE_BIN` > `PATH` 里的 `claude`。

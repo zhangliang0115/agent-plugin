@@ -54,7 +54,7 @@ function readOptions(argv: readonly string[]): CliOptions {
     allowedHosts: parseHostAllowlist(
       stringArg(argv, '--allowed-hosts') ?? process.env['REPL_SERVER_ALLOWED_HOSTS'],
     ),
-    adminAutoLogin: !argv.includes('--admin-require-token') && isLoopbackBindAddress(host),
+    adminAutoLogin: !argv.includes('--admin-require-token'),
     strictAuth,
     stdio: argv.includes('--stdio'),
     url: stringArg(argv, '--url') ?? 'http://127.0.0.1:8787/mcp',

@@ -15,6 +15,7 @@ import {
   createCsrfToken,
   DEFAULT_HOST_ALLOWLIST,
   isAllowedHost,
+  isLoopbackAddress,
   isLoopbackBindAddress,
   isSameOrigin,
   parseBearer,
@@ -315,6 +316,15 @@ test('admin: loopback bind detection covers IPv4, names and IPv6', () => {
   assert.equal(isLoopbackBindAddress('0.0.0.0'), false);
   assert.equal(isLoopbackBindAddress('100.87.103.111'), false);
   assert.equal(isLoopbackBindAddress('sh-mac.tail27b036.ts.net'), false);
+});
+
+test('admin: only loopback TCP peers qualify for auto-login', () => {
+  assert.equal(isLoopbackAddress('127.0.0.1'), true);
+  assert.equal(isLoopbackAddress('::1'), true);
+  assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true);
+  assert.equal(isLoopbackAddress('192.168.1.50'), false);
+  assert.equal(isLoopbackAddress('100.87.103.111'), false);
+  assert.equal(isLoopbackAddress(undefined), false);
 });
 
 test('admin: same-origin comparison uses the host header, including the port', () => {

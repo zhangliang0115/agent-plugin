@@ -36,7 +36,7 @@ export function parseBearer(header: string | null | undefined): BearerHeader {
   return { kind: 'token', token };
 }
 
-/** Lowercased host without its port; IPv6 literals are returned whole (and therefore rejected). */
+/** Lowercased host without its port; IPv6 literals keep their brackets but lose the port. */
 export function normalizeHost(host: string): string {
   const trimmed = host.trim().toLowerCase();
   if (trimmed.startsWith('[')) {
@@ -98,6 +98,13 @@ export function isLoopbackBindAddress(host: string): boolean {
     || normalized === '::1'
     || normalized === '[::1]'
   );
+}
+
+/** True for a loopback TCP peer, including IPv4-mapped IPv6 (`::ffff:127.0.0.1`). */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  const normalized = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+  return isLoopbackBindAddress(normalized);
 }
 
 /** True when `Origin` names the same host:port as the request `Host` header. */

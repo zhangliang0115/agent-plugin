@@ -32,12 +32,12 @@ repl-server --port 8787
 ```bash
 repl-server --host 0.0.0.0 \
   --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
-  --strict-auth --admin-require-token
+  --strict-auth
 ```
 
 - `--allowed-hosts` 只放行列出的 `Host`，Tailscale 域名可写成 `*.ts.net`。
 - 严格模式下 `/mcp` 必须带已注册的 client token；全局 `mcp-token` 和无 token 都返回 401。
-- 管理端不再自动登录，打开 `http://<node>.<tailnet>.ts.net:8787/admin?token=<admin-token>` 换 session。
+- 管理端自动登录只对 loopback 请求生效：本机浏览器和 Tailscale Serve 转发的请求直接进入；直连 8787 的其他设备仍需 `/admin?token=<admin-token>`。
 - MCP 客户端 URL 换成 `http://<node>.<tailnet>.ts.net:8787/mcp`，token 不变。
 - 需要 HTTPS 时让 Tailscale Serve 终止 TLS（不影响已有的 443 规则）：
 

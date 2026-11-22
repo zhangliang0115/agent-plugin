@@ -1,7 +1,12 @@
 import type { LogFn } from '../log.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { authorizeAdminRequest, isAllowedHost, type HostAllowlist } from '../auth/tokens.ts';
+import {
+  authorizeAdminRequest,
+  isAllowedHost,
+  isLoopbackAddress,
+  type HostAllowlist,
+} from '../auth/tokens.ts';
 import { errorResponse, type AdminHandler, type AdminRequest } from './servers.ts';
 import { createAdminBootstrapHandler, type AdminSession } from './session.ts';
 import type { EventHub } from './events.ts';
@@ -12,9 +17,10 @@ export interface AdminHttpOptions {
   /** Host allowlist; defaults to loopback-only. */
   allowedHosts?: HostAllowlist;
   /**
-   * Local convenience: a static GET without a session exchanges the admin token
-   * for one. Must be false when the admin surface is reachable from another
-   * machine (non-loopback bind or a reverse proxy such as Tailscale Serve).
+   * Local convenience: a static GET from a loopback peer without a session
+   * exchanges the admin token for one. Local reverse proxies (Tailscale Serve)
+   * connect over loopback and inherit this; direct remote clients do not.
+   * `--admin-require-token` disables it.
    */
   adminAutoLogin?: boolean;
   /**
@@ -183,10 +189,14 @@ export async function handleAdminHttp(
         send(res, response.status, response.body, response.headers);
         return true;
       }
-      // Local admin has no password: the first static GET without a live session cookie
-      // trades the configured admin token for one, so the SPA enters directly. Remote
-      // binds must require the bootstrap token instead.
-      if (options.adminAutoLogin !== false && options.session.authenticate(cookie) === null) {
+      // Local admin has no password: the first static GET from a loopback peer trades
+      // the configured admin token for a session, so the SPA enters directly. A local
+      // reverse proxy (Tailscale Serve) counts as loopback; direct remote clients do not.
+      if (
+        options.adminAutoLogin !== false
+        && isLoopbackAddress(req.socket.remoteAddress)
+        && options.session.authenticate(cookie) === null
+      ) {
         const state = options.session.exchange(options.adminToken);
         if (state !== null) extraHeaders = { 'set-cookie': options.session.cookie(state) };
       }
