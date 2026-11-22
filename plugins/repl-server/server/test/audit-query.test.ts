@@ -255,6 +255,22 @@ test('ai_run maps outcome to status and serverId to the server filter', () => {
   assert.equal(matchesFilter(failed, normalizeFilter({ server: 'srv_other' })), false);
 });
 
+test('eval_end maps outcome to status', () => {
+  const base = {
+    v: 1,
+    ts: new Date(DAY_18).toISOString(),
+    event: 'eval_end',
+    exec: 'es_1',
+    evalId: 1,
+  } as unknown as AuditEvent;
+
+  assert.equal(eventStatus({ ...base, outcome: 'ok' } as AuditEvent), 'ok');
+  assert.equal(eventStatus({ ...base, outcome: 'error' } as AuditEvent), 'error');
+  assert.equal(eventStatus({ ...base, outcome: 'worker_dead' } as AuditEvent), 'error');
+  assert.equal(eventStatus({ ...base, outcome: 'timeout' } as AuditEvent), 'timeout');
+  assert.equal(eventStatus({ ...base, outcome: 'cancelled' } as AuditEvent), 'ok');
+});
+
 test('matchesFilter and parseAuditQueryParams support the eval runId', () => {
   const event = {
     event: 'tool_call',

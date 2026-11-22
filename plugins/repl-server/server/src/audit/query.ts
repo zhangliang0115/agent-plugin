@@ -518,7 +518,11 @@ export function parseAuditEvent(text: string): AuditEvent | null {
 /** Status mapping frozen in `docs/03 §4.6`. */
 export function eventStatus(event: AuditEvent): AuditStatus {
   if (event.event === 'tool_result') return event.ok === false ? 'error' : 'ok';
-  if (event.event === 'eval_end') return event.outcome === 'timeout' ? 'timeout' : 'ok';
+  if (event.event === 'eval_end') {
+    if (event.outcome === 'timeout') return 'timeout';
+    if (event.outcome === 'error' || event.outcome === 'worker_dead') return 'error';
+    return 'ok';
+  }
   // AI runs carry `outcome` instead of `ok` (design 08 §2.4).
   if (event.event === 'ai_run') return event.outcome === 'error' ? 'error' : 'ok';
   return 'ok';
@@ -1043,7 +1047,11 @@ const STATS_WORKER_SOURCE = [
   '',
   'function statusOf(event) {',
   "  if (event.event === 'tool_result') return event.ok === false ? 'error' : 'ok';",
-  "  if (event.event === 'eval_end') return event.outcome === 'timeout' ? 'timeout' : 'ok';",
+  "  if (event.event === 'eval_end') {",
+  "    if (event.outcome === 'timeout') return 'timeout';",
+  "    if (event.outcome === 'error' || event.outcome === 'worker_dead') return 'error';",
+  "    return 'ok';",
+  "  }",
   "  if (event.event === 'ai_run') return event.outcome === 'error' ? 'error' : 'ok';",
   "  return 'ok';",
   '}',

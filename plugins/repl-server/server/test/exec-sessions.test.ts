@@ -408,53 +408,61 @@ test('LRU orders by lastEvalAt, not createdAt', () => {
   assert.equal(registry.get(a.id), a);
 });
 
-test('caps in-flight evals per execution session at 8', () => {
+test('caps in-flight evals per execution session at 64', () => {
   const clock = new ManualClock();
   const registry = new ExecSessionRegistry({ clock });
   const request = { mcpSessionId: 'mcp_a', workspace: '/a' };
 
   const session = registry.beginEval(request);
   assert.equal(session.inFlightEvals, 1);
-  for (let index = 2; index <= 8; index += 1) {
+  for (let index = 2; index <= 64; index += 1) {
     assert.equal(registry.beginEval(request).inFlightEvals, index);
   }
 
   expectCapacityError(() => registry.beginEval(request), {
     resource: 'in_flight_evals_per_exec_session',
-    current: 8,
-    limit: 8,
+    current: 64,
+    limit: 64,
     scope: session.id,
   });
 
-  assert.equal(registry.endEval(session), 7);
-  assert.equal(registry.beginEval(request).inFlightEvals, 8);
+  assert.equal(registry.endEval(session), 63);
+  assert.equal(registry.beginEval(request).inFlightEvals, 64);
 });
 
-test('caps in-flight evals per binding at 16 across execution sessions', () => {
+test('caps in-flight evals per binding at 256 across execution sessions', () => {
   const clock = new ManualClock();
   const registry = new ExecSessionRegistry({ clock });
   const binding = 'cb_work';
   const requestA = { mcpSessionId: 'mcp_a', workspace: '/a', binding };
   const requestB = { mcpSessionId: 'mcp_a', workspace: '/b', binding };
+  const requestC = { mcpSessionId: 'mcp_a', workspace: '/c', binding };
+  const requestD = { mcpSessionId: 'mcp_a', workspace: '/d', binding };
 
   const sessionA = registry.beginEval(requestA);
   const sessionB = registry.beginEval(requestB);
-  for (let index = 1; index < 8; index += 1) {
+  const sessionC = registry.beginEval(requestC);
+  const sessionD = registry.beginEval(requestD);
+  for (let index = 1; index < 64; index += 1) {
     registry.beginEval(requestA);
     registry.beginEval(requestB);
+    registry.beginEval(requestC);
+    registry.beginEval(requestD);
   }
-  assert.equal(sessionA.inFlightEvals, 8);
-  assert.equal(sessionB.inFlightEvals, 8);
+  assert.equal(sessionA.inFlightEvals, 64);
+  assert.equal(sessionB.inFlightEvals, 64);
+  assert.equal(sessionC.inFlightEvals, 64);
+  assert.equal(sessionD.inFlightEvals, 64);
 
   expectCapacityError(() => registry.beginEval(requestA), {
     resource: 'in_flight_evals_per_binding',
-    current: 16,
-    limit: 16,
+    current: 256,
+    limit: 256,
     scope: 'binding:cb_work',
   });
 
-  assert.equal(registry.endEval(sessionA), 7);
-  assert.equal(registry.beginEval(requestA).inFlightEvals, 8);
+  assert.equal(registry.endEval(sessionA), 63);
+  assert.equal(registry.beginEval(requestA).inFlightEvals, 64);
 });
 
 test('beginEval marks the session active and endEval releases the slot', () => {

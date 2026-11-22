@@ -6,6 +6,7 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   tool_denied: '工具拒绝',
   eval_start: '执行开始',
   eval_end: '执行结束',
+  eval_cancel: '执行取消',
   exec_start: '会话开始',
   exec_end: '会话结束',
   exec_hibernate: '会话休眠',

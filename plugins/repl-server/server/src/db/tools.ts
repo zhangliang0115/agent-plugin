@@ -196,9 +196,10 @@ export function upsertTool(
 export type SeedToolOutcome = 'inserted' | 'filled' | 'unchanged';
 
 /**
- * Inserts a fixed tool row on first sight. On later runs it only fills
- * upstream columns that are still empty (`description`, an empty
- * `schema_json`); admin state (`enabled`, `concurrency`, `tags`, `type`,
+ * Inserts a fixed tool row on first sight. On later runs with `refresh` it
+ * rewrites the upstream columns when the definition changed; otherwise it only
+ * fills upstream columns that are still empty (`description`, an empty
+ * `schema_json`). Admin state (`enabled`, `concurrency`, `tags`, `type`,
  * `category`, `description_override`, `composite_code`, `stale*`) is never
  * touched. Runs in the caller's transaction and does not bump the revision.
  */
@@ -206,6 +207,7 @@ export function seedTool(
   db: DatabaseSync,
   serverId: string,
   input: { name: string; description?: string | null; inputSchema: unknown },
+  options: { refresh?: boolean } = {},
 ): SeedToolOutcome {
   const name = requireToolName(input.name);
   const schemaJson = jsonText(input.inputSchema ?? {});
@@ -230,6 +232,21 @@ export function seedTool(
       )
     `).run(serverId, name, input.description ?? null, schemaJson, schemaHash, now, now);
     return 'inserted';
+  }
+
+  if (options.refresh === true) {
+    const description = input.description ?? null;
+    if (existing.description === description && existing.schemaHash === schemaHash) {
+      db.prepare('UPDATE tools SET last_seen_at = ? WHERE server_id = ? AND name = ?')
+        .run(now, serverId, name);
+      return 'unchanged';
+    }
+    db.prepare(`
+      UPDATE tools
+      SET description = ?, schema_json = ?, schema_hash = ?, last_seen_at = ?
+      WHERE server_id = ? AND name = ?
+    `).run(description, schemaJson, schemaHash, now, serverId, name);
+    return 'filled';
   }
 
   const fillDescription = (existing.description ?? '').trim() === '';

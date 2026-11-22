@@ -22,16 +22,21 @@ export interface BuiltinSeedResult {
   filled: number;
 }
 
-/** Idempotent; the revision moves only when a row was inserted or filled. */
+/** Idempotent; the revision moves when a row was inserted, filled or refreshed. */
 export function seedBuiltinTools(db: DatabaseSync): BuiltinSeedResult {
   return withTransaction(db, () => {
     const result: BuiltinSeedResult = { inserted: 0, filled: 0 };
     for (const definition of listTools()) {
-      const outcome = seedTool(db, BUILTIN_SERVER_ID, {
-        name: definition.name,
-        description: definition.description,
-        inputSchema: definition.inputSchema,
-      });
+      const outcome = seedTool(
+        db,
+        BUILTIN_SERVER_ID,
+        {
+          name: definition.name,
+          description: definition.description,
+          inputSchema: definition.inputSchema,
+        },
+        { refresh: true },
+      );
       if (outcome === 'inserted') result.inserted += 1;
       else if (outcome === 'filled') result.filled += 1;
     }

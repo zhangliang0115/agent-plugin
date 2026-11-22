@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalOf, type ExecGatewayOptions } from '../src/exec/gateway.ts';
+import {
+  ExecGateway,
+  STUCK_EVAL_WARN_MS,
+  stuckEvalOf,
+  stuckEvalsOf,
+  type ExecGatewayOptions,
+} from '../src/exec/gateway.ts';
 import type { InFlightEvalView } from '../src/ports.ts';
 
 const identity = { identity: 'unbound' as const, binding: null, client: 'test', mcp: 'mcp_test' };
@@ -227,5 +233,71 @@ test('stuckEvalOf returns only the oldest eval past the threshold', () => {
     ])?.evalId,
     2,
     'the oldest eval decides, regardless of array order',
+  );
+});
+
+test('stuckEvalsOf returns every eval past the threshold', () => {
+  const now = 10_000_000;
+  assert.deepEqual(stuckEvalsOf([]), [], 'no eval means no warnings');
+  assert.deepEqual(
+    stuckEvalsOf([evalView(1, now - 29 * 60_000, now)]),
+    [],
+    'one minute below the 30-minute threshold stays quiet',
+  );
+  const items = [
+    evalView(1, now - 1_000, now),
+    evalView(2, now - 40 * 60_000, now),
+    evalView(3, now - 31 * 60_000, now),
+  ];
+  assert.deepEqual(
+    stuckEvalsOf(items).map((item) => item.evalId),
+    [2, 3],
+    'every eval past the threshold is reported, not only the oldest',
+  );
+  assert.deepEqual(
+    items.map((item) => item.evalId),
+    [1, 2, 3],
+    'the input order is preserved',
+  );
+});
+
+test('cancelEval emits one eval_cancel audit event', async (t) => {
+  const events: Array<Record<string, unknown> & { event: string }> = [];
+  const exec = new ExecGateway({
+    callTool: hangingTool(),
+    onAudit: (event) => events.push(event),
+  });
+  t.after(async () => {
+    await exec.disposeAll();
+  });
+
+  await exec.dispatchScript({
+    code: 'await tools.Hang({}); return 1',
+    timeoutMs: 120_000,
+    async: true,
+    identity,
+  });
+  await waitFor(() => exec.inFlightEvals().total === 1);
+  const item = exec.inFlightEvals().items[0];
+  assert.ok(item !== undefined);
+  events.length = 0;
+
+  assert.equal(await exec.cancelEval(item.exec, item.evalId), true);
+  const cancels = events.filter((event) => event.event === 'eval_cancel');
+  assert.equal(cancels.length, 1, 'the cancel is audited exactly once');
+  const cancel = cancels[0];
+  assert.ok(cancel !== undefined);
+  assert.equal(cancel['by'], 'admin');
+  assert.equal(cancel['exec'], item.exec);
+  assert.equal(cancel['evalId'], item.evalId);
+  assert.equal(cancel['binding'], item.binding);
+  assert.equal(cancel['client'], identity.client);
+  assert.equal(cancel['mcp'], identity.mcp);
+
+  assert.equal(await exec.cancelEval(item.exec, item.evalId), false);
+  assert.equal(
+    events.filter((event) => event.event === 'eval_cancel').length,
+    1,
+    'a missed cancel emits nothing',
   );
 });

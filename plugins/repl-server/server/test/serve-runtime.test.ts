@@ -485,8 +485,8 @@ test('updateLimits hot-applies maxProcesses without stopping existing entries', 
   assert.equal(harness.runtime.maxProcesses, 3, 'a rejected update must not change the limit');
 });
 
-test('the default serve process cap is eight', async (t) => {
+test('the default serve process cap is sixty-four', async (t) => {
   const harness = await createHarness();
   t.after(async () => await harness.cleanup());
-  assert.equal(harness.runtime.maxProcesses, 8);
+  assert.equal(harness.runtime.maxProcesses, 64);
 });

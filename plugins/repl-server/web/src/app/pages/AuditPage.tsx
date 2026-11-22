@@ -1523,7 +1523,13 @@ function eventStatus(event: AuditEvent): string {
   const explicit = event['status'];
   if (typeof explicit === 'string' && explicit !== '') return normalizeExplicitStatus(explicit);
   if (event.event === 'tool_result') return event['ok'] === false ? 'error' : 'ok';
-  if (event.event === 'eval_end') return event['outcome'] === 'timeout' ? 'timeout' : 'ok';
+  if (event.event === 'eval_end') {
+    if (event['outcome'] === 'timeout') return 'timeout';
+    if (event['outcome'] === 'error' || event['outcome'] === 'worker_dead') return 'error';
+    return 'ok';
+  }
+  // The server mapping treats an admin cancel as a normal end.
+  if (event.event === 'eval_cancel') return 'ok';
   if (event.event === 'ai_run') return event['outcome'] === 'error' ? 'error' : 'ok';
   const outcome = event['outcome'];
   if (typeof outcome === 'string' && outcome !== '') {

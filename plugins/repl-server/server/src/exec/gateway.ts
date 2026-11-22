@@ -257,6 +257,14 @@ export function stuckEvalOf(
   return oldest !== undefined && oldest.ageMs >= thresholdMs ? oldest : null;
 }
 
+/** Every eval in `items` whose age reaches `thresholdMs`, in the given order. */
+export function stuckEvalsOf(
+  items: readonly InFlightEvalView[],
+  thresholdMs: number = STUCK_EVAL_WARN_MS,
+): InFlightEvalView[] {
+  return items.filter((item) => item.ageMs >= thresholdMs);
+}
+
 /** Default wall for evals that omit `timeout`; 0 means no wall. */
 const DEFAULT_MAX_EVAL_MS = 0;
 
@@ -1164,6 +1172,15 @@ export class ExecGateway implements ExecutionGateway {
     const runtime = this.runtimes.get(exec);
     const active = runtime?.session.activeEvals.get(evalId);
     if (runtime === undefined || active === undefined) return false;
+    this.emitAudit({
+      event: 'eval_cancel',
+      exec,
+      evalId,
+      binding: runtime.record.binding,
+      client: runtime.record.clientLabel,
+      mcp: runtime.record.mcpSessionId,
+      by: 'admin',
+    });
     this.abortEval(runtime, evalId);
     let timer: NodeJS.Timeout | undefined;
     try {

@@ -6,7 +6,7 @@ import { buildCatalogSnapshot } from '../src/catalog/snapshot.ts';
 import { openStateDb } from '../src/db/migrate.ts';
 import { getRevision } from '../src/db/meta.ts';
 import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID } from '../src/db/servers.ts';
-import { getTool, listTools, patchTool, upsertTool } from '../src/db/tools.ts';
+import { getTool, hashToolSchema, listTools, patchTool, upsertTool } from '../src/db/tools.ts';
 import { seedBuiltinTools } from '../src/tools/builtin-seed.ts';
 import { TOOL_DEFINITIONS, TOOL_ORDER } from '../src/tools/registry.ts';
 
@@ -79,6 +79,31 @@ test('seedBuiltinTools preserves admin fields and only fills empty upstream fiel
   assert.ok(definition);
   assert.equal(filled.description, definition.description);
   assert.deepEqual(filled.inputSchema, definition.inputSchema);
+});
+
+test('seedBuiltinTools refreshes a definition that changed upstream', (t) => {
+  const db = fixture(t);
+  seedBuiltinTools(db);
+  const revisionBefore = getRevision(db);
+  const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'wait_tasks');
+  assert.ok(definition);
+
+  db.prepare('UPDATE tools SET description = ?, schema_json = ?, schema_hash = ? WHERE server_id = ? AND name = ?')
+    .run('旧描述', '{}', 'old_hash', BUILTIN_SERVER_ID, 'wait_tasks');
+
+  const refreshed = seedBuiltinTools(db);
+  assert.deepEqual(refreshed, { inserted: 0, filled: 1 });
+  assert.equal(getRevision(db), revisionBefore + 1);
+
+  const row = getTool(db, BUILTIN_SERVER_ID, 'wait_tasks');
+  assert.ok(row);
+  assert.equal(row.description, definition.description);
+  assert.deepEqual(row.inputSchema, definition.inputSchema);
+  assert.equal(row.schemaHash, hashToolSchema(definition.inputSchema));
+
+  const second = seedBuiltinTools(db);
+  assert.deepEqual(second, { inserted: 0, filled: 0 });
+  assert.equal(getRevision(db), revisionBefore + 1, 'a matching definition is not refreshed again');
 });
 
 test('builtin rows stay out of the execution catalog; official rows do not', (t) => {

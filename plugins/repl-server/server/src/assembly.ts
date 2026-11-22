@@ -46,7 +46,7 @@ import { findBindingByToken, getClientBinding } from './db/clients.ts';
 import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
 import { countToolsByServer, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
-import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalOf, type IdleSweepResult } from './exec/gateway.ts';
+import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalsOf, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
 import { PoolGates } from './pool/gates.ts';
 import { createPoolRuntime } from './pool/runtime.ts';
@@ -956,31 +956,35 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   }, options.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 
-  // A stuck eval is one that stays the oldest in flight past the threshold; it
-  // keeps its key until it settles, so the same eval warns only once.
+  // Each eval warns once when it first crosses the threshold; the key is
+  // dropped once that eval settles.
   const warnedEvals = new Set<string>();
   const evalWatchdogTimer = setInterval(() => {
     if (closing) return;
-    const oldest = gateway.inFlightEvals(1).items[0];
-    if (oldest === undefined) {
+    // The default 200-row page would hide young evals behind old stuck ones.
+    const inFlight = gateway.inFlightEvals(Number.MAX_SAFE_INTEGER);
+    if (inFlight.total === 0) {
       warnedEvals.clear();
       return;
     }
-    const key = `${oldest.exec}:${oldest.evalId}`;
-    // The warned eval is always the oldest while it runs, so a different
-    // oldest means it settled and the next one may warn.
-    if (warnedEvals.size > 0 && !warnedEvals.has(key)) warnedEvals.clear();
-    if (warnedEvals.has(key) || stuckEvalOf([oldest]) === null) return;
-    warnedEvals.add(key);
-    log(`eval ${oldest.evalId} has been in flight for ${oldest.ageMs}ms`, {
-      level: 'warn',
-      scope: 'eval',
-      exec: oldest.exec,
-      evalId: oldest.evalId,
-      binding: oldest.binding,
-      workspace: oldest.workspace,
-      ageMs: oldest.ageMs,
-    });
+    const live = new Set(inFlight.items.map((item) => `${item.exec}:${item.evalId}`));
+    for (const key of warnedEvals) {
+      if (!live.has(key)) warnedEvals.delete(key);
+    }
+    for (const item of stuckEvalsOf(inFlight.items)) {
+      const key = `${item.exec}:${item.evalId}`;
+      if (warnedEvals.has(key)) continue;
+      warnedEvals.add(key);
+      log(`eval ${item.evalId} has been in flight for ${item.ageMs}ms`, {
+        level: 'warn',
+        scope: 'eval',
+        exec: item.exec,
+        evalId: item.evalId,
+        binding: item.binding,
+        workspace: item.workspace,
+        ageMs: item.ageMs,
+      });
+    }
   }, EVAL_WATCHDOG_INTERVAL_MS);
   evalWatchdogTimer.unref();
 
