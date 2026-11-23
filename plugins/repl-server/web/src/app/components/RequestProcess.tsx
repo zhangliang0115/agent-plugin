@@ -14,6 +14,7 @@ import {
   type ProcessToolDetail,
 } from '../../lib/request-process.ts';
 import { PayloadViewer } from './PayloadViewer.tsx';
+import { EditDiff } from './EditDiff.tsx';
 
 const { Text } = Typography;
 
@@ -316,6 +317,8 @@ function WaterfallRow({
 function StepCard({ detail }: { detail: ProcessToolDetail }): React.ReactElement {
   const input = payloadView(detail.call ?? {}, 'args');
   const output = payloadView(detail.result ?? {}, 'result');
+  const tool = typeof detail.call?.['tool'] === 'string' ? detail.call['tool'] : null;
+  const diffTool = tool !== null && ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(tool) ? tool : null;
   return (
     <div className="proc-detail">
       <div className="proc-detail-meta">
@@ -329,6 +332,7 @@ function StepCard({ detail }: { detail: ProcessToolDetail }): React.ReactElement
         {detail.errorCode === null ? null : <Tag color="red">{detail.errorCode}</Tag>}
         {detail.open ? <Tag color="processing">尚未返回</Tag> : null}
       </div>
+      {diffTool === null ? null : <EditDiff tool={diffTool} view={input} maxHeight={220} />}
       <div className="proc-detail-io">
         <div className="proc-detail-col">
           <PayloadViewer label="输入" view={input} maxHeight={200} />

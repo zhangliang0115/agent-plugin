@@ -67,14 +67,14 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | GET | `/events` | SSE 事件流，支持 `Last-Event-ID` 回放 | 长连接 |
 | GET | `/config/export` | 导出声明式 JSON | 同步 |
 | POST | `/config/import` | 导入（可 dry-run） | 202 |
-| GET | `/audit/query` | 按条件查事件，cursor 分页 | 同步，流式过滤 |
-| GET | `/audit/evals/:exec/:evalId` | 一次 eval 的事件（`tool_*` 事件不带 `exec`，会被过滤掉）；`evalId` 只在执行会话内唯一，路径必须带 `exec` | 同步 |
-| GET | `/audit/sessions` | 执行会话列表 | 同步 |
-| GET | `/audit/frames` | 协议帧对（请求 + 响应） | 同步 |
-| GET | `/audit/payload` | 按行上的 `*Ref` 读载荷正文 | 同步，单次最多 8 MiB |
-| GET | `/audit/stats` | 聚合统计 | 同步，结果缓存 10s，后台 worker 扫描 |
-| GET | `/audit/stream` | 审计实时追加（SSE），支持 `Last-Event-ID` 回放 | 长连接 |
-| GET | `/audit/export` | 导出筛选结果（JSONL） | 同步 |
+| GET | `/logs/query` | 按条件查事件，cursor 分页 | 同步，流式过滤 |
+| GET | `/logs/evals/:exec/:evalId` | 一次 eval 的事件（`tool_*` 事件不带 `exec`，会被过滤掉）；`evalId` 只在执行会话内唯一，路径必须带 `exec` | 同步 |
+| GET | `/logs/sessions` | 执行会话列表 | 同步 |
+| GET | `/logs/frames` | 协议帧对（请求 + 响应） | 同步 |
+| GET | `/logs/payload` | 按行上的 `*Ref` 读载荷正文 | 同步，单次最多 8 MiB |
+| GET | `/logs/stats` | 聚合统计 | 同步，结果缓存 10s，后台 worker 扫描 |
+| GET | `/logs/stream` | 审计实时追加（SSE），支持 `Last-Event-ID` 回放 | 长连接 |
+| GET | `/logs/export` | 导出筛选结果（JSONL） | 同步 |
 | POST | `/discover` | 本地环境探测建议 | 同步，5s |
 | POST | `/reports` | 管理端提交报告 | 同步（只落库，不等待告警） |
 | GET | `/reports` | 报告列表，cursor 分页 | 同步 |
@@ -86,7 +86,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | POST | `/alerts/test` | 发一条测试消息 | 同步，排入同一发送队列；最长约 10.5s + 队列/冷却等待 |
 | POST | `/alerts/preview` | 渲染一条合成报告的企业微信消息 | 同步，不发网络 |
 
-**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 14 天 / 200 MiB，按天整删），写盘失败只记限频 warn，不影响采样。
+**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 7 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
 
 **实时并发**：`/overview` 的 `bindings` 返回每个 binding 的 `label`、`execSessions`、`inFlightEvals`、`inFlightCalls`、`queuedCalls`；未绑定客户端归到 `binding: null`。前三项来自执行会话注册表，后两项来自池闸门，页面每 5 秒随 `/overview` 刷新。
 
@@ -180,21 +180,23 @@ event: operation
 data: {"id":"op_...","state":"ok"}
 ```
 
-## 6. 审计查询
+## 6. 事件与日志查询
+
+`/logs/*` 读的是 `log/events-*.jsonl` 这一条合并流：eval 生命周期、工具调用、协议帧、任务、报告、告警、池与发现事件都在里面（`event` 取值见 03 §4.7），**不只是安全审计**。目录名与数据模型仍叫 `audit`（`core/src/audit/`、`AuditEvent`、`AUDIT_SCHEMA_VERSION`），HTTP 面统一用 `logs`——这是"数据模型"与"资源路径"的分层，不是两个词指同一件事。
 
 审计数据是 JSONL 文件（02 §6），不是 SQLite。**必须服务端流式过滤**，不能把整天的文件读进内存再返回。
 
 七个端点列在 §2 的端点总表里，这里只补总表放不下的语义：
 
-- `/audit/query`：默认 100 条/页；多值筛选见下方参数表。
-- `/audit/evals/:exec/:evalId`：`evalId` 只在执行会话内唯一，必须带 `exec`。`tool_call`/`tool_result` 事件带 `exec` 与 `runId`（事件字段见设计 03 §4.7），可按 `exec` 或 `runId` 关联。
-- `/audit/sessions`：按最近活动排序。
-- `/audit/frames?mcp=&id=`：请求与响应配对返回，额外支持 `tool` / `protocol` / `result` 多值筛选。
-- `/audit/payload?ref=&mode=&offset=&limit=`：入参是行上的 `argsRef`/`resultRef`/`paramsRef`/`resultTailRef` 等字段值，`mode` 取 `full|head|tail|range`；返回 `{ ref, mode, total, start, end, truncated, body }`，`body` 是 UTF-8 文本。缺参 400，越界或缺失 404（`PAYLOAD_NOT_FOUND`）。`ref` 只允许落在 `log/` 之内。
+- `/logs/query`：默认 100 条/页；多值筛选见下方参数表。
+- `/logs/evals/:exec/:evalId`：`evalId` 只在执行会话内唯一，必须带 `exec`。`tool_call`/`tool_result` 事件带 `exec` 与 `runId`（事件字段见设计 03 §4.7），可按 `exec` 或 `runId` 关联。
+- `/logs/sessions`：按最近活动排序。
+- `/logs/frames?mcp=&id=`：请求与响应配对返回，额外支持 `tool` / `protocol` / `result` 多值筛选。
+- `/logs/payload?ref=&mode=&offset=&limit=`：入参是行上的 `argsRef`/`resultRef`/`paramsRef`/`resultTailRef` 等字段值，`mode` 取 `full|head|tail|range`；返回 `{ ref, mode, total, start, end, truncated, body }`，`body` 是 UTF-8 文本。缺参 400，越界或缺失 404（`PAYLOAD_NOT_FOUND`）。`ref` 只允许落在 `log/` 之内。
 - 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 7 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。
-- `/audit/stats?from=&to=&groupBy=`：工具调用量（仅 `tool_result`）、错误率、p50/p95、排队均值；响应另带 `retention`（上次清理时间、删除天数/文件数、当前 `log/` 体积）。`p50`/`p95` 是**执行时长**（`ms - queueMs`），`queueAvgMs` 单列排队，所以一个堵在闸门上的调用不会把工具本身算成慢。
-- `/audit/stream`：SSE，新增事件实时推送。
-- `/audit/export`：按当前筛选导出 JSONL。
+- `/logs/stats?from=&to=&groupBy=`：工具调用量（仅 `tool_result`）、错误率、p50/p95、排队均值；响应另带 `retention`（上次清理时间、删除天数/文件数、当前 `log/` 体积）。`p50`/`p95` 是**执行时长**（`ms - queueMs`），`queueAvgMs` 单列排队，所以一个堵在闸门上的调用不会把工具本身算成慢。
+- `/logs/stream`：SSE，新增事件实时推送。
+- `/logs/export`：按当前筛选导出 JSONL。
 
 筛选参数：
 
@@ -210,20 +212,20 @@ taskId            异步任务；匹配事件里的 `evalTaskId`
 tool, server      工具与来源；可多选（`server` 同时匹配 `serverId`）
 method            协议方法；可多选
 status            ok | error | timeout；可多选。按事件类型映射：`tool_result.ok=false` → error；`eval_end.outcome=timeout` → timeout；`eval_end.outcome=error` / `worker_dead` → error；`eval_end.outcome=cancelled` → ok（取消不算失败）；`ai_run.outcome=error` → error，其余 → ok；其他事件默认 ok
-protocol          `/audit/frames` 专用：ok | error | none（无响应）
-result            `/audit/frames` 专用：ok | error | none（`tools/call` 的 `result.isError`；无 `isError` 或非工具请求为 none）
+protocol          `/logs/frames` 专用：ok | error | none（无响应）
+result            `/logs/frames` 专用：ok | error | none（`tools/call` 的 `result.isError`；无 `isError` 或非工具请求为 none）
 minMs, minQueueMs 慢调用筛选
 groupBy           聚合维度：server | tool | client | status
 cursor, limit     分页
 ```
 
-多值参数（`event`、`clientName`、`clientVersion`、`binding`、`tool`、`server`、`method`、`status`）可重复传同名参数，也可以逗号分隔；同一字段内部是 any-of，不同字段之间是 and。`/audit/frames` 的 `tool` 按配对请求的 `params.name` 过滤，`protocol` / `result` 在配对后过滤（响应帧本身没有 `params.name`）。
+多值参数（`event`、`clientName`、`clientVersion`、`binding`、`tool`、`server`、`method`、`status`）可重复传同名参数，也可以逗号分隔；同一字段内部是 any-of，不同字段之间是 and。`/logs/frames` 的 `tool` 按配对请求的 `params.name` 过滤，`protocol` / `result` 在配对后过滤（响应帧本身没有 `params.name`）。
 
 规则：
 
 - 分页用 cursor（文件内的偏移 + 时间戳），不用 offset——文件在增长，offset 会漂移。
-- 聚合在服务端流式计算，按 `(文件, 筛选, groupBy)` 缓存 10s。`/audit/stats` 响应带 `snapshotId` 与 `tookMs`；页面上的数字和列表可能来自不同扫描，UI 必须显示时间差，不能承诺"同一次扫描"。
-- 协议帧以 `full` 模式记录（报文脱敏：键名与值都过一遍，base64 转 `{mimeType, bytes, sha256}`）。报文不再截断：≤4 KiB 内联在帧行上，更大的写进 `payload/`，行上留 `paramsRef`/`resultRef` + 2 KiB 预览 + `paramsBytes`/`resultBytes` + sha256，正文用 `/audit/payload` 取。`/audit/frames` 的 `detail=summary` 只返回元数据，`detail=full` 返回报文（含 ref 字段）。
+- 聚合在服务端流式计算，按 `(文件, 筛选, groupBy)` 缓存 10s。`/logs/stats` 响应带 `snapshotId` 与 `tookMs`；页面上的数字和列表可能来自不同扫描，UI 必须显示时间差，不能承诺"同一次扫描"。
+- 协议帧以 `full` 模式记录（报文脱敏：键名与值都过一遍，base64 转 `{mimeType, bytes, sha256}`）。报文不再截断：≤4 KiB 内联在帧行上，更大的写进 `payload/`，行上留 `paramsRef`/`resultRef` + 2 KiB 预览 + `paramsBytes`/`resultBytes` + sha256，正文用 `/logs/payload` 取。`/logs/frames` 的 `detail=summary` 只返回元数据，`detail=full` 返回报文（含 ref 字段）。
 - 导出有上限（默认 10 万行），超限要求缩小时间范围。
 
 ## 7. 报告端点
@@ -439,6 +441,12 @@ type ReportCursor = { v: 1; ca: string; id: string };
 
 ## 10. 校验覆盖边界
 
-`doc-admin.ts` 比对的是**根段级端点集合**：按方法 + 路径的根段（`/servers/...` → `servers`）双向比对，代码新增模块而本文没写、本文写了代码里没有的模块都会报错；同时也拒绝表内重复端点。它**不校验**同一模块下的路径后缀与字段级形状——加 `/clients/:id/token` 这类同模块新端点、或改字段时，仍须同时改本文与代码。
+`doc-admin.ts` 分两层比对。
+
+**根段**：按方法 + 路径的根段（`/servers/...` → `servers`）双向比对，代码新增模块而本文没写、本文写了代码里没有的模块都会报错；同时也拒绝表内重复端点。
+
+**第二段（仅 `/logs`）**：这一族由特性模块的路由表分发——`server/src/audit/runtime.ts` 的 `matchesRoute(segments, ['logs', 'query'])` 与 `isEvalTraceRoute`（`segments[0] === 'logs' && segments[1] === 'evals'`），SSE 在 `admin/http-adapter.ts` 的 `${ADMIN_API_ROOT}/logs/stream`。脚本对声明的族（`DEEP_FAMILIES`）逐条比到第二段，两条 `/logs/<x>` 任一侧缺失都失败；只按根段看的话，删掉 `/logs/payload` 不会报错。新族要纳入深度比对，把根段加进 `DEEP_FAMILIES`，并让路由表用字面量两段（`['logs', 'x']`）写法。
+
+**不校验**同一模块下的参数名与字段级形状——加 `/clients/:id/token` 这类同模块新端点、或改字段时，仍须同时改本文与代码。
 
 `GET /operations/:id` 是唯一「文档有、代码未接线」的端点（RS-07），脚本以 `PLANNED` 白名单放行并在输出里打 `note`；一旦该根被代码服务，脚本会反过来要求删掉豁免。

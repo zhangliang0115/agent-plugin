@@ -7,7 +7,7 @@ import type { LogFn } from '../log.ts';
  * `recordFrameIn` / `recordFrameOut`; every write goes through the core
  * writer's bounded queue, so a slow disk drops detail events instead of
  * blocking the request path (`docs/02 §6.1`). The same instance exposes the
- * read side as framework-free {@link AdminHandler}s for `/audit/*`
+ * read side as framework-free {@link AdminHandler}s for `/logs/*`
  * (`docs/03 §4.2`, `§4.6`).
  *
  * Audit failures never propagate to the caller: a broken disk is logged once,
@@ -66,7 +66,7 @@ export interface AuditRuntimeOptions {
   payload?: 'full' | 'off';
   /** Root for blob refs; defaults to `dir` (both are the log root). */
   payloadDir?: string;
-  /** Retention counters surfaced by `/audit/stats`, when a sweep is running. */
+  /** Retention counters surfaced by `/logs/stats`, when a sweep is running. */
   retention?: () => unknown;
   /** Days kept by this writer's own prune. Default 7 (`LOG_RETENTION_DAYS`). */
   retentionDays?: number;
@@ -75,7 +75,7 @@ export interface AuditRuntimeOptions {
   /**
    * Called for every event accepted by the writer call. The writer may still
    * drop a detail event under backlog, so this is the live view, not proof
-   * that a line reached disk. Wires `/admin/api/audit/stream`.
+   * that a line reached disk. Wires `/admin/api/logs/stream`.
    */
   onEvent?: (event: AuditEvent) => void;
 }
@@ -103,7 +103,7 @@ export interface AuditRuntime {
   recordTask(event: AuditEvent): void;
   recordFrameIn(input: FrameInInput): void;
   recordFrameOut(input: FrameOutInput): void;
-  /** One handler per `/audit/*` route; unmatched routes return null. */
+  /** One handler per `/logs/*` route; unmatched routes return null. */
   handlers(): AdminHandler[];
   stats(): AuditRuntimeStats;
   /** Drains the frame queue and waits for the writer backlog. */
@@ -157,7 +157,7 @@ function matchesRoute(segments: readonly string[], expected: readonly string[]):
 }
 
 function isEvalTraceRoute(segments: readonly string[]): boolean {
-  return segments.length === 4 && segments[0] === 'audit' && segments[1] === 'evals';
+  return segments.length === 4 && segments[0] === 'logs' && segments[1] === 'evals';
 }
 
 /**
@@ -500,7 +500,7 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
 
   const handlers: AdminHandler[] = [
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'query']),
+      (segments) => matchesRoute(segments, ['logs', 'query']),
       (request) =>
         endpoints.query({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
@@ -512,27 +512,27 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
       return endpoints.evalTrace({ identity: ADMIN_IDENTITY, params });
     }),
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'sessions']),
+      (segments) => matchesRoute(segments, ['logs', 'sessions']),
       (request) =>
         endpoints.sessions({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'frames']),
+      (segments) => matchesRoute(segments, ['logs', 'frames']),
       (request) =>
         endpoints.frames({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'payload']),
+      (segments) => matchesRoute(segments, ['logs', 'payload']),
       (request) =>
         endpoints.payload({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'stats']),
+      (segments) => matchesRoute(segments, ['logs', 'stats']),
       (request) =>
         endpoints.stats({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
     handlerFor(
-      (segments) => matchesRoute(segments, ['audit', 'export']),
+      (segments) => matchesRoute(segments, ['logs', 'export']),
       (request) =>
         endpoints.export({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),

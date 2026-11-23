@@ -222,7 +222,7 @@ export function RequestsPage(): React.ReactElement {
         for (const value of next.tools) query.append('tool', value);
         for (const value of next.protocols) query.append('protocol', value);
         for (const value of next.results) query.append('result', value);
-        const response = await api.get<FramesResponse<ProtocolFramePair>>('/audit/frames', {
+        const response = await api.get<FramesResponse<ProtocolFramePair>>('/logs/frames', {
           query,
         });
         rememberOptionsFromFrames(response.frames);
@@ -267,7 +267,7 @@ export function RequestsPage(): React.ReactElement {
       setStreamState('closed');
       return;
     }
-    const stream = api.stream('/audit/stream', {
+    const stream = api.stream('/logs/stream', {
       eventTypes: ['audit', 'message'],
       onEvent: (frame) => {
         if (isProtocolFrame(frame.data)) scheduleLiveReload();
@@ -361,7 +361,7 @@ export function RequestsPage(): React.ReactElement {
       // Exact link: `eval_start` carries the id of the `tools/call` that started
       // it, and every tool event of that eval carries the same `runId`. The
       // padded window only bounds this lookup (async evals keep the tail open).
-      const starts = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+      const starts = await api.get<{ events?: AuditEvent[] }>('/logs/query', {
         query: {
           ...eventWindow(pair.request?.ts, pair.response?.ts, isAsyncResponse(pair.response)),
           mcp: pair.mcp,
@@ -384,7 +384,7 @@ export function RequestsPage(): React.ReactElement {
         }
       };
       for (const runId of keys.runIds) {
-        const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+        const response = await api.get<{ events?: AuditEvent[] }>('/logs/query', {
           query: { runId, limit: 500 },
         });
         if (ticket !== eventTicketRef.current) return;
@@ -393,7 +393,7 @@ export function RequestsPage(): React.ReactElement {
       // `async_dispatch` has no `runId`; its `evalTaskId` is the only handle on
       // the background half (settle, cancel), so it needs its own lookup.
       for (const taskId of keys.taskIds) {
-        const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+        const response = await api.get<{ events?: AuditEvent[] }>('/logs/query', {
           query: { taskId, limit: 500 },
         });
         if (ticket !== eventTicketRef.current) return;

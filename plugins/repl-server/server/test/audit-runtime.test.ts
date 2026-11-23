@@ -362,7 +362,7 @@ test('frames endpoint reads frames the runtime actually wrote', async (t) => {
   });
   await runtime.flush();
 
-  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
+  const response = await call(runtime.handlers(), request('GET', '/admin/api/logs/frames'));
   assert.equal(response?.status, 200);
   const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
   assert.equal(rows.length, 1);
@@ -456,7 +456,7 @@ test('the audit query list serves audit events only, never protocol frames', asy
 
   const response = await call(
     runtime.handlers(),
-    request('GET', '/admin/api/audit/query', { limit: '100' }),
+    request('GET', '/admin/api/logs/query', { limit: '100' }),
   );
   assert.equal(response?.status, 200);
   const events = bodyOf(response).events as AuditEvent[];
@@ -476,7 +476,7 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
   await writeAuditFixture(dir);
   const handlers = runtime.handlers();
 
-  const firstPage = await call(handlers, request('GET', '/admin/api/audit/query', { limit: '2' }));
+  const firstPage = await call(handlers, request('GET', '/admin/api/logs/query', { limit: '2' }));
   assert.equal(firstPage?.status, 200);
   const firstBody = bodyOf(firstPage);
   assert.equal((firstBody.events as AuditEvent[]).length, 2);
@@ -484,14 +484,14 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
   const cursor = firstBody.nextCursor;
   assert.equal(typeof cursor, 'string');
 
-  const fromPath = await call(handlers, request('GET', '/admin/api/audit/query?limit=2'));
+  const fromPath = await call(handlers, request('GET', '/admin/api/logs/query?limit=2'));
   assert.equal(fromPath?.status, 200);
   assert.equal((bodyOf(fromPath).events as AuditEvent[]).length, 2);
 
   // `/api` is accepted as the already-consumed prefix form.
   const secondPage = await call(
     handlers,
-    request('GET', '/api/audit/query', { limit: '2', cursor: String(cursor) }),
+    request('GET', '/api/logs/query', { limit: '2', cursor: String(cursor) }),
   );
   assert.equal(secondPage?.status, 200);
   const secondEvents = bodyOf(secondPage).events as AuditEvent[];
@@ -502,25 +502,25 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
     'cursor pages must not overlap',
   );
 
-  const trace = await call(handlers, request('GET', '/admin/api/audit/evals/es_1/1'));
+  const trace = await call(handlers, request('GET', '/admin/api/logs/evals/es_1/1'));
   assert.equal(trace?.status, 200);
   assert.equal(bodyOf(trace).count, 4);
   assert.equal((bodyOf(trace).events as AuditEvent[])[0]?.event, 'eval_start');
 
-  const missingTrace = await call(handlers, request('GET', '/admin/api/audit/evals/es_1/99'));
+  const missingTrace = await call(handlers, request('GET', '/admin/api/logs/evals/es_1/99'));
   assert.equal(missingTrace?.status, 404);
   assert.equal((bodyOf(missingTrace).error as Record<string, unknown>).code, 'EVAL_NOT_FOUND');
 
-  const badEvalId = await call(handlers, request('GET', '/admin/api/audit/evals/es_1/abc'));
+  const badEvalId = await call(handlers, request('GET', '/admin/api/logs/evals/es_1/abc'));
   assert.equal(badEvalId?.status, 400);
 
-  const sessions = await call(handlers, request('GET', '/admin/api/audit/sessions'));
+  const sessions = await call(handlers, request('GET', '/admin/api/logs/sessions'));
   assert.equal(sessions?.status, 200);
   const sessionRows = bodyOf(sessions).sessions as Array<Record<string, unknown>>;
   assert.equal(sessionRows.length, 1);
   assert.equal(sessionRows[0]?.['exec'], 'es_1');
 
-  const summaryFrames = await call(handlers, request('GET', '/admin/api/audit/frames'));
+  const summaryFrames = await call(handlers, request('GET', '/admin/api/logs/frames'));
   assert.equal(summaryFrames?.status, 200);
   const summaryBody = bodyOf(summaryFrames);
   const summaryRows = summaryBody.frames as Array<Record<string, unknown>>;
@@ -534,7 +534,7 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
 
   const fullFrames = await call(
     handlers,
-    request('GET', '/admin/api/audit/frames', { detail: 'full' }),
+    request('GET', '/admin/api/logs/frames', { detail: 'full' }),
   );
   assert.equal(fullFrames?.status, 200);
   const fullPair = (bodyOf(fullFrames).frames as Array<Record<string, unknown>>)[0];
@@ -546,18 +546,18 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
 
   const badDetail = await call(
     handlers,
-    request('GET', '/admin/api/audit/frames', { detail: 'raw' }),
+    request('GET', '/admin/api/logs/frames', { detail: 'raw' }),
   );
   assert.equal(badDetail?.status, 400);
 
-  const stats = await call(handlers, request('GET', '/admin/api/audit/stats'));
+  const stats = await call(handlers, request('GET', '/admin/api/logs/stats'));
   assert.equal(stats?.status, 200);
   const statsBody = bodyOf(stats);
   assert.equal(statsBody.calls, 1, 'only tool_result rows count as calls');
   assert.equal(statsBody.errors, 0);
   assert.match(String(statsBody.snapshotId), /^[0-9a-f]{32}$/);
 
-  const exported = await call(handlers, request('GET', '/admin/api/audit/export'));
+  const exported = await call(handlers, request('GET', '/admin/api/logs/export'));
   assert.equal(exported?.status, 200);
   assert.match(
     String(exported?.headers?.['content-type']),
@@ -568,9 +568,9 @@ test('handlers serve query pagination, eval traces, sessions, frames, stats and 
   const lines = (exported?.body as Buffer).toString('utf8').trim().split('\n');
   assert.equal(lines.length, FIXTURE_EVENTS.length);
 
-  const notGet = await call(handlers, request('POST', '/admin/api/audit/query'));
+  const notGet = await call(handlers, request('POST', '/admin/api/logs/query'));
   assert.equal(notGet, null, 'audit routes only accept GET');
-  const unknown = await call(handlers, request('GET', '/admin/api/audit/unknown'));
+  const unknown = await call(handlers, request('GET', '/admin/api/logs/unknown'));
   assert.equal(unknown, null, 'unknown audit routes fall through');
   const elsewhere = await call(handlers, request('GET', '/admin/api/servers'));
   assert.equal(elsewhere, null, 'non-audit routes fall through');
@@ -581,7 +581,7 @@ test('query rejects an invalid cursor with a 400', async (t) => {
   await writeAuditFixture(dir);
   const response = await call(
     runtime.handlers(),
-    request('GET', '/admin/api/audit/query', { cursor: 'not-a-cursor' }),
+    request('GET', '/admin/api/logs/query', { cursor: 'not-a-cursor' }),
   );
   assert.equal(response?.status, 400);
   assert.equal((bodyOf(response).error as Record<string, unknown>).code, 'INVALID_CURSOR');

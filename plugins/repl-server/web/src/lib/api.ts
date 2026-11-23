@@ -138,7 +138,7 @@ export interface StreamGap {
 }
 
 /**
- * Payload of `GET /audit/frames`. `truncated` means the scan stopped at its row
+ * Payload of `GET /logs/frames`. `truncated` means the scan stopped at its row
  * ceiling, so older frames in the window were never inspected.
  */
 export interface FramesResponse<Frame = unknown> {

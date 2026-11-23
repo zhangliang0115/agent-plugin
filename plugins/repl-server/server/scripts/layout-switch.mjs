@@ -9,7 +9,7 @@
  *
  * Safe to re-run: a root that already has `run/state.db` is reported as done.
  */
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -31,6 +31,8 @@ const RUNTIME_ENTRIES = [
 
 const LEGACY_ENTRIES = ['audit', 'metrics', 'ledger', 'repl.db'];
 const LEGACY_FILE_PATTERNS = [/^state-bak-/, /^state\.db\.bak-/, /^state\.db\.bak\.v\d/i];
+/** Root-level files that no build in the four-domain layout reads. */
+const ORPHAN_ENTRIES = ['server.log', 'server.pid', 'notify-webhook', 'reports-poll-marker'];
 
 function layout(homeArg) {
   const home = homeArg ?? process.env.AGENTS_HOME ?? join(homedir(), '.agents');
@@ -54,6 +56,33 @@ function entriesIn(dir, pattern) {
   }
 }
 
+/**
+ * PID of a live instance holding this root, or null. Migrating while a server
+ * is running renames files out from under it: its sqlite handles keep working
+ * but every other path it recomputes (`pool.json`, `audit/`) is re-created at
+ * the old root. Refusing is the only safe option.
+ */
+function liveInstancePid(root) {
+  for (const lockPath of [join(root, 'state.db.lock'), join(root, 'run', 'state.db.lock')]) {
+    if (!existsSync(lockPath)) continue;
+    try {
+      const record = JSON.parse(readFileSync(lockPath, 'utf8'));
+      const pid = typeof record === 'object' && record !== null ? record.pid : undefined;
+      if (typeof pid !== 'number' || pid <= 0) continue;
+      try {
+        process.kill(pid, 0);
+        return pid;
+      } catch (error) {
+        // EPERM means the process exists but belongs to someone else.
+        if (error && error.code === 'EPERM') return pid;
+      }
+    } catch {
+      // An unreadable or malformed lock is treated as stale.
+    }
+  }
+  return null;
+}
+
 function planFor(root) {
   const moves = [];
   const archives = [];
@@ -63,7 +92,7 @@ function planFor(root) {
   for (const name of entriesIn(root, (entry) => entry.isDirectory() && entry.name.startsWith('ai-run-'))) {
     moves.push(name);
   }
-  for (const name of LEGACY_ENTRIES) {
+  for (const name of [...LEGACY_ENTRIES, ...ORPHAN_ENTRIES]) {
     if (existsSync(join(root, name))) archives.push(name);
   }
   for (const name of entriesIn(root, (entry) => LEGACY_FILE_PATTERNS.some((re) => re.test(entry.name)))) {
@@ -82,8 +111,34 @@ function main() {
     console.log(`nothing to switch: ${l.root} does not exist`);
     return;
   }
+
+  const livePid = liveInstancePid(l.root);
+  if (livePid !== null) {
+    console.error(`refusing to touch a live instance: pid ${livePid} holds this root; stop the server first`);
+    process.exitCode = 1;
+    return;
+  }
+
   if (existsSync(join(l.run, 'state.db'))) {
+    const strays = [...RUNTIME_ENTRIES, ...ORPHAN_ENTRIES].filter((name) => existsSync(join(l.root, name)));
     console.log(`already switched: ${join(l.run, 'state.db')} exists`);
+    if (strays.length === 0) return;
+    console.log(`stray root entries: ${strays.join(', ')}`);
+    if (!apply) {
+      console.log(`\ndry run: re-run with --apply to archive them into backup/strays-${days}/`);
+      return;
+    }
+    const dest = join(l.backup, `strays-${days}`);
+    mkdirSync(dest, { recursive: true, mode: 0o700 });
+    for (const name of strays) {
+      const to = join(dest, name);
+      if (existsSync(to)) {
+        console.log(`skip ${name}: ${to} already exists`);
+        continue;
+      }
+      renameSync(join(l.root, name), to);
+    }
+    console.log(`archived ${strays.length} stray entries -> ${dest}`);
     return;
   }
 

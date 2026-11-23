@@ -6,7 +6,7 @@ import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-s
 import { assemble } from './assembly.ts';
 import { isLoopbackBindAddress, parseHostAllowlist, type HostAllowlist } from './auth/tokens.ts';
 import { createLog } from './log.ts';
-import { createLayout, legacyLeftovers } from './layout.ts';
+import { createLayout, legacyLeftovers, legacyRuntimeLeftovers } from './layout.ts';
 import { runStdioBridge } from './stdio-bridge.ts';
 
 const log = createLog((line) => console.error(line), { threadId });
@@ -71,7 +71,10 @@ if (options.stdio) {
 } else {
   const host = options.host;
   const layout = createLayout();
-  const leftovers = legacyLeftovers(layout);
+  const leftovers = [
+    ...legacyLeftovers(layout),
+    ...legacyRuntimeLeftovers(layout),
+  ];
   if (leftovers.length > 0) {
     log(
       `legacy data layout at ${layout.root} (${leftovers.join(', ')}); ` +

@@ -2,7 +2,7 @@
  * Server-Sent Events hub for one admin stream.
  *
  * `/admin/api/events` (server_state, catalog_changed, eval, operation — `docs/03
- * §4.5`) and `/admin/api/audit/stream` each get their own hub, matching the
+ * §4.5`) and `/admin/api/logs/stream` each get their own hub, matching the
  * design rule that every stream keeps its own buffer and `Last-Event-ID`
  * replay window (`docs/03 §4.7`):
  * - ids are process-local and strictly increasing;

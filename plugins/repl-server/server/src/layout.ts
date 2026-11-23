@@ -85,6 +85,28 @@ export function createLayout(agentsHome?: string): DataLayout {
 export const LEGACY_ENTRIES = ['audit', 'metrics', 'ledger', 'repl.db'] as const;
 
 /**
+ * Runtime state that pre-layout builds kept at the root. Unlike the legacy
+ * history entries, these are *live*: starting with them still sitting at the
+ * root would silently create an empty `run/state.db` and lose every binding,
+ * token and secret. Must stay in sync with `RUNTIME_ENTRIES` in
+ * `server/scripts/layout-switch.mjs`.
+ */
+export const LEGACY_RUNTIME_ENTRIES = [
+  'state.json',
+  'pool.json',
+  'ai-runs.json',
+  'state.db',
+  'state.db-wal',
+  'state.db-shm',
+  'state.db.lock',
+  'mcp-token',
+  'admin-token',
+  'secrets.json',
+  'sessions',
+  'official-workspace',
+] as const;
+
+/**
  * Legacy siblings still sitting in the data root. The server refuses to start
  * while any remain: writing to `log/` while readers might still look at
  * `audit/` is the one failure that produces silent empty results.
@@ -94,6 +116,19 @@ export function legacyLeftovers(
   exists: (path: string) => boolean = existsSync,
 ): string[] {
   return LEGACY_ENTRIES.filter((name) => exists(join(layout.root, name)));
+}
+
+/**
+ * Runtime state still at the root before the switch. Returns `[]` once
+ * `run/state.db` exists, because at that point a root-level stray is cosmetic
+ * (an old build rewriting `pool.json`, say) rather than a data-loss risk.
+ */
+export function legacyRuntimeLeftovers(
+  layout: DataLayout,
+  exists: (path: string) => boolean = existsSync,
+): string[] {
+  if (exists(layout.stateDb)) return [];
+  return LEGACY_RUNTIME_ENTRIES.filter((name) => exists(join(layout.root, name)));
 }
 
 /** Re-exported so callers keep one import for "where does this data live". */

@@ -28,7 +28,7 @@ import { MANAGE_TABS, navigate, useRoute, type ManageTab, type RouteState } from
 import { CommandPalette } from './components/CommandPalette.tsx';
 import type { PaletteItem } from '../lib/command-palette.ts';
 import { OverviewPage } from './pages/OverviewPage.tsx';
-import { AuditPage } from './pages/AuditPage.tsx';
+import { LogsPage } from './pages/LogsPage.tsx';
 import { RequestsPage } from './pages/RequestsPage.tsx';
 import { ReportsPage } from './pages/ReportsPage.tsx';
 import { ServersPage } from './pages/ServersPage.tsx';
@@ -117,7 +117,7 @@ export function App(): React.ReactElement {
         label: '监控',
         children: [
           { key: '/overview', icon: <DashboardOutlined />, label: '概览' },
-          { key: '/audit', icon: <AlertOutlined />, label: '事件' },
+          { key: '/logs', icon: <AlertOutlined />, label: '事件' },
           { key: '/requests', icon: <FileSearchOutlined />, label: '请求记录' },
           { key: '/reports', icon: <AppstoreOutlined />, label: '报告' },
         ],
@@ -180,7 +180,7 @@ export function App(): React.ReactElement {
                     ? `系统管理 / ${tabLabel ?? ''}`
                     : route.path === '/overview'
                       ? '监控 / 概览'
-                      : route.path === '/audit'
+                      : route.path === '/logs'
                         ? '监控 / 事件'
                         : route.path === '/requests'
                           ? '监控 / 请求记录'
@@ -246,7 +246,7 @@ export function App(): React.ReactElement {
 
 function Page({ route }: { route: RouteState }): React.ReactElement {
   if (route.path === '/reports') return <ReportsPage />;
-  if (route.path === '/audit') return <AuditPage />;
+  if (route.path === '/logs') return <LogsPage />;
   if (route.path === '/requests') return <RequestsPage />;
   if (route.path === '/overview') return <OverviewPage />;
   switch (route.tab) {

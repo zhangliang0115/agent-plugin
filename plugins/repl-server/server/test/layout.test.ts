@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { createLayout, legacyLeftovers, resolveLogRef } from '../src/layout.ts';
+import {
+  createLayout,
+  legacyLeftovers,
+  legacyRuntimeLeftovers,
+  resolveLogRef,
+} from '../src/layout.ts';
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'repl-layout-'));
@@ -65,4 +70,43 @@ test('legacy leftovers are detected by name, not by contents', () => {
   writeFileSync(layout.eventsFile('2026-11-23'), '{}\n');
   // The log tree alone does not clear the warning: the legacy dirs must be gone.
   assert.deepEqual(legacyLeftovers(layout), ['audit', 'repl.db']);
+});
+
+test('root runtime state without run/state.db is reported as a data-loss risk', () => {
+  const root = home();
+  const layout = createLayout(root);
+  mkdirSync(layout.root, { recursive: true });
+  writeFileSync(join(layout.root, 'state.db'), '');
+  writeFileSync(join(layout.root, 'secrets.json'), '{}');
+  mkdirSync(join(layout.root, 'sessions'), { recursive: true });
+  mkdirSync(join(layout.root, 'audit'), { recursive: true });
+
+  // Both classes are surfaced in startup guard's message; runtime ones are the
+  // ones that would otherwise be lost silently.
+  assert.deepEqual(legacyRuntimeLeftovers(layout), ['state.db', 'secrets.json', 'sessions']);
+  assert.deepEqual(legacyLeftovers(layout), ['audit']);
+});
+
+test('an already-switched root is not blocked by cosmetic strays', () => {
+  const root = home();
+  const layout = createLayout(root);
+  mkdirSync(layout.run, { recursive: true });
+  writeFileSync(layout.stateDb, '');
+  writeFileSync(join(layout.root, 'pool.json'), '{}');
+
+  assert.deepEqual(legacyRuntimeLeftovers(layout), []);
+  assert.deepEqual(legacyLeftovers(layout), []);
+});
+
+test('a half-migrated root with only runtime state is still detected', () => {
+  const root = home();
+  const layout = createLayout(root);
+  mkdirSync(layout.log, { recursive: true });
+  mkdirSync(layout.root, { recursive: true });
+  writeFileSync(join(layout.root, 'mcp-token'), 'token');
+
+  // Someone deleted the four legacy dirs by hand: the old guard would have let
+  // the server boot with an empty run/state.db.
+  assert.deepEqual(legacyLeftovers(layout), []);
+  assert.deepEqual(legacyRuntimeLeftovers(layout), ['mcp-token']);
 });

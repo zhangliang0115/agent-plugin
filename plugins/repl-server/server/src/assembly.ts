@@ -28,6 +28,7 @@ import {
   createRetention,
   type Retention,
 } from './audit/retention.ts';
+import { createSessionPruner } from './serve/session-prune.ts';
 import { METRICS_PREFIX, createLayout } from './layout.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
@@ -260,6 +261,26 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       bytes: info.totalBytes,
       limitBytes: info.limitBytes,
       ratio: Number(info.ratio.toFixed(3)),
+    });
+  };
+  // Same late-bound trick: the pruner needs to report through `audit`, but
+  // `audit` is created above with a callback into the retention module.
+  let onSessionsPruned: ((info: { removedDirs: number; keptDirs: number }) => void) | undefined;
+  const sessionPruner = createSessionPruner({
+    sessionsDir: layout.sessions,
+    log,
+    now: () => clock.now(),
+    onPrune: (info) => {
+      onSessionsPruned?.(info);
+    },
+  });
+  onSessionsPruned = (info) => {
+    if (info.removedDirs === 0) return;
+    audit.recordTask({
+      ts: new Date(clock.now()).toISOString(),
+      event: 'session_dirs_pruned',
+      removed: info.removedDirs,
+      kept: info.keptDirs,
     });
   };
 
@@ -1059,6 +1080,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   // then every six hours; failures are logged by the service itself.
   retention.start();
   void retention.runOnce();
+  // `run/` is not a log domain, but stale `sessions/<id>` dirs are bounded
+  // state: one sweep at boot, then every six hours on the same cadence.
+  sessionPruner.start();
+  void sessionPruner.runOnce();
 
   // Each eval warns once when it first crosses the threshold; the key is
   // dropped once that eval settles.
@@ -1114,6 +1139,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       clearInterval(poolStateTimer);
       resourceMonitor.stop();
       retention.stop();
+      sessionPruner.stop();
       closePromise = (async () => {
         // A sweep that started before `closing` owns the gateway until it ends.
         if (activeSweep !== null) await activeSweep.catch(() => undefined);

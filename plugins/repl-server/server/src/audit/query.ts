@@ -276,7 +276,7 @@ export function ensureAuditFilter(filter: AuditFilterLike = {}): AuditFilter {
   return normalizeFilter(filter);
 }
 
-/** Parses `/audit/*` query parameters into a normalized filter. */
+/** Parses `/logs/*` query parameters into a normalized filter. */
 export function parseAuditQueryParams(params: URLSearchParams): AuditFilter {
   const input: AuditFilterInput = {};
   const assign = <K extends keyof AuditFilterInput>(

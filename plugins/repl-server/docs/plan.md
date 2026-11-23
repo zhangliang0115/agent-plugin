@@ -70,7 +70,7 @@
 | `RS-13-audit-query` | 审计 JSONL 流式读取与查询：过滤参数、cursor 分页、eval 轨迹与执行会话列表 | RS-07-admin-base | 2d |
 | `RS-14-audit-frames-export` | 协议帧配对端点与审计导出：request/response 配对、summary/full、截断元数据与 10 万行上限 | RS-13-audit-query | 2d |
 | `RS-15-audit-stats` | 审计聚合 worker：工具调用量/错误率/p50/p95/排队均值、groupBy 与 10s 缓存、200k 行/10s 饱和返回 503 | RS-13-audit-query | 2d |
-| `RS-16-sse` | SSE 中枢：/admin/api/events 与 /admin/api/audit/stream、Last-Event-ID 回放、心跳与缺口事件 | RS-07-admin-base, RS-13-audit-query | 2d |
+| `RS-16-sse` | SSE 中枢：/admin/api/events 与 /admin/api/logs/stream、Last-Event-ID 回放、心跳与缺口事件 | RS-07-admin-base, RS-13-audit-query | 2d |
 | `RS-17-web-shell` | React 19 + Ant Design 6 + esbuild 管理端骨架（ADR 0009）：SPA 路由、类型化 API client、主题 token 与 CSRF/鉴权 | RS-07-admin-base | 2d |
 | `RS-18-web-audit` | 审计页：过滤条、概览卡片、趋势图、虚拟列表、调用抽屉、eval 甘特与协议帧并排 | RS-17-web-shell, RS-19-web-resource, RS-13-audit-query, RS-14-audit-frames-export, RS-15-audit-stats, RS-16-sse | 2d |
 | `RS-19-web-resource` | 实时与资源约束模块：5000 条环形缓冲、200ms 批处理、页面可见性暂停、30fps 限制、降采样与 3D 默认关闭 | RS-17-web-shell | 1d |

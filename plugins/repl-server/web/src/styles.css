@@ -489,6 +489,71 @@ body {
   min-width: 0;
 }
 
+/* --- windowed text / line diff (09 §五) --- */
+
+.proc-diff {
+  margin-bottom: 10px;
+}
+
+.vtext-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0 2px;
+}
+
+.vtext-bar .ant-input {
+  max-width: 220px;
+}
+
+.vtext {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-inset);
+}
+
+.vtext-line {
+  white-space: pre;
+  min-width: max-content;
+  padding: 0 8px;
+}
+
+.vtext-sign {
+  display: inline-block;
+  width: 1.4em;
+  opacity: 0.75;
+}
+
+.diff-del {
+  background: rgba(255, 82, 82, 0.14);
+}
+
+.diff-add {
+  background: rgba(82, 196, 26, 0.14);
+}
+
+.diff-legend {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.diff-chip {
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.vtext-hit {
+  background: rgba(250, 173, 20, 0.4);
+  color: inherit;
+  border-radius: 2px;
+}
+
+
 .proc-label {
   display: flex;
   gap: 6px;

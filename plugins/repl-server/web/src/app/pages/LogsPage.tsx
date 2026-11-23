@@ -1,4 +1,4 @@
-/** Audit page: filters, live event table, JSONL export and an event drawer. */
+/** Logs page: filters, live event table, JSONL export and an event drawer. */
 import {
   Alert,
   App as AntApp,
@@ -171,7 +171,7 @@ const EMPTY_FILTER_OPTIONS: FilterOptions = {
 };
 
 
-export function AuditPage(): React.ReactElement {
+export function LogsPage(): React.ReactElement {
   const api = useApi();
   const { message } = AntApp.useApp();
   const [initialFilters] = useState<AuditFilters>(() => readFiltersFromHash());
@@ -304,7 +304,7 @@ export function AuditPage(): React.ReactElement {
   const loadFirstPage = useCallback(
     async (filters: AuditFilters, token: number): Promise<void> => {
       try {
-        const response = await api.get<AuditQueryResponse>('/audit/query', {
+        const response = await api.get<AuditQueryResponse>('/logs/query', {
           query: { ...filterQuery(filters), limit: PAGE_SIZE },
         });
         if (!aliveRef.current || token !== loadTokenRef.current) return;
@@ -347,7 +347,7 @@ export function AuditPage(): React.ReactElement {
     async (filters: AuditFilters): Promise<void> => {
       const token = ++statsTokenRef.current;
       try {
-        const next = await api.get<AuditStats>('/audit/stats', {
+        const next = await api.get<AuditStats>('/logs/stats', {
           query: {
             ...filterQuery(filters),
             groupBy: groupByRef.current === '' ? undefined : groupByRef.current,
@@ -390,7 +390,7 @@ export function AuditPage(): React.ReactElement {
     const from = last ?? new Date(Date.now() - 60_000).toISOString();
     const token = loadTokenRef.current;
     api
-      .get<AuditQueryResponse>('/audit/query', {
+      .get<AuditQueryResponse>('/logs/query', {
         query: { ...filterQuery(filters), from, limit: 200 },
       })
       .then((response) => {
@@ -468,7 +468,7 @@ export function AuditPage(): React.ReactElement {
       setStreamState('closed');
       return;
     }
-    const current = api.stream('/audit/stream', {
+    const current = api.stream('/logs/stream', {
       eventTypes: ['audit', 'message'],
       onEvent: (frame) => {
         const incoming = auditEventsFromStreamPayload(frame.data).filter((event) =>
@@ -573,7 +573,7 @@ export function AuditPage(): React.ReactElement {
     setLoadingMore(true);
     const token = loadTokenRef.current;
     try {
-      const response = await api.get<AuditQueryResponse>('/audit/query', {
+      const response = await api.get<AuditQueryResponse>('/logs/query', {
         query: { ...filterQuery(appliedRef.current), limit: PAGE_SIZE, cursor },
       });
       if (!aliveRef.current || token !== loadTokenRef.current) return;
@@ -594,7 +594,7 @@ export function AuditPage(): React.ReactElement {
     if (exporting) return;
     setExporting(true);
     try {
-      const text = await api.get<string>('/audit/export', {
+      const text = await api.get<string>('/logs/export', {
         query: filterQuery(appliedRef.current),
       });
       if (!aliveRef.current) return;
@@ -602,7 +602,7 @@ export function AuditPage(): React.ReactElement {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `audit-${exportStamp()}.jsonl`;
+      link.download = `events-${exportStamp()}.jsonl`;
       link.style.display = 'none';
       document.body.appendChild(link);
       link.click();
@@ -1440,7 +1440,7 @@ function writeFiltersToHash(filters: AuditFilters): void {
   setListParam(params, 'status', filters.statuses);
   if (filters.minMs !== '') params.set('minMs', filters.minMs);
   params.set('live', filters.live ? '1' : '0');
-  const next = `#/audit?${params.toString()}`;
+  const next = `#/logs?${params.toString()}`;
   if (window.location.hash === next) return;
   window.history.replaceState(null, '', next);
 }

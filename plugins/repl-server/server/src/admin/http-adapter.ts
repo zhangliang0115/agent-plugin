@@ -253,7 +253,7 @@ export async function handleAdminHttp(
       options.sse.events.subscribe(req, res);
       return true;
     }
-    if (url.pathname === `${ADMIN_API_ROOT}/audit/stream` && options.sse.audit !== undefined) {
+    if (url.pathname === `${ADMIN_API_ROOT}/logs/stream` && options.sse.audit !== undefined) {
       options.sse.audit.subscribe(req, res);
       return true;
     }

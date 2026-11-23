@@ -76,11 +76,11 @@ test('formatBytes switches unit at 1024 and keeps one decimal', () => {
 test('payloadUrl encodes the ref and only the given options', () => {
   assert.equal(
     payloadUrl('payload/2026-11-23/es_1/a.json'),
-    '/admin/api/audit/payload?ref=payload%2F2026-11-23%2Fes_1%2Fa.json',
+    '/admin/api/logs/payload?ref=payload%2F2026-11-23%2Fes_1%2Fa.json',
   );
   assert.equal(
     payloadUrl('a.json', { mode: 'range', offset: 0, limit: 8192 }),
-    '/admin/api/audit/payload?ref=a.json&mode=range&offset=0&limit=8192',
+    '/admin/api/logs/payload?ref=a.json&mode=range&offset=0&limit=8192',
   );
 });
 

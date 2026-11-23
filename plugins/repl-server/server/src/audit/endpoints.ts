@@ -7,13 +7,13 @@
  * responsible for authentication, CSRF, routing and response writing.
  *
  * Endpoint mapping (`docs/03 §4.2`, `§4.6`):
- * - `auditQueryEndpoint`          GET /admin/api/audit/query
- * - `auditEvalTraceEndpoint`      GET /admin/api/audit/evals/:exec/:evalId
- * - `auditSessionsEndpoint`       GET /admin/api/audit/sessions
- * - `auditFramesEndpoint`         GET /admin/api/audit/frames
- * - `auditPayloadEndpoint`        GET /admin/api/audit/payload
- * - `auditStatsEndpoint`          GET /admin/api/audit/stats
- * - `auditExportEndpoint`         GET /admin/api/audit/export
+ * - `auditQueryEndpoint`          GET /admin/api/logs/query
+ * - `auditEvalTraceEndpoint`      GET /admin/api/logs/evals/:exec/:evalId
+ * - `auditSessionsEndpoint`       GET /admin/api/logs/sessions
+ * - `auditFramesEndpoint`         GET /admin/api/logs/frames
+ * - `auditPayloadEndpoint`        GET /admin/api/logs/payload
+ * - `auditStatsEndpoint`          GET /admin/api/logs/stats
+ * - `auditExportEndpoint`         GET /admin/api/logs/export
  *
  * Path parameters (`exec`, `evalId`) are expected in `params`; the HTTP
  * adapter merges them before calling.
@@ -166,7 +166,7 @@ function parseEvalId(params: URLSearchParams): number {
   return parsed;
 }
 
-/** GET /admin/api/audit/query */
+/** GET /admin/api/logs/query */
 export async function auditQueryEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,
@@ -186,7 +186,7 @@ export async function auditQueryEndpoint(
   }
 }
 
-/** GET /admin/api/audit/evals/:exec/:evalId */
+/** GET /admin/api/logs/evals/:exec/:evalId */
 export async function auditEvalTraceEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,
@@ -205,7 +205,7 @@ export async function auditEvalTraceEndpoint(
   }
 }
 
-/** GET /admin/api/audit/sessions */
+/** GET /admin/api/logs/sessions */
 export async function auditSessionsEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,
@@ -377,7 +377,7 @@ function matchesPairFilters(
   return true;
 }
 
-/** GET /admin/api/audit/frames?mcp=&id=&detail=summary|full */
+/** GET /admin/api/logs/frames?mcp=&id=&detail=summary|full */
 export async function auditFramesEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,
@@ -440,7 +440,7 @@ export async function auditFramesEndpoint(
 const PAYLOAD_MODES: ReadonlySet<string> = new Set(['full', 'head', 'tail', 'range']);
 
 /**
- * GET /admin/api/audit/payload?ref=&mode=full|head|tail|range&offset=&limit=
+ * GET /admin/api/logs/payload?ref=&mode=full|head|tail|range&offset=&limit=
  *
  * Serves one blob named by a `*Ref` field on an audit row. Rows never carry a
  * body above `INLINE_MAX_BYTES`, so this is the only way the UI can show a
@@ -491,7 +491,7 @@ export async function auditPayloadEndpoint(
   }
 }
 
-/** GET /admin/api/audit/stats?from=&to=&groupBy= */
+/** GET /admin/api/logs/stats?from=&to=&groupBy= */
 export async function auditStatsEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,
@@ -530,7 +530,7 @@ function defaultStatsService(options: AuditEndpointsOptions): AuditStatsService 
   return service;
 }
 
-/** GET /admin/api/audit/export */
+/** GET /admin/api/logs/export */
 export async function auditExportEndpoint(
   options: AuditEndpointsOptions,
   request: AuditEndpointRequest,

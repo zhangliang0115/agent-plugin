@@ -1,6 +1,6 @@
-/** Hash-based SPA router for the admin shell (`#/overview`, `#/audit`, `#/manage`).
+/** Hash-based SPA router for the admin shell (`#/overview`, `#/logs`, `#/manage`).
  *
- * Routes may act as section prefixes: `/audit` also owns `/audit/evals/7`, and the
+ * Routes may act as section prefixes: `/logs` also owns `/logs/evals/7`, and the
  * location reports the remaining segments so the next stage can resolve detail views.
  * Unknown or empty hashes are replaced by the fallback route.
  *
@@ -10,9 +10,9 @@
  */
 
 export interface RouteLocation {
-  /** Full normalized path, for example `/audit/evals/7`. */
+  /** Full normalized path, for example `/logs/evals/7`. */
   path: string;
-  /** The registered route that owns `path`, for example `/audit`. */
+  /** The registered route that owns `path`, for example `/logs`. */
   route: string;
   /** Segments below `route`; empty at the route root. */
   segments: readonly string[];

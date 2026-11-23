@@ -1,4 +1,4 @@
-/** Hash routing for the admin React app: `/overview`, `/audit`, `/reports`, `/manage?tab=…`. */
+/** Hash routing for the admin React app: `/overview`, `/logs`, `/reports`, `/manage?tab=…`. */
 import { useEffect, useState } from 'react';
 
 export type ManageTab =
@@ -14,7 +14,7 @@ export type ManageTab =
   | 'discover';
 
 export interface RouteState {
-  path: '/overview' | '/audit' | '/reports' | '/requests' | '/manage';
+  path: '/overview' | '/logs' | '/reports' | '/requests' | '/manage';
   tab: ManageTab;
   /** Server filter for the tools tab, from `?server=…`. */
   server: string | null;
@@ -43,7 +43,7 @@ export function parseRoute(hash: string): RouteState {
   const resolved = (valid ? tab : 'servers') as ManageTab;
   const server = params.get('server');
   return {
-    path: (path === '/audit' || path === '/reports' || path === '/requests' || path === '/manage'
+    path: (path === '/logs' || path === '/reports' || path === '/requests' || path === '/manage'
       ? path
       : '/overview') as RouteState['path'],
     tab: resolved,

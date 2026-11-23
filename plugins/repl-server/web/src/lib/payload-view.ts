@@ -103,7 +103,7 @@ export interface PayloadSlice {
   body: string;
 }
 
-/** Query string for `GET /admin/api/audit/payload`; ref is the only required part. */
+/** Query string for `GET /admin/api/logs/payload`; ref is the only required part. */
 export function payloadUrl(
   ref: string,
   options: { mode?: PayloadMode; offset?: number; limit?: number } = {},
@@ -112,7 +112,7 @@ export function payloadUrl(
   if (options.mode !== undefined) params.set('mode', options.mode);
   if (options.offset !== undefined) params.set('offset', String(options.offset));
   if (options.limit !== undefined) params.set('limit', String(options.limit));
-  return `/admin/api/audit/payload?${params.toString()}`;
+  return `/admin/api/logs/payload?${params.toString()}`;
 }
 
 /** Bytes as the UI renders them: `512 B`, `4.2 KB`, `1.8 MB`. */
@@ -145,6 +145,35 @@ export function parseRaw(text: string): ParsedRaw {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** Fetches one slice of a blob from the admin API. */
+export async function fetchPayloadSlice(
+  ref: string,
+  mode: 'full' | 'head' | 'tail',
+): Promise<PayloadSlice> {
+  const response = await fetch(payloadUrl(ref, { mode }), {
+    headers: { accept: 'application/json' },
+    credentials: 'same-origin',
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${String(response.status)}`);
+  }
+  return (await response.json()) as PayloadSlice;
+}
+
+/**
+ * Saves a fetched slice as a local file. Bodies over the render cap are
+ * download-only by design, so this is the "reader" for them.
+ */
+export function downloadSlice(slice: PayloadSlice): void {
+  const name = slice.ref.split('/').pop() ?? 'payload.json';
+  const url = URL.createObjectURL(new Blob([slice.body], { type: 'application/octet-stream' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name.endsWith('.json') ? name : `${name}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 /**

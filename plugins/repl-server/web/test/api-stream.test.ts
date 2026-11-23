@@ -60,7 +60,7 @@ test('opens the stream and parses named frames while tracking the last event id'
   const instances: FakeEventSource[] = [];
   const states: string[] = [];
   const frames: Array<{ type: string; data: unknown }> = [];
-  const stream: EventStream = createEventStream('/admin/api/audit/stream', {
+  const stream: EventStream = createEventStream('/admin/api/logs/stream', {
     eventTypes: ['audit'],
     createEventSource: factoryFor(instances),
     onStateChange: (state) => states.push(state),
@@ -92,7 +92,7 @@ test('opens the stream and parses named frames while tracking the last event id'
 test('reports gap frames with oldestEventId', () => {
   const instances: FakeEventSource[] = [];
   const gaps: Array<string | null> = [];
-  const stream = createEventStream('/admin/api/audit/stream', {
+  const stream = createEventStream('/admin/api/logs/stream', {
     eventTypes: ['audit'],
     createEventSource: factoryFor(instances),
     onGap: (gap) => gaps.push(gap.oldestEventId),
@@ -106,7 +106,7 @@ test('reports gap frames with oldestEventId', () => {
 
 test('passes the initial lastEventId as a query parameter for server-side replay', () => {
   const instances: FakeEventSource[] = [];
-  const stream = createEventStream('/admin/api/audit/stream', {
+  const stream = createEventStream('/admin/api/logs/stream', {
     eventTypes: ['audit'],
     lastEventId: '17',
     createEventSource: factoryFor(instances),
@@ -114,7 +114,7 @@ test('passes the initial lastEventId as a query parameter for server-side replay
 
   // `EventSource` cannot set `Last-Event-ID` by hand, so the first open carries the
   // position in the query string for the server to replay from (`docs/03 §4.7`).
-  assert.equal(instances[0]?.url, '/admin/api/audit/stream?lastEventId=17');
+  assert.equal(instances[0]?.url, '/admin/api/logs/stream?lastEventId=17');
   stream.close();
 });
 
@@ -122,7 +122,7 @@ test('a gap frame keeps the resume position until replayed frames arrive', (t) =
   enabledTimers(t, ['setTimeout']);
   const instances: FakeEventSource[] = [];
   const gaps: Array<string | null> = [];
-  const stream = createEventStream('/admin/api/audit/stream', {
+  const stream = createEventStream('/admin/api/logs/stream', {
     eventTypes: ['audit'],
     lastEventId: '17',
     createEventSource: factoryFor(instances),
@@ -150,7 +150,7 @@ test('reconnects after a fatal error and resumes from the last event id', (t) =>
   enabledTimers(t, ['setTimeout']);
   const instances: FakeEventSource[] = [];
   let catchUpPolls = 0;
-  const stream = createEventStream('/admin/api/audit/stream', {
+  const stream = createEventStream('/admin/api/logs/stream', {
     eventTypes: ['audit'],
     createEventSource: factoryFor(instances),
     onFallbackPoll: () => {
@@ -225,8 +225,8 @@ test('ApiClient.stream joins the base url, resumes via query and passes the fact
     storage: null,
     eventSource: factoryFor(instances),
   });
-  const stream = client.stream('/audit/stream', { eventTypes: ['audit'], lastEventId: '9' });
-  assert.equal(instances[0]?.url, '/admin/api/audit/stream?lastEventId=9');
+  const stream = client.stream('/logs/stream', { eventTypes: ['audit'], lastEventId: '9' });
+  assert.equal(instances[0]?.url, '/admin/api/logs/stream?lastEventId=9');
   assert.equal(instances[0]?.init?.withCredentials, true);
   stream.close();
 });

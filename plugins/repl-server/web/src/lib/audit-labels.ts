@@ -26,6 +26,7 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   report_alert: '报告告警',
   alert_test: '告警测试',
   payload_high_water: '载荷高水位',
+  session_dirs_pruned: '会话目录清理',
 };
 
 /** Every event name with a Chinese label; dropdown options use this order. */
