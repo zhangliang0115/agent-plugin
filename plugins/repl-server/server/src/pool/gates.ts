@@ -29,6 +29,7 @@ import { ServerGates } from '@zhangliang0115/repl-server-core/src/gates.ts';
 import type {
   ConcurrencyPolicy,
   ExclusiveGate,
+  ServerGateWaitReason,
   ServerGatesOptions,
 } from '@zhangliang0115/repl-server-core/src/gates.ts';
 
@@ -40,6 +41,13 @@ export type {
 } from '@zhangliang0115/repl-server-core/src/gates.ts';
 
 export interface PoolGatesOptions extends ServerGatesOptions {}
+
+/**
+ * Where a pooled call spent its wait, in the order the layers see it:
+ * this facade's per-binding quota first, then the server's write lock, then the
+ * process-wide exclusive gate.
+ */
+export type PoolWaitReason = 'binding-quota' | ServerGateWaitReason;
 
 /** Hot-appliable per-binding quota values. */
 export interface PoolGateLimits {
@@ -158,18 +166,26 @@ export class PoolGates {
   /**
    * Runs one tool call under the gates. `exclusive` ignores the per-server lock
    * and the binding quota and waits for every admitted call to finish.
+   *
+   * `onWait` is observation only, used to explain a non-zero `queueMs` on the
+   * audit row. It can fire more than once (quota, then write lock, then
+   * admission); the caller decides whether to keep the first or the last.
    */
   run<T>(
     serverId: string,
     bindingId: string | null,
     policy: ConcurrencyPolicy,
     fn: () => Promise<T> | T,
+    onWait?: (reason: PoolWaitReason) => void,
   ): Promise<T> {
     if (policy === 'exclusive') {
-      return this.serverGates.withTool(serverId, policy, bindingId, fn);
+      return this.serverGates.withTool(serverId, policy, bindingId, fn, onWait);
     }
-    return this.withBindingQuota(serverId, bindingId, () =>
-      this.serverGates.withTool(serverId, policy, bindingId, fn),
+    return this.withBindingQuota(
+      serverId,
+      bindingId,
+      () => this.serverGates.withTool(serverId, policy, bindingId, fn, onWait),
+      onWait,
     );
   }
 
@@ -177,6 +193,7 @@ export class PoolGates {
     serverId: string,
     bindingId: string | null,
     fn: () => Promise<T>,
+    onWait?: (reason: PoolWaitReason) => void,
   ): Promise<T> {
     const quota = this.quotaFor(serverId, bindingId);
     if (quota.running >= this.callsPerBindingValue) {
@@ -187,6 +204,7 @@ export class PoolGates {
             `for server ${serverId} (limit ${this.queuedPerBindingValue})`,
         );
       }
+      onWait?.('binding-quota');
       await new Promise<void>((resolve) => quota.waiters.push(resolve));
     } else {
       quota.running += 1;

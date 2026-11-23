@@ -39,3 +39,13 @@ export const WECOM_MARKDOWN_MAX_BYTES = 4096;
 
 export const REPORT_ID_PREFIX = 'rep';
 export const REPORT_ID_PATTERN = /^rep_[0-9a-f]{32}$/;
+
+/**
+ * Retention for the `reports` table (06 §十 #3 left this open: "v1 不清理；建议
+ * 后续加 90 天或 1 万条上限"). Only `closed` rows leave, and never while an
+ * alert is still `pending`/`sending` — that row is unsent outbox state.
+ */
+export const REPORT_RETENTION_DAYS = 90;
+export const REPORT_RETENTION_MAX_ROWS = 10_000;
+/** The lifecycle sweep runs every 60 s; pruning runs at most once an hour. */
+export const REPORT_RETENTION_INTERVAL_MS = 60 * 60 * 1000;

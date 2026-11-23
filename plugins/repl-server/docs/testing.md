@@ -13,6 +13,7 @@
 (cd plugins/repl-server/web && npm test && npm run typecheck && npm run build)
 node scripts/validate.ts
 npm run matrix
+pnpm docs:check   # 版本副本 7 处 + protocol 数值 7 类事实 + admin 端点表 59 条
 ```
 
 当前全量基线：`core` 235 个用例、`server` 780 个用例（全部通过）、`web` 60 个用例，0 skip。

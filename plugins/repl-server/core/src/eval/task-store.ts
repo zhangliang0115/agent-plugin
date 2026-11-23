@@ -199,6 +199,11 @@ export class TaskStore {
     return { capacity: this.capacity, ownerCapacity: this.ownerCapacity };
   }
 
+  /** Retention window applied to records created from now on. */
+  get ttl(): number {
+    return this.ttlMs;
+  }
+
   /** Applies hot-updated retention limits; existing records are not evicted eagerly. */
   updateLimits(limits: TaskStoreLimits): void {
     if (limits.capacity !== undefined) {

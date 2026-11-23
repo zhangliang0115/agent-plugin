@@ -1,8 +1,10 @@
-/** One side of a protocol frame pair: request or response payload, bounded by the recorder. */
+/** One side of a protocol frame pair: request or response payload. */
 import { Space, Tag, Typography } from 'antd';
 
 import { formatBytes, formatJson } from '../../lib/format.ts';
+import { payloadView, type PayloadView } from '../../lib/payload-view.ts';
 import { JsonView } from './JsonView.tsx';
+import { PayloadViewer } from './PayloadViewer.tsx';
 
 const { Text } = Typography;
 
@@ -39,6 +41,28 @@ export function FrameColumn({
   const payloadTruncation = payloadTruncationLabel(payload);
   const head = truncatedHead(payload);
   const text = head === null ? formatJson(payload, 2) : `${head}\n…（已截断）`;
+  // Rows written before the payload split carry a 64 KB head object; rows
+  // written after it carry a ref. Both keep this column readable.
+  const view = framePayloadView(event);
+  if (view !== null && head === null) {
+    return (
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <Text type="secondary" style={{ fontSize: 11.5, fontWeight: 550 }}>
+            {label}
+          </Text>
+          <Text
+            type="secondary"
+            copyable={{ text, tooltips: ['复制报文', '已复制'] }}
+            style={{ fontSize: 11.5 }}
+          >
+            复制
+          </Text>
+        </div>
+        <PayloadViewer label="" view={view} maxHeight={maxHeight} />
+      </div>
+    );
+  }
   return (
     <div style={{ minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -75,6 +99,17 @@ function framePayload(event: FrameEvent): unknown {
   if (event['result'] !== undefined) return event['result'];
   if (event['error'] !== undefined) return event['error'];
   return event;
+}
+
+/** Payload triple of one frame side, or null for a legacy row we cannot read. */
+function framePayloadView(event: FrameEvent): PayloadView | null {
+  const hasParams =
+    event['params'] !== undefined || event['paramsRef'] !== undefined || event['paramsPreview'] !== undefined;
+  const hasResult =
+    event['result'] !== undefined || event['resultRef'] !== undefined || event['resultPreview'] !== undefined;
+  if (event['error'] !== undefined && !hasResult) return null;
+  if (!hasParams && !hasResult) return null;
+  return payloadView(event, hasParams ? 'params' : 'result', 'frame');
 }
 
 function frameTruncationLabel(event: FrameEvent): string | null {

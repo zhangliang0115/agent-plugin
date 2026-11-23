@@ -9,6 +9,7 @@ import {
   type RequestIdentity,
   type TaskSnapshot,
 } from '../ports.ts';
+import { LIMITS } from '@zhangliang0115/repl-server-core';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import { toCallToolResult, type CallToolResult } from '../tools/registry.ts';
 
@@ -17,8 +18,8 @@ import { toCallToolResult, type CallToolResult } from '../tools/registry.ts';
  * the mapping table is bounded in memory and capacity; 2.5 hours covers the
  * long jobs the MCP tasks extension is meant for.
  */
-export const TASK_TTL_MS = 9_000_000;
-export const TASK_POLL_INTERVAL_MS = 500;
+export const TASK_TTL_MS = LIMITS.taskTtlMs;
+export const TASK_POLL_INTERVAL_MS = LIMITS.taskPollIntervalMs;
 
 /** A run longer than this becomes a task when the client declared the tasks extension. */
 export const TASK_TIMEOUT_THRESHOLD_MS = 30_000;

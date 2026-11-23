@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { TaskStore } from '@zhangliang0115/repl-server-core';
@@ -81,6 +84,45 @@ test('wait_tasks rejects unknown and foreign ids with UNKNOWN_TASK + unknownIds'
   await assert.rejects(
     gateway.waitTasks('mcp_other', [dispatched.taskId], 1_000),
     (error: unknown) => (error as { code?: string }).code === 'UNKNOWN_TASK',
+  );
+});
+
+/** Design 02 §4.4: owner is binding-scoped, so a second workspace stays resolvable. */
+test('a bound client consumes tasks across workspaces of the same binding', async (t) => {
+  const dirA = await mkdtemp(join(tmpdir(), 'repl-ws-a-'));
+  const dirB = await mkdtemp(join(tmpdir(), 'repl-ws-b-'));
+  t.after(async () => {
+    await rm(dirA, { recursive: true, force: true });
+    await rm(dirB, { recursive: true, force: true });
+  });
+
+  const gateway = createGateway(t);
+  const identityA: RequestIdentity = {
+    identity: 'bound',
+    binding: 'cb_ws',
+    client: 'test-client/1.0',
+    mcp: 'mcp_ws_a',
+  };
+  const identityB: RequestIdentity = { ...identityA, mcp: 'mcp_ws_b' };
+
+  const inA = await gateway.dispatchScript(request('return "a";', { identity: identityA, workspace: dirA }));
+  const inB = await gateway.dispatchScript(request('return "b";', { identity: identityB, workspace: dirB }));
+
+  // A different binding stays isolated; check it before anything is consumed.
+  await assert.rejects(
+    gateway.waitTasks('cb_other', [inA.taskId], 1_000),
+    (error: unknown) => (error as { code?: string }).code === 'UNKNOWN_TASK',
+  );
+
+  const waited = (await gateway.waitTasks('cb_ws', [inA.taskId, inB.taskId], 5_000)) as WaitResult;
+  assert.equal(waited.ok, true);
+  assert.deepEqual(
+    waited.events.map((event) => event.taskId),
+    [inA.taskId, inB.taskId],
+  );
+  assert.deepEqual(
+    waited.events.map((event) => event.status),
+    ['completed', 'completed'],
   );
 });
 

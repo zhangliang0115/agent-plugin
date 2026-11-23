@@ -12,6 +12,8 @@
     "test": "node --test \"scripts/test/*.test.ts\" && pnpm -r --if-present test",
     "typecheck": "tsc -p tsconfig.json && pnpm -r --if-present typecheck",
     "validate": "node scripts/validate.ts",
+    "docs:check": "node plugins/repl-server/server/scripts/version.ts && node plugins/repl-server/server/scripts/doc-facts.ts && node plugins/repl-server/server/scripts/doc-admin.ts",
+    "docs:version": "node plugins/repl-server/server/scripts/version.ts --write",
     "matrix": "node scripts/matrix.ts",
     "matrix:check": "node scripts/matrix.ts --check"
   },

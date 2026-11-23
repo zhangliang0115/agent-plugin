@@ -312,6 +312,35 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
     return Number(result.changes) > 0;
   }
 
+  function prune(input: { before: string; maxRows: number }): number {
+    return withTransaction(db, () => {
+      // `open`/`ack` are the operator's work queue; `pending`/`sending` is
+      // unsent outbox state. Neither may be dropped by retention.
+      const expired = db
+        .prepare(
+          "DELETE FROM reports WHERE status = 'closed' AND alert_state NOT IN ('pending', 'sending') AND created_at < ?",
+        )
+        .run(input.before);
+      let deleted = Number(expired.changes);
+
+      const row = db.prepare('SELECT count(*) AS n FROM reports').get();
+      const excess = Number(row?.['n'] ?? 0) - input.maxRows;
+      if (excess > 0) {
+        const capped = db
+          .prepare(`
+            DELETE FROM reports WHERE id IN (
+              SELECT id FROM reports
+              WHERE status = 'closed' AND alert_state NOT IN ('pending', 'sending')
+              ORDER BY created_at ASC, id ASC LIMIT ?
+            )
+          `)
+          .run(excess);
+        deleted += Number(capped.changes);
+      }
+      return deleted;
+    });
+  }
+
   return {
     insert,
     get,
@@ -326,5 +355,6 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
     resetStaleSending,
     failStalePending,
     resetAlertForRetry,
+    prune,
   };
 }

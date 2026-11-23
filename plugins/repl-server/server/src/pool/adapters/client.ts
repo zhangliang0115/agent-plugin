@@ -38,6 +38,9 @@ const CLIENT_INFO = { name: 'repl-server', version: VERSION } as const;
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
 
+/** Hard stop for a `tools/list` paging loop; well above any real server's page count. */
+const MAX_TOOL_LIST_PAGES = 100;
+
 /**
  * The framing contract shared by the stdio and HTTP transports. The pool only
  * knows {@link PoolTransport}; the client narrows to this richer shape because
@@ -154,23 +157,50 @@ export class McpClient implements PoolClient {
     this.connected = true;
   }
 
+  /**
+   * Reads every page of `tools/list`. Absence is only meaningful when the list
+   * is complete — `onTools` marks unlisted tools stale (design 03 §5.1) — so a
+   * `nextCursor` must be followed instead of ignored.
+   */
   async listTools(options: { signal: AbortSignal }): Promise<readonly PoolToolInfo[]> {
-    const result = await this.request('tools/list', {}, options);
-    if (!isRecord(result) || !Array.isArray(result.tools)) {
-      throw this.protocolError('tools/list did not return a tools array', result);
+    const tools: PoolToolInfo[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+
+    for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
+      const result = await this.request(
+        'tools/list',
+        cursor === undefined ? {} : { cursor },
+        options,
+      );
+      if (!isRecord(result) || !Array.isArray(result.tools)) {
+        throw this.protocolError('tools/list did not return a tools array', result);
+      }
+
+      for (const entry of result.tools) {
+        if (!isRecord(entry) || typeof entry.name !== 'string' || entry.name === '') {
+          throw this.protocolError('tools/list returned a tool without a name', entry);
+        }
+        const tool: PoolToolInfo = { name: entry.name };
+        if (typeof entry.description === 'string') tool.description = entry.description;
+        if (entry.inputSchema !== undefined) tool.inputSchema = entry.inputSchema;
+        tools.push(tool);
+      }
+
+      const next = result.nextCursor;
+      if (next === undefined || next === null || next === '') return tools;
+      if (typeof next !== 'string') {
+        throw this.protocolError('tools/list returned a non-string nextCursor', result);
+      }
+      // A repeating cursor would loop forever; treat it as a protocol fault.
+      if (seenCursors.has(next)) {
+        throw this.protocolError('tools/list repeated a nextCursor', result);
+      }
+      seenCursors.add(next);
+      cursor = next;
     }
 
-    const tools: PoolToolInfo[] = [];
-    for (const entry of result.tools) {
-      if (!isRecord(entry) || typeof entry.name !== 'string' || entry.name === '') {
-        throw this.protocolError('tools/list returned a tool without a name', entry);
-      }
-      const tool: PoolToolInfo = { name: entry.name };
-      if (typeof entry.description === 'string') tool.description = entry.description;
-      if (entry.inputSchema !== undefined) tool.inputSchema = entry.inputSchema;
-      tools.push(tool);
-    }
-    return tools;
+    throw this.protocolError(`tools/list exceeded ${MAX_TOOL_LIST_PAGES} pages`);
   }
 
   async callTool(name: string, args: unknown, options: { signal: AbortSignal }): Promise<unknown> {

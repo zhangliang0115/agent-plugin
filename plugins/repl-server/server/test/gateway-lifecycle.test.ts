@@ -145,9 +145,14 @@ test('eval and tool audits carry the request id and a shared runId', async (t) =
   assert.equal(toolCall?.['server'], '__official__');
 
   assert.equal(toolCall?.['seq'], 1);
-  assert.equal(toolCall?.['mode'], 'serial');
+  // Official tools ignore the catalog's decorative `concurrency`: `serve`
+  // exports no `isConcurrencySafe`, so the row reports the mode this gateway
+  // actually applied (`02 §2.4`). `echo` is neither a file writer nor Bash.
+  assert.equal(toolCall?.['mode'], 'parallel');
   assert.deepEqual(toolCall?.['args'], {});
-  assert.equal(toolCall?.['argsBytes'], 2);
+  // Byte accounting belongs to the audit runtime: it is the only layer that
+  // serializes the value, so the gateway emits raw arguments only (`09 §三`).
+  assert.equal('argsBytes' in (toolCall ?? {}), false);
   assert.equal(typeof toolCall?.['queuedAt'], 'number');
 
   assert.equal(toolResult?.['server'], '__official__');

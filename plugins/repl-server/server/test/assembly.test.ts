@@ -308,9 +308,9 @@ test('assembled server records full protocol frames with request and response pa
   // Closing flushes the audit writers before the files are read; the wrapper's
   // `close` also removes the temp root, so flush the assembly directly.
   await app.assembly.close();
-  const dir = join(app.root, 'repl-server', 'audit');
+  const dir = join(app.root, 'repl-server', 'log');
   const files = (await readdir(dir)).filter(
-    (name) => name.startsWith('protocol-') && name.endsWith('.jsonl'),
+    (name) => name.startsWith('events-') && name.endsWith('.jsonl'),
   );
   assert.ok(files.length > 0);
   const lines = (await readFile(join(dir, files[0]!), 'utf8')).trim().split('\n').filter(Boolean);
@@ -323,8 +323,16 @@ test('assembled server records full protocol frames with request and response pa
   );
   assert.ok(request !== undefined);
   assert.ok(response !== undefined);
+  // Small bodies stay inline. `tools/list` is hundreds of KB, so the row keeps
+  // a ref plus a preview and the body lives under `payload/` (`09 §三`).
   assert.ok(request['params'] !== undefined, 'full mode must keep request payloads');
-  assert.ok(response['result'] !== undefined, 'full mode must keep response payloads');
+  const resultRef = response['resultRef'];
+  assert.equal(typeof resultRef, 'string', 'full mode must keep response payloads');
+  assert.equal('result' in response, false, 'an externalised body must not stay inline');
+  const body = JSON.parse(await readFile(join(dir, String(resultRef)), 'utf8')) as {
+    tools?: unknown[];
+  };
+  assert.ok(Array.isArray(body.tools) && body.tools.length > 0, 'the blob holds the full result');
 });
 
 test('run_script description and instructions follow the client binding visibility', async (t) => {
@@ -536,9 +544,9 @@ test('persists resource samples as daily JSONL', async () => {
   const app = await startIn(root);
   try {
     await app.close();
-    const dir = join(root, 'repl-server', 'metrics');
+    const dir = join(root, 'repl-server', 'log');
     const names = await readdir(dir);
-    const file = names.find((name) => /^resource-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
+    const file = names.find((name) => /^metrics-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
     assert.ok(file !== undefined, `metrics files: ${names.join(', ')}`);
     const lines = (await readFile(join(dir, file), 'utf8'))
       .trim()

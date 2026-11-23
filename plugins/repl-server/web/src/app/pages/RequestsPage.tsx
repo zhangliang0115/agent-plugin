@@ -22,7 +22,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
 import { FrameColumn, type FrameEvent } from '../components/FramePayload.tsx';
-import { RequestTimeline } from '../components/RequestTimeline.tsx';
+import { RequestProcess } from '../components/RequestProcess.tsx';
 import {
   ApiError,
   framesTruncatedNotice,
@@ -42,8 +42,10 @@ import {
   eventWindow,
   isAsyncResponse,
   isProtocolFrame,
-  requestRunIds,
+  matchesDetailKeys,
+  requestDetailKeys,
   toolCallOutcome,
+  type RequestDetailKeys,
 } from '../../lib/request-detail.ts';
 
 const { Text } = Typography;
@@ -73,6 +75,13 @@ interface AuditEvent {
   elapsedMs?: number;
   error?: string;
   [key: string]: unknown;
+}
+
+/** Identity of one audit row, used to merge the runId and taskId lookups. */
+function eventDedupeKey(event: AuditEvent): string {
+  return [event.event, event.ts, event.exec, event.evalId, event['seq'], event['mcp'], event['id']]
+    .map((part) => (part === undefined ? '' : String(part)))
+    .join('|');
 }
 
 type FrameProtocolChoice = 'ok' | 'error' | 'none';
@@ -165,6 +174,12 @@ export function RequestsPage(): React.ReactElement {
   const filtersRef = useRef(filters);
   const reloadTimerRef = useRef<number | null>(null);
   const eventTicketRef = useRef(0);
+  /** Identifiers of the work behind the open detail panel, for live refresh. */
+  const detailRef = useRef<{ pair: ProtocolFramePair | null; keys: RequestDetailKeys; timer: number | null }>({
+    pair: null,
+    keys: { runIds: [], taskIds: [] },
+    timer: null,
+  });
 
   useEffect(() => {
     let alive = true;
@@ -234,6 +249,19 @@ export function RequestsPage(): React.ReactElement {
     }, 500);
   }, [load]);
 
+  /** Re-reads the open detail panel when a live frame belongs to it. */
+  const reloadDetail = useCallback((): void => {
+    const detail = detailRef.current;
+    if (detail.timer !== null) window.clearTimeout(detail.timer);
+    detail.timer = window.setTimeout(() => {
+      detail.timer = null;
+      if (detail.pair === null || document.visibilityState !== 'visible') return;
+      void openRequest(detail.pair);
+    }, 500);
+    // `openRequest` only touches state setters, the api client and refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
   useEffect(() => {
     if (!live) {
       setStreamState('closed');
@@ -243,6 +271,9 @@ export function RequestsPage(): React.ReactElement {
       eventTypes: ['audit', 'message'],
       onEvent: (frame) => {
         if (isProtocolFrame(frame.data)) scheduleLiveReload();
+        // The open panel follows its own eval, not the list: an async task can
+        // settle long after the request row stopped changing.
+        if (matchesDetailKeys(frame.data, detailRef.current.keys)) reloadDetail();
       },
       onGap: scheduleLiveReload,
       onStateChange: setStreamState,
@@ -255,8 +286,12 @@ export function RequestsPage(): React.ReactElement {
         window.clearTimeout(reloadTimerRef.current);
         reloadTimerRef.current = null;
       }
+      if (detailRef.current.timer !== null) {
+        window.clearTimeout(detailRef.current.timer);
+        detailRef.current.timer = null;
+      }
     };
-  }, [api, live, scheduleLiveReload]);
+  }, [api, live, reloadDetail, scheduleLiveReload]);
 
   function update(patch: Partial<RequestFilters>): void {
     const next = { ...filters, ...patch };
@@ -321,6 +356,7 @@ export function RequestsPage(): React.ReactElement {
     setEventsError(null);
     setEventsLoading(true);
     const ticket = ++eventTicketRef.current;
+    detailRef.current.pair = pair;
     try {
       // Exact link: `eval_start` carries the id of the `tools/call` that started
       // it, and every tool event of that eval carries the same `runId`. The
@@ -333,14 +369,35 @@ export function RequestsPage(): React.ReactElement {
         },
       });
       if (ticket !== eventTicketRef.current) return;
-      const runIds = requestRunIds(Array.isArray(starts.events) ? starts.events : [], pair.id);
+      const first = Array.isArray(starts.events) ? starts.events : [];
+      const keys = requestDetailKeys(first, pair.id);
+      detailRef.current.keys = keys;
+
       const collected: AuditEvent[] = [];
-      for (const runId of runIds) {
+      const seen = new Set<string>();
+      const push = (batch: AuditEvent[]): void => {
+        for (const event of batch) {
+          const key = eventDedupeKey(event);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          collected.push(event);
+        }
+      };
+      for (const runId of keys.runIds) {
         const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
           query: { runId, limit: 500 },
         });
         if (ticket !== eventTicketRef.current) return;
-        if (Array.isArray(response.events)) collected.push(...response.events);
+        if (Array.isArray(response.events)) push(response.events);
+      }
+      // `async_dispatch` has no `runId`; its `evalTaskId` is the only handle on
+      // the background half (settle, cancel), so it needs its own lookup.
+      for (const taskId of keys.taskIds) {
+        const response = await api.get<{ events?: AuditEvent[] }>('/audit/query', {
+          query: { taskId, limit: 500 },
+        });
+        if (ticket !== eventTicketRef.current) return;
+        if (Array.isArray(response.events)) push(response.events);
       }
       collected.sort((left, right) => timeOf(left) - timeOf(right));
       setEvents(collected);
@@ -575,6 +632,9 @@ export function RequestsPage(): React.ReactElement {
         open={selected !== null}
         onClose={() => {
           eventTicketRef.current += 1;
+          // Stop following the eval: a closed panel must not keep refetching.
+          detailRef.current.pair = null;
+          detailRef.current.keys = { runIds: [], taskIds: [] };
           setSelected(null);
           setEvents(null);
         }}
@@ -602,7 +662,7 @@ export function RequestsPage(): React.ReactElement {
                 key: 'timeline',
                 label: '过程',
                 children: (
-                  <RequestTimeline
+                  <RequestProcess
                     request={selected.request}
                     response={selected.response}
                     events={events}

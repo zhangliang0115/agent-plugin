@@ -357,6 +357,17 @@ async function startStubServer(): Promise<RunningStub> {
         return;
       }
       if (method === 'tools/list') {
+        const params = isRecord(message.params) ? message.params : {};
+        if (params.cursor === 'page-2') {
+          sendSse(res, [
+            {
+              jsonrpc: '2.0',
+              id,
+              result: { tools: [{ name: 'second-page' }] },
+            },
+          ]);
+          return;
+        }
         sendSse(res, [
           {
             jsonrpc: '2.0',
@@ -369,6 +380,7 @@ async function startStubServer(): Promise<RunningStub> {
                 { name: 'slow' },
                 { name: 'error-result' },
               ],
+              nextCursor: 'page-2',
             },
           },
         ]);
@@ -441,6 +453,24 @@ function makeStubClient(url: string): { transport: HttpTransport; client: McpCli
   const transport = createHttpTransport({ url, headers: {} });
   return { transport, client: new McpClient(spec, transport) };
 }
+
+test('listTools follows nextCursor so absence is authoritative for stale marking', async (t) => {
+  const stub = await startStubServer();
+  const { transport, client } = makeStubClient(stub.url);
+  t.after(async () => {
+    client.close();
+    await transport.close();
+    await stub.close();
+  });
+
+  await client.connect(transport, { signal: requestSignal() });
+  const tools = await client.listTools({ signal: requestSignal() });
+
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ['plain', 'fail', 'garbage', 'slow', 'error-result', 'second-page'],
+  );
+});
 
 test('client accepts a newer negotiated version and maps server error codes', async (t) => {
   const stub = await startStubServer();

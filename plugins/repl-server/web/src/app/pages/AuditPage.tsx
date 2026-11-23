@@ -29,6 +29,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
 import { JsonView } from '../components/JsonView.tsx';
+import { PayloadViewer } from '../components/PayloadViewer.tsx';
+import { payloadView } from '../../lib/payload-view.ts';
 import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
 import {
   aiRunKindLabel,
@@ -1190,17 +1192,19 @@ export function AuditPage(): React.ReactElement {
   );
 }
 
-/** Event-type-specific input/output fields; result bodies stay in Requests → Frames. */
+/** Event-type-specific input/output fields; bodies come from `payload/` when large. */
 function EventIO({ event }: { event: AuditEvent }): React.ReactElement | null {
   if (event.event === 'tool_call') {
     return (
       <Card size="small" title="输入 / 输出">
         <Descriptions column={2} size="small">
           <Descriptions.Item label="输入参数" span={2}>
-            {event.args === undefined ? '—' : <JsonView value={event.args} maxHeight={220} />}
+            <PayloadViewer label="" view={payloadView(event, 'args')} maxHeight={220} />
           </Descriptions.Item>
-          <Descriptions.Item label="参数字节">{formatNumber(asNumber(event.argsBytes))}</Descriptions.Item>
           <Descriptions.Item label="模式">{eventText(event, 'mode') ?? '—'}</Descriptions.Item>
+          <Descriptions.Item label="等待 / 执行">
+            {`${formatDuration(asNumber(event.queueMs))} / ${formatDuration(eventDuration(event))}`}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
     );
@@ -1209,23 +1213,23 @@ function EventIO({ event }: { event: AuditEvent }): React.ReactElement | null {
     return (
       <Card size="small" title="输入 / 输出">
         <Descriptions column={2} size="small">
-          <Descriptions.Item label="输出字节">{formatNumber(asNumber(event.outBytes))}</Descriptions.Item>
-          <Descriptions.Item label="错误码">{eventText(event, 'errorCode') ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="排队 / 耗时">
             {`${formatDuration(asNumber(event.queueMs))} / ${formatDuration(eventDuration(event))}`}
           </Descriptions.Item>
+          <Descriptions.Item label="错误码">{eventText(event, 'errorCode') ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="状态">
             {eventStatus(event) === '' ? '—' : eventStatus(event)}
           </Descriptions.Item>
+          <Descriptions.Item label="输出字节">{formatNumber(asNumber(event.outBytes))}</Descriptions.Item>
           {event.error === undefined ? null : (
             <Descriptions.Item label="错误" span={2}>
               <JsonView value={event.error} maxHeight={160} />
             </Descriptions.Item>
           )}
         </Descriptions>
-        <Text type="secondary" style={{ fontSize: 11.5 }}>
-          审计只保存结果字节与错误码，正文不落盘；完整请求/响应见「请求记录 → 协议帧」。
-        </Text>
+        <div style={{ marginTop: 8 }}>
+          <PayloadViewer label="返回内容" view={payloadView(event, 'result')} />
+        </div>
       </Card>
     );
   }

@@ -21,7 +21,9 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test \"test/*.test.ts\"",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "docs:check": "node scripts/version.ts --check && node scripts/doc-facts.ts && node scripts/doc-admin.ts",
+    "docs:write": "node scripts/version.ts --write"
   },
   "devDependencies": {
     "@zhangliang0115/repl-server-core": "workspace:*",

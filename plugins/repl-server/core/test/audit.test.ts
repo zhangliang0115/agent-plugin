@@ -136,8 +136,8 @@ test('splits files at UTC midnight and creates them with 0600', async () => {
     writer.write('eval_end', { evalId: 7, outcome: 'ok' });
     await writer.close();
 
-    const dayOne = await readEvents(join(dir, 'audit-2026-11-17.jsonl'));
-    const dayTwo = await readEvents(join(dir, 'audit-2026-11-18.jsonl'));
+    const dayOne = await readEvents(join(dir, 'events-2026-11-17.jsonl'));
+    const dayTwo = await readEvents(join(dir, 'events-2026-11-18.jsonl'));
     assert.equal(dayOne.length, 1);
     assert.equal(dayTwo.length, 1);
     assert.equal(dayOne[0]?.event, 'eval_start');
@@ -145,7 +145,7 @@ test('splits files at UTC midnight and creates them with 0600', async () => {
 
     const first = dayOne[0];
     assert.ok(first !== undefined);
-    assert.equal(first.v, 1);
+    assert.equal(first.v, 2);
     assert.equal(first.ts, '2026-11-17T23:59:59.500Z');
     assert.equal(first.identity, 'bound');
     assert.equal(first.binding, IDENTITY.binding);
@@ -153,7 +153,7 @@ test('splits files at UTC midnight and creates them with 0600', async () => {
     assert.equal(first.mcp, IDENTITY.mcp);
     assert.equal(first.exec, IDENTITY.exec);
 
-    const mode = (await stat(join(dir, 'audit-2026-11-17.jsonl'))).mode & 0o777;
+    const mode = (await stat(join(dir, 'events-2026-11-17.jsonl'))).mode & 0o777;
     assert.equal(mode, 0o600);
   });
 });
@@ -179,7 +179,7 @@ test('exported events never contain secret originals', async () => {
     writer.writeEvent({ event: 'eval_end', evalId: 3, outcome: 'ok' });
     await writer.close();
 
-    const text = await readFile(join(dir, 'audit-2026-11-18.jsonl'), 'utf8');
+    const text = await readFile(join(dir, 'events-2026-11-18.jsonl'), 'utf8');
     assert.ok(!text.includes(apiKey));
     assert.ok(!text.includes(bearerToken));
     assert.ok(text.includes('<redacted>'));
@@ -206,7 +206,7 @@ test('queue pressure drops detail events and records audit_dropped', async () =>
     writer.write('eval_end', { evalId: 1, outcome: 'ok' });
     await writer.close();
 
-    const events = await readEvents(join(dir, 'audit-2026-11-18.jsonl'));
+    const events = await readEvents(join(dir, 'events-2026-11-18.jsonl'));
     const calls = events.filter((event) => event.event === 'tool_call');
     assert.ok(calls.length >= 1);
     assert.ok(calls.length < 60, `expected dropped details, kept ${calls.length}`);
@@ -224,10 +224,10 @@ test('queue pressure drops detail events and records audit_dropped', async () =>
 
 test('prune honours the retention window and total size cap', async () => {
   await withTempDir(async (dir) => {
-    await writeFile(join(dir, 'audit-2020-01-01.jsonl'), 'x'.repeat(80));
-    await writeFile(join(dir, 'audit-2026-11-16.jsonl'), 'x'.repeat(80));
-    await writeFile(join(dir, 'audit-2026-11-17.jsonl'), 'x'.repeat(80));
-    await writeFile(join(dir, 'audit-2026-11-18.jsonl'), 'x'.repeat(80));
+    await writeFile(join(dir, 'events-2020-01-01.jsonl'), 'x'.repeat(80));
+    await writeFile(join(dir, 'events-2026-11-16.jsonl'), 'x'.repeat(80));
+    await writeFile(join(dir, 'events-2026-11-17.jsonl'), 'x'.repeat(80));
+    await writeFile(join(dir, 'events-2026-11-18.jsonl'), 'x'.repeat(80));
     await writeFile(join(dir, 'notes.txt'), 'keep me');
 
     const writer = new AuditWriter({
@@ -239,11 +239,11 @@ test('prune honours the retention window and total size cap', async () => {
     const removed = await writer.prune();
     await writer.close();
 
-    assert.ok(removed.includes('audit-2020-01-01.jsonl'));
-    assert.ok(removed.includes('audit-2026-11-16.jsonl'));
-    assert.ok(removed.includes('audit-2026-11-17.jsonl'));
-    assert.ok(!removed.includes('audit-2026-11-18.jsonl'));
-    assert.deepEqual((await readdir(dir)).sort(), ['audit-2026-11-18.jsonl', 'notes.txt']);
+    assert.ok(removed.includes('events-2020-01-01.jsonl'));
+    assert.ok(removed.includes('events-2026-11-16.jsonl'));
+    assert.ok(removed.includes('events-2026-11-17.jsonl'));
+    assert.ok(!removed.includes('events-2026-11-18.jsonl'));
+    assert.deepEqual((await readdir(dir)).sort(), ['events-2026-11-18.jsonl', 'notes.txt']);
   });
 });
 

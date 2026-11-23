@@ -145,9 +145,8 @@ export const REPORT_PROBLEM_SCHEMA: ToolInputSchema = deepFreeze({
  * report_problem. `run_script` carries no annotations because scripts write files and run
  * commands; marking it read-only would let plan mode through and duplicate a retried call
  * (docs/protocol.md §3.3). `report_problem` also carries none: it writes a row and does not
- * promise idempotency (06 §3.1). protocol.md gives the other three both hints; 01 §4.2 would
- * omit idempotentHint on wait_tasks because it consumes results, but the frozen protocol is
- * the implementation source.
+ * promise idempotency (06 §3.1). `wait_tasks` is read-only but **not** idempotent: it consumes
+ * results, so a retried call answers `ALREADY_CONSUMED` instead of the same payload (01 §4.2).
  */
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly ToolDefinition[]>([
   {
@@ -175,7 +174,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly T
     description: WAIT_TASKS_DESCRIPTION,
     inputSchema: WAIT_TASKS_SCHEMA,
     _meta: { 'anthropic/alwaysLoad': true },
-    annotations: { readOnlyHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: true },
   },
   {
     name: 'report_problem',

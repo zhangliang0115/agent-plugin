@@ -30,7 +30,7 @@
 
 | id | 任务 | 依赖 | 估算 |
 |---|---|---|---|
-| `srv-00-sdk-spike` | SDK 承载 spike：@modelcontextprotocol/sdk transport 与手写 JSON-RPC 方法表共存 | — | 1d |
+| ~~`srv-00-sdk-spike`~~ | **已取消**（2026-11-23）：不引入 `@modelcontextprotocol/sdk`，server 与客户端适配层全部手写，零运行时依赖（protocol §1.2、设计 02 §4.3）；下表对它的依赖视为已满足 | — | 0d |
 | `srv-01-http-shell` | HTTP 骨架与单实例锁：/health、/mcp、/admin 路由、统一错误与优雅关闭 | — | 1d |
 | `srv-02-streamable-http` | MCP Streamable HTTP（stateful）：POST/GET/DELETE 与 Mcp-Session-Id | srv-00-sdk-spike, srv-01-http-shell, srv-04-discover-methods, srv-05-transport-sessions, srv-18-protocol-doc | 1d |
 | `srv-03-stdio-bridge` | stdio bridge：stdin/stdout JSON-RPC 与 HTTP /mcp 的 1:1 转发 | srv-02-streamable-http | 1d |

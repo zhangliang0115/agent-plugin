@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
 
 import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-server-core';
@@ -7,7 +6,7 @@ import { newId, releaseInstanceLock, startupSweep } from '@zhangliang0115/repl-s
 import { assemble } from './assembly.ts';
 import { isLoopbackBindAddress, parseHostAllowlist, type HostAllowlist } from './auth/tokens.ts';
 import { createLog } from './log.ts';
-import { stateDbPath } from './local-tokens.ts';
+import { createLayout, legacyLeftovers } from './layout.ts';
 import { runStdioBridge } from './stdio-bridge.ts';
 
 const log = createLog((line) => console.error(line), { threadId });
@@ -71,10 +70,23 @@ if (options.stdio) {
   });
 } else {
   const host = options.host;
-  const root = process.env['AGENTS_HOME'];
-  const dataRoot = join(stateDbPath(root === undefined ? undefined : `${root}/repl-server`), '..');
+  const layout = createLayout();
+  const leftovers = legacyLeftovers(layout);
+  if (leftovers.length > 0) {
+    log(
+      `legacy data layout at ${layout.root} (${leftovers.join(', ')}); ` +
+        'run "node server/scripts/layout-switch.mjs" to move it into run/ and log/',
+      { level: 'error', scope: 'server' },
+    );
+    process.exit(1);
+  }
   const bootId = newId('boot');
-  const sweep = startupSweep({ root: dataRoot, bootId });
+  const sweep = startupSweep({
+    root: layout.run,
+    bootId,
+    lockPath: layout.lockPath,
+    reportDir: layout.boots,
+  });
   log(
     `startup sweep ${sweep.status} boot=${bootId} killed=${sweep.killed.length} ai-runs-cleaned=${sweep.cleanedAiRuns.length} orphans=${sweep.reportPath ?? 'none'}`,
     { scope: 'server' },
@@ -110,7 +122,7 @@ if (options.stdio) {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       void assembly.close().finally(() => {
-        releaseInstanceLock(join(dataRoot, 'instance.lock'));
+        releaseInstanceLock(layout.lockPath);
         process.exit(0);
       });
     });

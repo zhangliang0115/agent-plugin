@@ -1,5 +1,23 @@
 # 变更记录
 
+## 未发布
+### 新增
+- 文档校验脚本：`pnpm docs:check` 校验版本副本（7 处）、`docs/protocol.md` 的数值（7 类事实，直接读运行时常量，正则失配也算失败）与 `docs/admin-api.md` 的端点表（根段级双向比对 `server/src/admin/*.ts`）；`pnpm docs:version` 按 `plugin.meta.json` 回写全部副本。
+- `docs/admin-api.md`：管理端 `/admin/api/*` 的 L1 契约，从设计 03 §四、06 §五 抽出（鉴权、59 条端点总表、请求/响应形状、生效时机、SSE、审计查询、报告与告警端点、HTTP 错误码）；同时补上代码已服务但原表缺的 `/csrf`、`/session`、`/tags`、`/categories`。
+- `core/src/version.ts` 改为由 `server/scripts/version.ts` 生成，`VERSION` 不再有第二处字面量。
+- `tools/list` 刷新按「上游缺席即 stale」标记：新增 `markAbsentToolsStale()`，每次成功刷新把该 server 未返回的行置 `stale=1`，返回的行由 `upsertTool` 置 0，`stale_override` 不变（设计 03 §5.1、07 §1.2）。
+- 连接池客户端 `listTools` 跟随 `nextCursor` 拉全分页（上限 100 页，重复 cursor 视为协议错误），让「缺席」判断有完整基准。
+- 异步任务审计补齐 `async_dispatch`（`evalTaskId`/`evalId`/`ttlMs`/`exec`/身份）与 `task_cancel`（`by`/`honoured`）；binding 删除与传输销毁取消任务时也记 `task_cancel`（设计 02 §5.3）。
+- `reports` 表保留策略：90 天 / 10000 行，只清 `closed` 且告警不在 `pending`/`sending` 的行，随生命周期 sweep 每小时执行（设计 06 §十 #3）。
+- 显式 `timeout` 增加 L2 上限：同步 600s、异步 7200s，超出钳到上限；省略仍表示不设截止。
+### 变更
+- `wait_tasks` 不再声明 `idempotentHint`：它消费结果，重试返回 `ALREADY_CONSUMED`（与设计 01 §4.2 一致）。
+- `TASK_TTL_MS` / `TASK_POLL_INTERVAL_MS` 改为引用 `LIMITS`，去掉与 `core/src/constants.ts` 的重复字面量。
+### 文档
+- `docs/protocol.md` 校正 `truncated="1"`（服务端先截断，01 §8.1）、`timeout` 上限、`wait_tasks` 注解、SDK 边界（零依赖）；`docs/plan.md` 的 `srv-00-sdk-spike` 标为已取消。
+- `docs/protocol.md` 改为把管理端形状指向 `docs/admin-api.md`，不再指向设计 06–08。
+- `docs/protocol.md` 明确 `wait_tasks` 的 owner 作用域：已绑定客户端跨传输会话、跨 workspace 可见（`taskIds` 必填且无按 owner 全量收取的兜底），与 `tasks/get` 同作用域；设计 02 §4.4「归属」同步为 binding 级并记录理由。
+
 ## 0.2.0（2026-11-22）
 ### 新增
 - MCP 2026-07-28 端点与 Code Mode 工具面：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`；同步/异步 eval 与 MCP tasks 均可运行。

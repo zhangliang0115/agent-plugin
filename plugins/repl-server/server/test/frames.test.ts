@@ -4,10 +4,7 @@ import test from 'node:test';
 
 import type { AuditEvent, Clock } from '../src/ports.ts';
 import {
-  boundFramePayload,
   createProtocolFrameRecorder,
-  FRAME_HEAD_BYTES,
-  FRAME_MAX_BYTES,
   frameKey,
   pairProtocolFrames,
   redactText,
@@ -198,24 +195,18 @@ test('full mode redacts Authorization/Cookie, strips URL queries and replaces ba
   });
 });
 
-test('full mode truncates a payload over 1MB to a 64KB head plus metadata', () => {
+test('full mode keeps a large payload verbatim for the runtime to externalise', () => {
   const { sink, recorder } = makeRecorder('full');
-  recorder.recordIn({
-    mcp: 'mcp_1',
-    id: 4,
-    method: 'tools/call',
-    params: { blobText: 'y'.repeat(FRAME_MAX_BYTES + 1024) },
-  });
+  const params = { blobText: 'y'.repeat(300 * 1024) };
+  recorder.recordIn({ mcp: 'mcp_1', id: 4, method: 'tools/call', params });
   recorder.flush();
 
   const request = sink.events[0];
   assert.ok(request !== undefined);
-  const params = request.params as Record<string, unknown>;
-  assert.equal(params.truncated, true);
-  assert.ok(typeof params.bytes === 'number' && params.bytes > FRAME_MAX_BYTES);
-  assert.match(String(params.sha256), /^[0-9a-f]{64}$/);
-  assert.ok(Buffer.byteLength(String(params.head), 'utf8') <= FRAME_HEAD_BYTES);
-  assert.match(String(params.head), /^\{"blobText":"y+/);
+  // The recorder only redacts and rewrites blobs; size policy belongs to the
+  // audit runtime, which turns this into `paramsRef` + preview (`09 §四`).
+  assert.deepEqual(request.params, params);
+  assert.equal(request.bytes, Buffer.byteLength(JSON.stringify(params), 'utf8'));
 });
 
 test('payloads under the limit are kept intact', () => {
@@ -376,13 +367,4 @@ test('redactText keeps the key and hides the value', () => {
   const redacted = redactText('Authorization: Bearer abcdefghijklmnop');
   assert.match(redacted, /^Authorization: <redacted>(?: <redacted>)?$/);
   assert.equal(redactText('plain text'), 'plain text');
-});
-
-test('boundFramePayload hashes the untruncated serialized payload', () => {
-  const value = { text: 'z'.repeat(FRAME_MAX_BYTES + 1) };
-  const bounded = boundFramePayload(value) as Record<string, unknown>;
-  const expectedHash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  assert.equal(bounded.truncated, true);
-  assert.equal(bounded.sha256, expectedHash);
-  assert.equal(bounded.bytes, Buffer.byteLength(JSON.stringify(value), 'utf8'));
 });

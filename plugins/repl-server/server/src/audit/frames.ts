@@ -19,15 +19,13 @@
 
 import { createHash } from 'node:crypto';
 
+import { AUDIT_SCHEMA_VERSION } from '@zhangliang0115/repl-server-core';
+
 import { systemClock, type AuditEvent, type AuditSink, type Clock } from '../ports.ts';
 
 export const FRAME_MODES = ['off', 'summary', 'full'] as const;
 export type FrameMode = (typeof FRAME_MODES)[number];
 
-/** Maximum serialized size of one full-mode payload. */
-export const FRAME_MAX_BYTES = 1024 * 1024;
-/** Bytes of the original payload kept when a frame is truncated. */
-export const FRAME_HEAD_BYTES = 64 * 1024;
 /** Independent frame write queue length (docs/02 §6.6). */
 export const FRAME_QUEUE_LIMIT = 10_000;
 /** Upper bound on remembered unanswered requests. */
@@ -119,10 +117,6 @@ function sha256Buffer(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
-function sha256Text(text: string): string {
-  return sha256Buffer(Buffer.from(text, 'utf8'));
-}
-
 function jsonBytes(value: unknown): number {
   if (value === undefined) return 0;
   let text: string;
@@ -132,13 +126,6 @@ function jsonBytes(value: unknown): number {
     return 0;
   }
   return Buffer.byteLength(text, 'utf8');
-}
-
-/** UTF-8-safe prefix of `maxBytes` bytes. */
-function utf8Head(text: string, maxBytes: number): string {
-  const buffer = Buffer.from(text, 'utf8');
-  if (buffer.length <= maxBytes) return text;
-  return buffer.subarray(0, maxBytes).toString('utf8').replace(/�+$/u, '');
 }
 
 /** Redacts secret-looking fragments inside free-form strings (docs/02 §6.4). */
@@ -238,42 +225,15 @@ function transformValue(value: unknown, depth = 0): unknown {
   return out;
 }
 
-export interface TruncatedFramePayload {
-  truncated: true;
-  bytes: number;
-  sha256: string;
-  head: string;
-}
-
 /**
- * Bounds one serialized payload to `FRAME_MAX_BYTES`; over the limit the
- * payload is replaced by a 64KB head plus metadata, never half a JSON value.
+ * Full-mode payload: redact keys and values, replace base64 blobs, and hand
+ * the result to the audit runtime. Size policy is *not* decided here: the
+ * runtime applies the same inline/blob/split plan it uses for tool rows, so a
+ * 300 KB `tools/call` result is captured whole in `payload/` instead of being
+ * cut to a 1 MiB head (`09 §四`).
  */
-export function boundFramePayload(
-  value: unknown,
-  maxBytes: number = FRAME_MAX_BYTES,
-  headBytes: number = FRAME_HEAD_BYTES,
-): unknown {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    return { truncated: true, bytes: 0, sha256: '', head: '' } satisfies TruncatedFramePayload;
-  }
-  if (serialized === undefined) return value;
-  const bytes = Buffer.byteLength(serialized, 'utf8');
-  if (bytes <= maxBytes) return value;
-  return {
-    truncated: true,
-    bytes,
-    sha256: sha256Text(serialized),
-    head: utf8Head(serialized, headBytes),
-  } satisfies TruncatedFramePayload;
-}
-
-/** Full-mode payload: redact, replace blobs, then bound. */
 export function prepareFramePayload(value: unknown): unknown {
-  return boundFramePayload(transformValue(value));
+  return transformValue(value);
 }
 
 /** Pairing key; the id type is part of the key because JSON-RPC ids are typed. */
@@ -283,7 +243,7 @@ export function frameKey(mcp: string, id: string | number): string {
 
 function baseEvent(ts: number, name: 'proto_in' | 'proto_out', context: FrameContext): AuditEvent {
   const event: AuditEvent = {
-    v: 1,
+    v: AUDIT_SCHEMA_VERSION,
     ts: new Date(ts).toISOString(),
     event: name,
     mcp: context.mcp,
@@ -506,7 +466,7 @@ export class ProtocolFrameRecorder {
     for (const [second, count] of buckets) {
       this.enqueue(
         {
-          v: 1,
+          v: AUDIT_SCHEMA_VERSION,
           ts: new Date(second * 1000).toISOString(),
           event: 'protocol_dropped',
           count,

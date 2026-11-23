@@ -157,6 +157,11 @@ export interface ReportStore {
   failStalePending(before: string, now?: string): number;
   /** Moves one of the retryable terminal states back to `pending` (06 §5.2). */
   resetAlertForRetry(id: string, at: string): boolean;
+  /**
+   * Drops closed reports older than `before`, then the oldest closed rows above
+   * `maxRows`. `open`/`ack` rows and unsent alerts are never removed.
+   */
+  prune(input: { before: string; maxRows: number }): number;
 }
 
 /** Narrow `settings.alerts` access; corrupt JSON is reported, not thrown (06 §4.1). */

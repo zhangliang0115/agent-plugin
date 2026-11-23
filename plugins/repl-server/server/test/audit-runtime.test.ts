@@ -65,7 +65,7 @@ async function createFixture(
 async function readRecords(
   dir: string,
   day = DAY,
-  prefix = 'audit',
+  prefix = 'events',
 ): Promise<Array<Record<string, unknown>>> {
   const text = await readFile(join(dir, `${prefix}-${day}.jsonl`), 'utf8');
   return text
@@ -207,30 +207,17 @@ test('records eval, tool, task and frame events into daily JSONL and drains on c
   const records = await readRecords(dir);
   assert.deepEqual(
     records.map((record) => record['event']),
-    ['eval_start', 'tool_call', 'tool_result', 'async_dispatch'],
-    'the audit log holds no protocol frames',
+    ['eval_start', 'tool_call', 'tool_result', 'async_dispatch', 'proto_in', 'proto_out'],
+    'one stream holds control events and frames, in call order',
   );
   for (const record of records) {
-    assert.equal(record['v'], 1);
+    assert.equal(record['v'], 2);
     assert.equal(record['ts'], ISO, 'the injected clock stamps every line');
     assert.equal(record['binding'], 'cb_1');
     assert.equal(record['client'], 'claude-code/2.1.327');
   }
 
-  const protocolRecords = await readRecords(dir, DAY, 'protocol');
-  assert.deepEqual(
-    protocolRecords.map((record) => record['event']),
-    ['proto_in', 'proto_out'],
-    'frames go to the protocol log',
-  );
-  for (const record of protocolRecords) {
-    assert.equal(record['v'], 1);
-    assert.equal(record['ts'], ISO);
-    assert.equal(record['binding'], 'cb_1');
-    assert.equal(record['client'], 'claude-code/2.1.327');
-  }
-
-  const [protoIn, protoOut] = protocolRecords;
+  const [protoIn, protoOut] = records.slice(4);
   assert.ok(protoIn !== undefined && protoOut !== undefined);
   assert.equal(protoIn['id'], 1);
   assert.equal(protoIn['method'], 'tools/call');
@@ -265,23 +252,17 @@ test('flush drains without closing and close is idempotent', async (t) => {
   runtime.recordFrameIn({ mcp: 'mcp_1', id: 2, method: 'ping' });
   await runtime.flush();
   const afterFlush = await readRecords(dir);
-  assert.equal(afterFlush.length, 1);
-  assert.equal(afterFlush[0]?.['event'], 'eval_start');
-  const protocolAfterFlush = await readRecords(dir, DAY, 'protocol');
-  assert.equal(protocolAfterFlush.length, 1);
-  assert.equal(protocolAfterFlush[0]?.['event'], 'proto_in');
+  assert.deepEqual(afterFlush.map((record) => record['event']), ['eval_start', 'proto_in']);
 
   await runtime.close();
-  const contents = await readFile(join(dir, `audit-${DAY}.jsonl`), 'utf8');
-  const protocolContents = await readFile(join(dir, `protocol-${DAY}.jsonl`), 'utf8');
+  const contents = await readFile(join(dir, `events-${DAY}.jsonl`), 'utf8');
 
   runtime.recordEval({ ...evalStart, event: 'eval_end', outcome: 'ok' });
   runtime.recordFrameIn({ mcp: 'mcp_1', id: 3, method: 'ping' });
   runtime.recordTask({ ...evalStart, event: 'task_cancel', evalTaskId: 't_1' });
   await runtime.close();
 
-  assert.equal(await readFile(join(dir, `audit-${DAY}.jsonl`), 'utf8'), contents);
-  assert.equal(await readFile(join(dir, `protocol-${DAY}.jsonl`), 'utf8'), protocolContents);
+  assert.equal(await readFile(join(dir, `events-${DAY}.jsonl`), 'utf8'), contents);
 });
 
 test('invalid events are logged and never written', async (t) => {
@@ -353,13 +334,8 @@ const FIXTURE_FRAMES: AuditEvent[] = [
 
 async function writeAuditFixture(dir: string): Promise<void> {
   await writeFile(
-    join(dir, `audit-${DAY}.jsonl`),
-    `${FIXTURE_EVENTS.map((event) => JSON.stringify(event)).join('\n')}\n`,
-    'utf8',
-  );
-  await writeFile(
-    join(dir, `protocol-${DAY}.jsonl`),
-    `${FIXTURE_FRAMES.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    join(dir, `events-${DAY}.jsonl`),
+    `${[...FIXTURE_EVENTS, ...FIXTURE_FRAMES].map((event) => JSON.stringify(event)).join('\n')}\n`,
     'utf8',
   );
 }
@@ -399,56 +375,6 @@ test('frames endpoint reads frames the runtime actually wrote', async (t) => {
   assert.equal('params' in (pair['request'] as Record<string, unknown>), false);
 });
 
-test('frames endpoint reads legacy frame events from the audit log', async (t) => {
-  const { dir, runtime } = await createFixture(t);
-  // No protocol file: frames written by releases before the protocol writer
-  // landed in audit-*.jsonl and must still show up in the detail view.
-  await writeFile(
-    join(dir, `audit-${DAY}.jsonl`),
-    `${FIXTURE_FRAMES.map((event) => JSON.stringify(event)).join('\n')}\n`,
-    'utf8',
-  );
-
-  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
-  assert.equal(response?.status, 200);
-  const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.['id'], 7);
-  assert.equal(rows[0]?.['method'], 'tools/call');
-});
-
-test('legacy and protocol frame files are merged without duplicates', async (t) => {
-  const { dir, clock, runtime } = await createFixture(t);
-  const legacyFrames = `${FIXTURE_FRAMES.map((event) => JSON.stringify(event)).join('\n')}\n`;
-  // The legacy pair (id 7) is still in the audit log, and the same pair was
-  // also copied into the protocol log so dedupe is exercised.
-  await writeFile(join(dir, `audit-${DAY}.jsonl`), legacyFrames, 'utf8');
-
-  clock.advance(1_000);
-  runtime.recordFrameIn({
-    mcp: 'mcp_1',
-    id: 9,
-    method: 'tools/call',
-    params: { name: 'run_script' },
-    bytes: 32,
-  });
-  runtime.recordFrameOut({ mcp: 'mcp_1', id: 9, result: { content: [] }, bytes: 8 });
-  await runtime.flush();
-  await appendFile(join(dir, `protocol-${DAY}.jsonl`), legacyFrames, 'utf8');
-
-  const response = await call(runtime.handlers(), request('GET', '/admin/api/audit/frames'));
-  assert.equal(response?.status, 200);
-  const rows = bodyOf(response).frames as Array<Record<string, unknown>>;
-  assert.deepEqual(
-    rows.map((row) => row['id']),
-    [7, 9],
-    'both the legacy and the new protocol pair are visible, ordered by time',
-  );
-  assert.equal(rows.filter((row) => row['id'] === 7).length, 1, 'the overlap is deduped');
-  assert.equal(rows[0]?.['durMs'], 12);
-  assert.equal(rows[1]?.['durMs'], 0);
-});
-
 test('frames endpoint applies the request window to protocol_dropped by event ts', async (t) => {
   const { dir } = await createFixture(t);
   const dropped = (ts: string, count: number): AuditEvent => ({
@@ -467,7 +393,7 @@ test('frames endpoint applies the request window to protocol_dropped by event ts
     { v: 1, ts: 'not-a-timestamp', event: 'protocol_dropped', count: 7 },
   ];
   await writeFile(
-    join(dir, `protocol-${DAY}.jsonl`),
+    join(dir, `events-${DAY}.jsonl`),
     `${lines.map((event) => JSON.stringify(event)).join('\n')}\n`,
     'utf8',
   );
@@ -498,7 +424,7 @@ test('frames endpoint stops at frameScanMaxLines and reports truncation', async 
     bytes: 10,
   }));
   await writeFile(
-    join(dir, `protocol-${DAY}.jsonl`),
+    join(dir, `events-${DAY}.jsonl`),
     `${frames.map((event) => JSON.stringify(event)).join('\n')}\n`,
     'utf8',
   );

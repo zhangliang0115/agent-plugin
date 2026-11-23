@@ -24,6 +24,7 @@ export interface AuditEventLike {
   event?: unknown;
   requestId?: unknown;
   runId?: unknown;
+  evalTaskId?: unknown;
 }
 
 /**
@@ -47,8 +48,55 @@ export function requestRunIds(
   return runIds;
 }
 
-/** Pads a request/response timestamp pair so the event query covers both boundaries. */
-export function eventWindow(
+/**
+ * Exact identifiers of the work one request started.
+ *
+ * `runId` covers sync evals and everything they touch. `evalTaskId` is the only
+ * link an async dispatch has: `async_dispatch` itself carries no `runId`, so
+ * without it the background part of the eval (task settle, `task_cancel`) is
+ * unreachable from the request row.
+ */
+export interface RequestDetailKeys {
+  runIds: string[];
+  taskIds: string[];
+}
+
+export function requestDetailKeys(
+  events: readonly AuditEventLike[],
+  requestId: string | number | null,
+): RequestDetailKeys {
+  if (requestId === null) return { runIds: [], taskIds: [] };
+  const wanted = String(requestId);
+  const runIds: string[] = [];
+  const taskIds: string[] = [];
+  for (const event of events) {
+    if (event.requestId === undefined || String(event.requestId) !== wanted) continue;
+    if (event.event === 'eval_start') {
+      const runId = event.runId;
+      if (typeof runId === 'string' && runId !== '' && !runIds.includes(runId)) runIds.push(runId);
+      continue;
+    }
+    if (event.event === 'async_dispatch') {
+      const taskId = event.evalTaskId;
+      if (typeof taskId === 'string' && taskId !== '' && !taskIds.includes(taskId)) taskIds.push(taskId);
+    }
+  }
+  return { runIds, taskIds };
+}
+
+/** True when one live audit frame belongs to the detail panel that is open. */
+export function matchesDetailKeys(value: unknown, keys: RequestDetailKeys): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const frame = value as Record<string, unknown>;
+  const runId = frame['runId'];
+  if (typeof runId === 'string' && keys.runIds.includes(runId)) return true;
+  const taskId = frame['evalTaskId'];
+  if (typeof taskId === 'string' && keys.taskIds.includes(taskId)) return true;
+  const plainTask = frame['taskId'];
+  return typeof plainTask === 'string' && keys.taskIds.includes(plainTask);
+}
+
+/** Pads a request/response timestamp pair so the event query covers both boundaries. */export function eventWindow(
   requestTs: unknown,
   responseTs: unknown,
   openEnded = false,

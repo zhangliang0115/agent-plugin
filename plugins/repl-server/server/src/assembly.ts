@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { AuditWriter, ProcessLedger, newId, type PoolEntry, type ToolCallRequest } from '@zhangliang0115/repl-server-core';
@@ -22,6 +22,13 @@ import { parseCreateServer } from './admin/servers.ts';
 import { createEventHub } from './admin/events.ts';
 import { createAdminSession } from './admin/session.ts';
 import { createAuditRuntime } from './audit/runtime.ts';
+import {
+  LOG_MAX_TOTAL_BYTES,
+  LOG_RETENTION_DAYS,
+  createRetention,
+  type Retention,
+} from './audit/retention.ts';
+import { METRICS_PREFIX, createLayout } from './layout.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
 import { createAiService } from './ai/index.ts';
@@ -29,6 +36,11 @@ import { type HostAllowlist } from './auth/tokens.ts';
 import { splitClientLabel } from './client-info.ts';
 import { createDbReportStore } from './reports/store.ts';
 import { createReportService } from './reports/service.ts';
+import {
+  REPORT_RETENTION_DAYS,
+  REPORT_RETENTION_INTERVAL_MS,
+  REPORT_RETENTION_MAX_ROWS,
+} from './reports/constants.ts';
 import { createDiscoveryService } from './discovery/service.ts';
 import { createAdminDiscoveryHandler } from './discovery/handler.ts';
 import { createFileSecretStore } from './secrets/store.ts';
@@ -45,7 +57,7 @@ import {
 import { openStateDb, migrate } from './db/migrate.ts';
 import { findBindingByToken, getClientBinding } from './db/clients.ts';
 import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
-import { countToolsByServer, upsertTool } from './db/tools.ts';
+import { countToolsByServer, markAbsentToolsStale, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
 import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalsOf, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
@@ -64,7 +76,7 @@ import {
   type McpServerOverview,
 } from './mcp/overview.ts';
 import { JSON_RPC_INVALID_PARAMS, JsonRpcError } from './mcp/errors.ts';
-import type { AuditEvent, RequestIdentity } from './ports.ts';
+import type { AuditEvent, RequestIdentity, ToolCallObservation } from './ports.ts';
 import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
@@ -116,6 +128,8 @@ export interface Assembly {
   adminBootstrapToken: string | null;
   /** Runs one lifecycle sweep now (transport, worker, serve, task retention). */
   sweep(): Promise<IdleSweepResult | null>;
+  /** On-disk retention budget for `log/`; `runOnce()` sweeps immediately. */
+  retention: Retention;
   close(): Promise<void>;
 }
 
@@ -200,7 +214,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const root = options.root ?? process.env['AGENTS_HOME'];
   const clock = systemClock;
 
-  const dataDir = dirname(stateDbPath(root === undefined ? undefined : `${root}/repl-server`));
+  const layout = createLayout(root);
+  const dataDir = layout.run;
   const tokens = await loadLocalTokens(dataDir);
   const db = openStateDb(stateDbPath(dataDir));
   migrate(db);
@@ -214,21 +229,47 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       eventsHub.publish('catalog_changed', event);
     },
   });
+  // One budget for the whole `log/` domain: the writers' own prune only fires
+  // when a daily file rolls over, which a long-lived process can defer for
+  // hours, and it never sees `payload/`.
+  // Late-bound: the handler needs `audit`, which needs `retention.stats`.
+  let onHighWater: ((info: { totalBytes: number; limitBytes: number; ratio: number }) => void) | undefined;
+  const retention = createRetention({
+    logDir: layout.log,
+    log,
+    now: () => clock.now(),
+    onHighWater: (info) => {
+      onHighWater?.(info);
+    },
+  });
   const audit = createAuditRuntime({
-    dir: join(dataDir, 'audit'),
+    dir: layout.log,
     log,
     // Full frames keep redacted request/response payloads for the request view;
-    // each payload is bounded to 1 MiB by the recorder.
+    // bodies above 4 KiB move into `payload/`.
     frameMode: 'full',
+    retention: () => retention.stats(),
     onEvent: (event) => {
       auditHub.publish('audit', event);
     },
   });
+  onHighWater = (info) => {
+    audit.recordTask({
+      ts: new Date(clock.now()).toISOString(),
+      event: 'payload_high_water',
+      bytes: info.totalBytes,
+      limitBytes: info.limitBytes,
+      ratio: Number(info.ratio.toFixed(3)),
+    });
+  };
+
   // Samples are kept beyond the 30-minute in-memory series for later analysis.
   const resourceWriter = new AuditWriter({
-    dir: join(dataDir, 'metrics'),
-    filePrefix: 'resource',
+    dir: layout.log,
+    filePrefix: METRICS_PREFIX,
     redact: false,
+    retentionDays: LOG_RETENTION_DAYS,
+    maxTotalBytes: LOG_MAX_TOTAL_BYTES,
   });
   const resourceMonitor = createResourceMonitor({
     log,
@@ -345,6 +386,22 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           name: tool.name,
           description: tool.description ?? null,
           inputSchema: tool.inputSchema ?? {},
+        });
+      }
+      // A successful `tools/list` is authoritative for this server: rows it no
+      // longer returns are stale (design 03 §5.1). `upsertTool` already cleared
+      // the flag on every tool that did come back.
+      const stale = markAbsentToolsStale(
+        db,
+        serverId,
+        tools.map((tool) => tool.name),
+      );
+      if (stale > 0) {
+        log(`marked ${stale} tool(s) stale on ${serverId}: absent from tools/list`, {
+          level: 'info',
+          scope: 'pool',
+          server: serverId,
+          stale,
         });
       }
       catalog.refreshServer(serverId);
@@ -531,12 +588,14 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         signal?: AbortSignal,
         deadline?: number,
         execSessionId?: string,
+        observation?: ToolCallObservation,
       ) => {
         if (call.server !== undefined) {
           return await poolRuntime.callTool(call, {
             bindingId: binding ?? null,
             ...(signal === undefined ? {} : { signal }),
             ...(deadline === undefined ? {} : { deadline }),
+            ...(observation === undefined ? {} : { observation }),
           });
         }
         const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
@@ -935,6 +994,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   let closing = false;
   let closePromise: Promise<void> | null = null;
   let activeSweep: Promise<IdleSweepResult | null> | null = null;
+  let lastReportPruneAt = 0;
   const sweepNow = (): Promise<IdleSweepResult | null> => {
     if (closing || activeSweep !== null) return Promise.resolve(null);
     const run = (async (): Promise<IdleSweepResult | null> => {
@@ -948,6 +1008,30 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
             level: 'error',
             scope: 'server',
           });
+        }
+        // Reports retention rides the same sweep but runs at most hourly: the
+        // table only grows on `report_problem`, so a 60 s cadence is wasted IO.
+        const now = Date.now();
+        if (now - lastReportPruneAt >= REPORT_RETENTION_INTERVAL_MS) {
+          lastReportPruneAt = now;
+          try {
+            const deleted = reportStore.prune({
+              before: new Date(now - REPORT_RETENTION_DAYS * 86_400_000).toISOString(),
+              maxRows: REPORT_RETENTION_MAX_ROWS,
+            });
+            if (deleted > 0) {
+              log(`pruned ${deleted} closed report(s)`, {
+                level: 'info',
+                scope: 'reports',
+                deleted,
+              });
+            }
+          } catch (error) {
+            log(`report retention failed: ${(error as Error).message}`, {
+              level: 'error',
+              scope: 'reports',
+            });
+          }
         }
         return await gateway.sweepIdle();
       } catch (error) {
@@ -970,6 +1054,11 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     void sweepNow();
   }, options.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
   sweepTimer.unref();
+
+  // One sweep at boot (a crash can leave yesterday's payload tree behind) and
+  // then every six hours; failures are logged by the service itself.
+  retention.start();
+  void retention.runOnce();
 
   // Each eval warns once when it first crosses the threshold; the key is
   // dropped once that eval settles.
@@ -1016,6 +1105,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     }),
     adminBootstrapToken: adminSession.bootstrapToken,
     sweep: sweepNow,
+    retention,
     close() {
       if (closePromise !== null) return closePromise;
       closing = true;
@@ -1023,6 +1113,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       clearInterval(evalWatchdogTimer);
       clearInterval(poolStateTimer);
       resourceMonitor.stop();
+      retention.stop();
       closePromise = (async () => {
         // A sweep that started before `closing` owns the gateway until it ends.
         if (activeSweep !== null) await activeSweep.catch(() => undefined);

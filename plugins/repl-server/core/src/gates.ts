@@ -16,6 +16,14 @@ import { ReplError } from './errors.ts';
 export type ConcurrencyPolicy = 'parallel' | 'serial' | 'exclusive';
 
 /**
+ * Why a call is waiting inside `ServerGates`. Observation only: it is reported
+ * to the caller so the audit row can say where the time went, and never
+ * changes scheduling. The per-binding quota waits one layer up, in
+ * `PoolGates`, and reports `binding-quota` itself.
+ */
+export type ServerGateWaitReason = 'server-write-lock' | 'exclusive-gate';
+
+/**
  * How long an exclusive call may wait for admission before `EXCLUSIVE_TIMEOUT`.
  * Frozen by docs/protocol.md §8. `LIMITS` has no field for it yet; tests inject
  * a smaller value through the constructors.
@@ -297,15 +305,24 @@ export class ServerGates {
    * @param policy concurrency policy declared for the tool
    * @param binding client binding; `null` groups unbound clients together
    * @param fn the actual call
+   * @param onWait called before each await this call does on a gate, so it can
+   *   fire more than once (write lock first, then admission). Callers that only
+   *   want one label keep the first. The checks race the grants, so treat the
+   *   result as "most likely waited because of X" rather than a proof.
    */
   async withTool<T>(
     server: string,
     policy: ConcurrencyPolicy,
     binding: string | null,
     fn: () => Promise<T> | T,
+    onWait?: (reason: ServerGateWaitReason) => void,
   ): Promise<T> {
     if (policy === 'exclusive') {
-      return this.exclusiveGate.run(fn);
+      const gate = this.exclusiveGate;
+      if (gate.admissionClosed || gate.inFlightCount > 0 || gate.queuedExclusiveCount > 0) {
+        onWait?.('exclusive-gate');
+      }
+      return gate.run(fn);
     }
     if (policy !== 'parallel' && policy !== 'serial') {
       throw new ReplError('INVALID_ARGUMENT', `unknown concurrency policy: ${String(policy)}`);
@@ -321,6 +338,15 @@ export class ServerGates {
     }
 
     const lock = this.lockFor(server);
+    if (policy === 'serial') {
+      if (lock.writing || lock.activeReaders > 0 || lock.pendingWriters > 0) onWait?.('server-write-lock');
+    } else if (lock.writing || lock.pendingWriters > 0) {
+      onWait?.('server-write-lock');
+    }
+    if (this.exclusiveGate.admissionClosed || this.exclusiveGate.queuedExclusiveCount > 0) {
+      onWait?.('exclusive-gate');
+    }
+
     const admitted = () => this.exclusiveGate.admit(fn);
     // The binding semaphore is outermost so one binding cannot flood the
     // server's RwLock queue; admission is innermost so only calls that are
@@ -349,5 +375,150 @@ export class ServerGates {
       this.locks.set(server, lock);
     }
     return lock;
+  }
+}
+
+export interface KeyedGateOptions {
+  /** Calls allowed to run at once inside one lane. Default 1. */
+  width?: number;
+  /** Waiters allowed per lane before `MCP_QUEUE_FULL`. Default unbounded. */
+  maxQueue?: number;
+}
+
+interface GateWaiter {
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+  readonly signal: AbortSignal | undefined;
+  readonly onAbort: (() => void) | undefined;
+}
+
+interface GateLane {
+  running: number;
+  readonly waiters: GateWaiter[];
+}
+
+export interface KeyedGateStats {
+  lanes: number;
+  running: number;
+  queued: number;
+}
+
+/**
+ * FIFO gate with one lane per key, built for the official tool surface.
+ *
+ * `claude mcp serve` exports no `isConcurrencySafe`, and the agent loop that
+ * used to apply it (`canExecuteTool`) does not cross the process boundary, so
+ * `run_script` could fire two `Edit` calls at the same file with nothing
+ * serialising them. The gateway keys this gate by `${server}:${binding}` for
+ * serial tools and by a single `'exclusive'` lane for exclusive ones.
+ *
+ * A queued caller can be cancelled: aborting `signal` removes the waiter and
+ * rejects with the signal's reason, so an eval that already timed out never
+ * starts a call it would have to kill afterwards.
+ */
+export class KeyedGate {
+  readonly width: number;
+  readonly maxQueue: number;
+
+  private readonly lanes = new Map<string, GateLane>();
+
+  constructor(options: KeyedGateOptions = {}) {
+    this.width = options.width ?? 1;
+    this.maxQueue = options.maxQueue ?? Number.POSITIVE_INFINITY;
+    if (!Number.isInteger(this.width) || this.width < 1) {
+      throw new RangeError('width must be a positive integer');
+    }
+    if (!(this.maxQueue >= 0)) {
+      throw new RangeError('maxQueue must be zero or a positive number');
+    }
+  }
+
+  /**
+   * Runs `fn` in the lane `key` once a slot is free.
+   *
+   * `onQueue` fires only when the lane was full and this call actually queued:
+   * an uncontended call still has a millisecond or two between "the script
+   * asked" and "the gate let it in", and that is scheduling overhead, not a
+   * wait worth explaining.
+   */
+  async run<T>(
+    key: string,
+    fn: () => Promise<T> | T,
+    signal?: AbortSignal,
+    onQueue?: () => void,
+  ): Promise<T> {
+    if (signal?.aborted === true) throw signal.reason;
+    const lane = this.laneFor(key);
+    if (lane.running >= this.width) {
+      if (lane.waiters.length >= this.maxQueue) {
+        throw new ReplError('MCP_QUEUE_FULL', `gate ${key} already queues ${lane.waiters.length} calls`);
+      }
+      onQueue?.();
+      await this.wait(lane, signal);
+    } else {
+      lane.running += 1;
+    }
+    try {
+      return await fn();
+    } finally {
+      this.release(lane);
+    }
+  }
+
+  stats(): KeyedGateStats {
+    let running = 0;
+    let queued = 0;
+    for (const lane of this.lanes.values()) {
+      running += lane.running;
+      queued += lane.waiters.length;
+    }
+    return { lanes: this.lanes.size, running, queued };
+  }
+
+  /** Number of calls queued behind `key`. */
+  queueDepth(key: string): number {
+    return this.lanes.get(key)?.waiters.length ?? 0;
+  }
+
+  private wait(lane: GateLane, signal: AbortSignal | undefined): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        const index = lane.waiters.indexOf(waiter);
+        if (index !== -1) lane.waiters.splice(index, 1);
+        reject((signal as AbortSignal).reason);
+      };
+      const waiter: GateWaiter = {
+        resolve: () => {
+          if (signal !== undefined && onAbort !== undefined) {
+            signal.removeEventListener('abort', onAbort);
+          }
+          resolve();
+        },
+        reject,
+        signal,
+        onAbort: signal === undefined ? undefined : onAbort,
+      };
+      lane.waiters.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private release(lane: GateLane): void {
+    const next = lane.waiters.shift();
+    if (next === undefined) {
+      lane.running = Math.max(0, lane.running - 1);
+      return;
+    }
+    // The slot passes straight to the next waiter; `running` does not change.
+    next.resolve();
+  }
+
+  private laneFor(key: string): GateLane {
+    let lane = this.lanes.get(key);
+    if (lane === undefined) {
+      lane = { running: 0, waiters: [] };
+      this.lanes.set(key, lane);
+    }
+    return lane;
   }
 }

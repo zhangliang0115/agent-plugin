@@ -349,6 +349,35 @@ export function demoteDiscoveredTools(db: DatabaseSync, serverId: string): numbe
   return Number(result.changes);
 }
 
+/**
+ * Marks every row of one server stale whose name the latest upstream
+ * `tools/list` did not return (design 03 §5.1: "每次 `tools/list` 刷新时，上游
+ * 缺席的工具置 `stale=1`，重新出现置 0"). `upsertTool` resets `stale` on the
+ * rows that were returned, so this only needs the absent ones.
+ *
+ * Runs in its own transaction and bumps `meta.revision` once when it changed a
+ * row, matching `upsertTool`. `stale_override` is deliberately untouched: it
+ * preserves search visibility, not callability. An empty `seenNames` marks the
+ * whole server stale — that is the literal meaning of an empty `tools/list`,
+ * and the next non-empty list restores the rows.
+ */
+export function markAbsentToolsStale(
+  db: DatabaseSync,
+  serverId: string,
+  seenNames: readonly string[],
+): number {
+  return withTransaction(db, () => {
+    const placeholders = seenNames.map(() => '?').join(', ');
+    const sql = `UPDATE tools SET stale = 1 WHERE server_id = ? AND stale = 0${
+      seenNames.length === 0 ? '' : ` AND name NOT IN (${placeholders})`
+    }`;
+    const result = db.prepare(sql).run(serverId, ...seenNames);
+    const changed = Number(result.changes);
+    if (changed > 0) bumpRevision(db);
+    return changed;
+  });
+}
+
 /** Applies admin-editable fields to an in-memory row; pure, no database access. */
 export function applyToolPatch(current: ToolRecord, patch: ToolPatch): ToolRecord {
   const next: ToolRecord = { ...current };

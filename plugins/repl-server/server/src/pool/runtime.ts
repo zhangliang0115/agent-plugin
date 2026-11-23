@@ -28,7 +28,7 @@ import type { ToolCallRequest } from '@zhangliang0115/repl-server-core/src/types
 
 import type { ServerPoolControl, ServerRuntimeState } from '../admin/servers.ts';
 import type { ToolDiscoveryConfig } from '../discovery/types.ts';
-import type { AuditSink, Clock, ProcessLedger } from '../ports.ts';
+import type { AuditSink, Clock, ProcessLedger, ToolCallObservation } from '../ports.ts';
 import { systemClock } from '../ports.ts';
 import { resolveServerSecrets } from '../secrets/resolve.ts';
 import type { SecretField, SecretFieldValue } from '../secrets/resolve.ts';
@@ -205,6 +205,8 @@ export interface PoolToolCallOptions {
    * runtime aborts the call, including one still queueing for a gate.
    */
   deadline?: number;
+  /** Receives the first gate this call blocked on, for the audit row. */
+  observation?: ToolCallObservation;
 }
 
 export interface PoolRuntime {
@@ -571,7 +573,7 @@ class PoolRuntimeImpl implements PoolRuntime {
           // into the XML text instead of the gateway's media collector.
           if (result === undefined || result === null) return result;
           return normalizeMcpResult(result as ServeToolResult);
-        }),
+        }, (reason) => options.observation?.noteWait(reason)),
       ),
       signal,
       route.server,

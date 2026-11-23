@@ -15,7 +15,7 @@
 
 默认只绑 `127.0.0.1`，校验 `Host` 为 `127.0.0.1` / `localhost`（比较时先剥端口）。远程访问用 `--host` 改绑定地址，用 `--allowed-hosts` 显式放行域名（逗号分隔，支持 `*` 和 `*.ts.net` 后缀）；非 loopback 绑定必须同时给 `--strict-auth`，否则拒绝启动。
 
-`/admin/api/reports`、`/admin/api/alerts/*`、`/admin/api/servers/:id/tools/discover`、`/admin/api/ai/*` 是管理面 HTTP 端点，**不属于本文的 MCP 契约**；其请求/响应形状以 `claude-code/自建设计/` 06–08 为准。
+`/admin/api/*` 是管理面 HTTP 端点，**不属于本文的 MCP 契约**；其端点总表、请求/响应形状与错误码见 [`admin-api.md`](admin-api.md)（同为 L1 契约，`docs:check` 校验其端点与代码路由一致）。
 
 ### 1.1 启动与数据根
 
@@ -39,7 +39,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 ### 1.2 SDK 边界
 
-`@modelcontextprotocol/sdk@1.32.2` 的 `LATEST_PROTOCOL_VERSION` 是 `2025-11-25`，没有 `server/discover`，本机 registry 也不可用。**server 侧不依赖 SDK**：Streamable HTTP、`Mcp-Session-Id`、JSON-RPC 分发与 tasks 全部手写。SDK 只允许出现在连接第三方 server 的客户端适配层；如果依赖不可安装，连这层也手写（`HttpMcpClient` / `StdioMcpClient` 两个最小实现）。
+`@modelcontextprotocol/sdk@1.32.2` 的 `LATEST_PROTOCOL_VERSION` 是 `2025-11-25`，没有 `server/discover`，本机 registry 也不可用。**最终不引入 SDK**：Streamable HTTP、`Mcp-Session-Id`、JSON-RPC 分发、tasks 与连接第三方 server 的客户端适配层（`HttpMcpClient` / `StdioMcpClient`）全部手写。`server` 与 `core` 没有任何运行时依赖（`server/package.json` 只有 `esbuild` 一个 devDependency）。
 
 ## 2. 身份
 
@@ -107,7 +107,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 - `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
-- `annotations`：`run_script` 与 `report_problem` 不设；其余三个设 `readOnlyHint: true`、`idempotentHint: true`
+- `annotations`：`run_script` 与 `report_problem` 不设；`search_tools`、`describe_tools` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks` 只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
 - 结果顶层带 `ttlMs: 0`、`cacheScope: "private"`：2026-07-28 的列表结果必须带缓存提示；工具可见性按 binding 与目录变化，不做客户端缓存
 
 **方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。不支持 resources/prompts/logging/subscriptions；未知方法 `-32601`；批量请求不支持。
@@ -179,7 +179,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-- `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值也没有上限。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。
+- `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值。显式值超过 L2 上限时**钳到上限**而不是报错：同步 600000，`async: true` 7200000。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。0、负数或非有限值返回 `INVALID_ARGUMENT`。
 - `workspace` 取 realpath 后参与执行会话 key：已绑定客户端按 `(binding, workspace)` 识别，跨传输会话复用；未绑定客户端按 `(Mcp-Session-Id, workspace)` 识别。换 workspace 新建执行会话，变量与 `state` 不继承。
 - `visibleTools` 内置工具用裸名，MCP 工具用 `<server>.<tool>`；只收窄，不放大。
 
@@ -252,7 +252,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-- `taskIds` 必填，1 个或多个：只等这些任务，没有按 owner 全量收取的兜底。owner 是 `bindingId ?? mcpSessionId`，共享同一 binding 的多个项目因此不会互相消费任务。
+- `taskIds` 必填，1 个或多个：只等这些任务，没有按 owner 全量收取的兜底，所以正常调用不会误取别人的任务。owner 是 `bindingId ?? mcpSessionId`：已绑定客户端跨传输会话、跨 workspace 可见（同一 binding 下的多个项目共用一个 owner，知道 `taskId` 即可收取，属有意决策，与 `tasks/get` 同作用域）；未绑定客户端随传输 id 隔离。
 - 结果消费一次；重复取返回 `ALREADY_CONSUMED`。
 - 未知 id：`{ "ok": false, "error": { "code": "UNKNOWN_TASK", "unknownIds": [] } }`，同时 `isError: true`。
 - `status`：`completed` / `failed` / `cancelled`。
@@ -315,7 +315,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 - `async` / `task`：`async: true` 的派发回执
 - `reset="1"`：worker 重建后的第一条结果
 - `restored`：`state` 恢复成功
-- `truncated="1"`：保留属性；文本结果与日志不再截断，媒体超限通过额外 content 块的数量体现
+- `truncated="1"`：服务端在返回前按 L5 上限截断字段/日志/媒体后置位。截断必须在 server 内先做——客户端再截断会让模型看到断裂的 JSON 片段（01 §8.1）；媒体超限的数量另由 `imagesOmitted` / `documentsOmitted` 体现
 - 文本中的 `&`、`<`、`>` 转义
 - 失败时出现 `<error>`；`<log>` 含 stdout 与 stderr
 

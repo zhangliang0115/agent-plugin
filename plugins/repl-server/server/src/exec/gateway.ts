@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   DEFAULT_TASK_CAPACITY,
   ExecSession,
+  KeyedGate,
   LIMITS,
   TaskStore,
   clampBashArgs,
@@ -17,9 +18,9 @@ import {
   resolveEvalTimeout,
   runEval,
   Sandbox,
-  summarizeArgs,
   type EvalExecutor,
   type EvalSettlement,
+  type ConcurrencyPolicy,
   type OutputDocument,
   type OutputImage,
   type OutputLimits,
@@ -38,15 +39,21 @@ import type {
   ScriptOutcome,
   ScriptRequest,
   TaskSnapshot,
+  ToolCallObservation,
+  ToolWaitReason,
 } from '../ports.ts';
 import { resolveWorkspace, type WorkspaceFileSystem } from '../sessions/workspace.ts';
 import { canonicalToolName as catalogToolName } from '../tools/registry.ts';
 import { type CapacityLimits } from './capacity.ts';
+import { bashConcurrency } from './bash-classify.ts';
 import {
   ExecSessionRegistry,
   type ExecSession as ExecSessionRecord,
   type SessionRemovalReason,
 } from './exec-sessions.ts';
+
+/** Official tools that can write the workspace, keyed by their target path. */
+const FILE_WRITERS: ReadonlySet<string> = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 /** L1 per-call defaults (design 02 §1.1): file-class and other official tools, Bash, MCP. */
 export interface ToolCallTimeouts {
@@ -64,6 +71,8 @@ export const DEFAULT_TOOL_CALL_TIMEOUTS: Readonly<ToolCallTimeouts> = Object.fre
 /**
  * One tool call's exit into the transport. `signal` is the call-level abort
  * (eval cancellation, L1 deadline); `deadline` is the absolute epoch-ms budget.
+ * `observation` lets a transport report where the call waited, since the pool's
+ * gates sit below this layer.
  */
 export type CallToolTransport = (
   call: ToolCallRequest,
@@ -72,6 +81,7 @@ export type CallToolTransport = (
   signal?: AbortSignal,
   deadline?: number,
   execSessionId?: string,
+  observation?: ToolCallObservation,
 ) => Promise<unknown>;
 
 /** The gone execution session handed to {@link ExecGatewayOptions.onSessionClosed}. */
@@ -299,6 +309,15 @@ export function stuckEvalsOf(
 /** Default wall for evals that omit `timeout`; 0 means no wall. */
 const DEFAULT_MAX_EVAL_MS = 0;
 
+/**
+ * L2 ceilings (design 02 §1.1). An explicit `timeout` above the ceiling is
+ * clamped, not rejected: the wall is a safety bound, so a client asking for a
+ * 27-hour sync eval still gets a usable answer instead of an argument error.
+ * Sync and async differ because only an async eval survives a transport close.
+ */
+export const MAX_SYNC_EVAL_MS = 600_000;
+export const MAX_ASYNC_EVAL_MS = 7_200_000;
+
 /** Resolves the optional wall from an explicit option or `REPL_DEFAULT_MAX_EVAL_MS`. */
 export function resolveDefaultMaxEvalMs(explicit?: number): number {
   const raw = explicit ?? process.env['REPL_DEFAULT_MAX_EVAL_MS'];
@@ -308,6 +327,15 @@ export function resolveDefaultMaxEvalMs(explicit?: number): number {
     throw new RangeError('defaultMaxEvalMs must be an integer >= 0');
   }
   return value;
+}
+
+/** Applies the L2 ceiling; `undefined` stays "no wall". */
+export function clampEvalTimeout(
+  timeoutMs: number | undefined,
+  async: boolean,
+): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  return Math.min(timeoutMs, async ? MAX_ASYNC_EVAL_MS : MAX_SYNC_EVAL_MS);
 }
 
 /** Applies the default wall only when the request omitted `timeout`. */
@@ -529,6 +557,11 @@ export class ExecGateway implements ExecutionGateway {
   private readonly now: () => number;
   private readonly clock: Clock;
   private readonly toolTimeouts: ToolCallTimeouts;
+  /**
+   * Official-tool gate. One slot per lane, lanes keyed by resource, so a
+   * same-file `Edit` queue is real and two independent reads still overlap.
+   */
+  private readonly toolGate = new KeyedGate();
   private readonly defaultMaxEvalMs: number;
   private readonly outputLimits: Partial<OutputLimits>;
   private readonly workspaceFs: WorkspaceFileSystem | undefined;
@@ -714,7 +747,8 @@ export class ExecGateway implements ExecutionGateway {
 
   /** Timeout that `runEval` will apply; used to derive the L1 deadline up front. */
   private evalTimeoutFor(request: ScriptRequest): number | undefined {
-    return resolveDefaultEvalTimeout(resolveEvalTimeout(request.timeoutMs), this.defaultMaxEvalMs);
+    const resolved = resolveDefaultEvalTimeout(resolveEvalTimeout(request.timeoutMs), this.defaultMaxEvalMs);
+    return clampEvalTimeout(resolved, request.async);
   }
 
   /**
@@ -821,102 +855,178 @@ export class ExecGateway implements ExecutionGateway {
       }
     }
 
-    const started = this.now();
+    const queuedAt = this.now();
     const binding = runtime.bindings.get(call.evalId) ?? null;
+    const gate = this.gateOf(call);
+    // Where this call waited. The keyed gate is observed here by elapsed time;
+    // the pool's gates report themselves through `observation`.
+    let waitReason: ToolWaitReason | undefined;
+    const observation: ToolCallObservation = {
+      noteWait: (reason) => {
+        waitReason ??= reason;
+      },
+    };
     // No eval deadline means only the per-call L1 limit applies.
     const evalDeadline = runtime.deadlines.get(call.evalId) ?? Number.POSITIVE_INFINITY;
-    let args = call.args;
-    let callDeadline: number;
 
-    if (call.server === undefined && call.tool === 'Bash') {
-      const requested = args.timeout === undefined ? { ...args, timeout: this.toolTimeouts.bashMs } : args;
-      const clamped = clampBashArgs(requested, evalDeadline, started);
-      args = clamped;
-      callDeadline = Math.min(evalDeadline, started + clamped.timeout);
-    } else {
-      const limit = call.server === undefined ? this.toolTimeouts.officialMs : this.toolTimeouts.mcpMs;
-      callDeadline = Math.min(evalDeadline, started + limit);
-    }
-
-    const controller = new AbortController();
-    const forwardAbort = (): void => controller.abort(signal.reason);
-    if (signal.aborted) forwardAbort();
-    else signal.addEventListener('abort', forwardAbort, { once: true });
-    const budget = Math.max(0, callDeadline - started);
-    const timer = setTimeout(() => {
-      controller.abort(new ReplError('TOOL_TIMEOUT', `${name} timed out after ${budget}ms`));
-    }, budget);
-    timer.unref?.();
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', forwardAbort);
-    };
-
-    const mode = this.toolModeOf(call);
-    const argsBytes = jsonBytes(args);
     this.emitAudit({
       event: 'tool_call',
       evalId: call.evalId,
       seq: call.callSeq,
       tool: name,
       server: toolServer(call),
-      ...(mode === undefined ? {} : { mode }),
-      queuedAt: started,
-      args: summarizeArgs(name, args),
-      ...(argsBytes === undefined ? {} : { argsBytes }),
+      mode: this.modeOf(call, gate),
+      // Honest three-segment timing (`02 §2.4`): arrival here, execution start
+      // inside the gate, end in `finish`.
+      queuedAt,
+      // Raw arguments as the script passed them; the Bash timeout default is a
+      // server-side detail and is added inside the execution body.
+      args: call.args,
       workspace: runtime.record.workspace,
       ...runFields(runtime, call.evalId),
     });
-    const finish = (ok: boolean, error?: unknown, value?: unknown): void => {
-      const endedAt = this.now();
-      const ms = endedAt - started;
-      const outBytes = jsonBytes(value);
-      const errorCode = errorCodeOf(error);
-      this.emitAudit({
-        event: 'tool_result',
-        evalId: call.evalId,
-        seq: call.callSeq,
-        tool: name,
-        server: toolServer(call),
-        ok,
-        queueMs: 0,
-        ms,
-        startedAt: started,
-        endedAt,
-        durMs: ms,
-        ...(outBytes === undefined ? {} : { outBytes }),
-        ...(errorCode === undefined ? {} : { errorCode }),
-        ...runFields(runtime, call.evalId),
-        ...(error === undefined ? {} : { error: { message: (error as Error).message ?? String(error) } }),
-      });
+
+    const execute = (): unknown => {
+      const started = this.now();
+      let args = call.args;
+      let callDeadline: number;
+
+      if (call.server === undefined && call.tool === 'Bash') {
+        const requested = args.timeout === undefined ? { ...args, timeout: this.toolTimeouts.bashMs } : args;
+        const clamped = clampBashArgs(requested, evalDeadline, started);
+        args = clamped;
+        callDeadline = Math.min(evalDeadline, started + clamped.timeout);
+      } else {
+        const limit = call.server === undefined ? this.toolTimeouts.officialMs : this.toolTimeouts.mcpMs;
+        callDeadline = Math.min(evalDeadline, started + limit);
+      }
+
+      const controller = new AbortController();
+      const forwardAbort = (): void => controller.abort(signal.reason);
+      if (signal.aborted) forwardAbort();
+      else signal.addEventListener('abort', forwardAbort, { once: true });
+      const budget = Math.max(0, callDeadline - started);
+      const timer = setTimeout(() => {
+        controller.abort(new ReplError('TOOL_TIMEOUT', `${name} timed out after ${budget}ms`));
+      }, budget);
+      timer.unref?.();
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', forwardAbort);
+      };
+
+      const finish = (ok: boolean, error?: unknown, value?: unknown): void => {
+        const endedAt = this.now();
+        const ms = endedAt - started;
+        const outBytes = jsonBytes(value);
+        const errorCode = errorCodeOf(error);
+        const queueMs = started - queuedAt;
+        // Only the gate can say whether it queued: `queueMs` includes a couple
+        // of milliseconds of scheduling even for an uncontended call.
+        const reason = waitReason;
+        this.emitAudit({
+          event: 'tool_result',
+          evalId: call.evalId,
+          seq: call.callSeq,
+          tool: name,
+          server: toolServer(call),
+          ok,
+          // How long the call waited for the gate; `ms` stays total elapsed so
+          // the waterfall can draw queue + exec as one span (`02 §2.4`).
+          queueMs,
+          ms: endedAt - queuedAt,
+          startedAt: started,
+          endedAt,
+          durMs: ms,
+          ...(reason === undefined ? {} : { waitReason: reason }),
+          ...(outBytes === undefined ? {} : { outBytes }),
+          ...(errorCode === undefined ? {} : { errorCode }),
+          ...runFields(runtime, call.evalId),
+          // The result body is captured for the first time here; the audit
+          // runtime externalises it when it exceeds the inline budget.
+          ...(ok && value !== undefined ? { result: value } : {}),
+          ...(error === undefined
+            ? {}
+            : { error: { message: (error as Error).message ?? String(error), ...(errorCode === undefined ? {} : { code: errorCode }) } }),
+        });
+      };
+
+      try {
+        const transportCall: ToolCallRequest = { ...call, args };
+        const outcome = this.callTool(
+          transportCall,
+          runtime.record.workspace,
+          binding,
+          controller.signal,
+          callDeadline,
+          runtime.record.id,
+          observation,
+        );
+        return raceAbort(Promise.resolve(outcome), controller.signal)
+          .then((value) => {
+            this.collectMedia(runtime, call.evalId, value);
+            finish(true, undefined, value);
+            return value;
+          })
+          .catch((error: unknown) => {
+            finish(false, error);
+            throw error;
+          })
+          .finally(cleanup);
+      } catch (error) {
+        cleanup();
+        finish(false, error);
+        throw error;
+      }
     };
 
-    try {
-      const transportCall: ToolCallRequest = { ...call, args };
-      const outcome = this.callTool(
-        transportCall,
-        runtime.record.workspace,
-        binding,
-        controller.signal,
-        callDeadline,
-        runtime.record.id,
-      );
-      return raceAbort(Promise.resolve(outcome), controller.signal)
-        .then((value) => {
-          this.collectMedia(runtime, call.evalId, value);
-          finish(true, undefined, value);
-          return value;
-        })
-        .catch((error: unknown) => {
-          finish(false, error);
-          throw error;
-        })
-        .finally(cleanup);
-    } catch (error) {
-      cleanup();
-      finish(false, error);
-      throw error;
+    if (gate.policy === 'parallel') return execute();
+    // A queued call is cancellable: the eval's abort signal removes it from the
+    // lane instead of letting a dead eval start one more tool call.
+    return this.toolGate.run(gate.key, execute, signal, () => {
+      waitReason ??= 'keyed-gate';
+    });
+  }
+
+  /**
+   * Mode written to the audit row.
+   *
+   * Third-party tools keep their declared value: `PoolGates` enforces it on the
+   * pool side, and the gateway adds nothing. Official tools have no meaningful
+   * declaration — `claude mcp serve` exports no `isConcurrencySafe` — so the row
+   * reports what this gateway actually did with the call.
+   */
+  private modeOf(call: ToolCallRequest, gate: { policy: ConcurrencyPolicy }): ConcurrencyPolicy {
+    if (call.server !== undefined) return this.toolModeOf(call) ?? gate.policy;
+    return gate.policy;
+  }
+
+  /**
+   * Picks the gate for one call.
+   *
+   * Official tools have no exported `isConcurrencySafe`, so the lane key is the
+   * *resource* rather than the tool: two `Edit` calls to the same file
+   * serialise, two to different files do not, and a write-mode `Bash` takes a
+   * single lane. Third-party tools are already gated by `PoolGates`, so the
+   * gateway adds nothing for them.
+   */
+  private gateOf(call: ToolCallRequest): { policy: ConcurrencyPolicy; key: string } {
+    const declared = this.toolModeOf(call);
+    if (declared === 'exclusive') return { policy: 'exclusive', key: 'exclusive' };
+    if (call.server !== undefined) return { policy: 'parallel', key: '' };
+
+    const name = canonicalToolName(call);
+    if (name === 'Bash') {
+      return bashConcurrency(call.args) === 'parallel'
+        ? { policy: 'parallel', key: '' }
+        : { policy: 'serial', key: 'official:Bash' };
     }
+    if (FILE_WRITERS.has(name)) {
+      const target = call.args['file_path'] ?? call.args['notebook_path'] ?? call.args['path'];
+      const key = typeof target === 'string' && target !== '' ? `official:file:${target}` : `official:${name}`;
+      return { policy: 'serial', key };
+    }
+    return { policy: 'parallel', key: '' };
   }
 
   private emitAudit(event: Record<string, unknown> & { event: string }): void {
@@ -1053,6 +1163,18 @@ export class ExecGateway implements ExecutionGateway {
         }),
       );
       this.tasks.setEvalId(created, receipt.evalId);
+      // design 02 §5.3: the dispatch is its own audit event, because `eval_start`
+      // is emitted by `onStart` and does not carry the task id or its TTL.
+      this.emitAudit({
+        event: 'async_dispatch',
+        exec: record.id,
+        evalTaskId: created,
+        evalId: receipt.evalId,
+        ttlMs: this.tasks.ttl,
+        workspace: record.workspace,
+        ...this.identityFields(request),
+        ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+      });
       return { taskId: created, evalId: receipt.evalId };
     } catch (error) {
       if (taskId !== undefined) {
@@ -1153,16 +1275,46 @@ export class ExecGateway implements ExecutionGateway {
     try {
       snapshot = this.tasks.get(owner, taskId);
     } catch {
+      this.emitTaskCancel(taskId, undefined, false, 'client');
       return false;
     }
-    if (snapshot.status !== 'working') return false;
-    if (!this.tasks.cancel(taskId)) return false;
+    if (snapshot.status !== 'working') {
+      this.emitTaskCancel(taskId, snapshot.evalId, false, 'client');
+      return false;
+    }
+    if (!this.tasks.cancel(taskId)) {
+      this.emitTaskCancel(taskId, snapshot.evalId, false, 'client');
+      return false;
+    }
+    this.emitTaskCancel(taskId, snapshot.evalId, true, 'client');
     const link = this.taskLinks.get(taskId);
     if (link !== undefined) {
       const runtime = this.runtimes.get(link.sessionId);
       if (runtime !== undefined) this.abortEval(runtime, snapshot.evalId);
     }
     return true;
+  }
+
+  /**
+   * `task_cancel` (design 02 §5.3). Emitted for every cancel request, not only
+   * the honoured ones: "the client asked and we refused" is the interesting
+   * case when a task keeps running against expectations.
+   */
+  private emitTaskCancel(
+    taskId: string,
+    evalId: number | undefined,
+    honoured: boolean,
+    by: 'client' | 'binding' | 'transport',
+  ): void {
+    const link = this.taskLinks.get(taskId);
+    this.emitAudit({
+      event: 'task_cancel',
+      evalTaskId: taskId,
+      by,
+      honoured,
+      ...(evalId === undefined ? {} : { evalId }),
+      ...(link === undefined ? {} : { exec: link.sessionId, owner: link.owner }),
+    });
   }
 
   /** Cooperative cancel: stops new calls and aborts the ones already in flight. */
@@ -1278,7 +1430,7 @@ export class ExecGateway implements ExecutionGateway {
   async destroyOwner(owner: string): Promise<void> {
     if (typeof owner !== 'string' || owner === '') return;
     const targets = this.execSessions.list().filter((record) => record.binding === owner);
-    await this.destroySessions(targets, owner);
+    await this.destroySessions(targets, owner, 'binding');
   }
 
   /**
@@ -1291,20 +1443,28 @@ export class ExecGateway implements ExecutionGateway {
     const targets = this.execSessions
       .list()
       .filter((record) => record.binding === null && record.mcpSessionId === transportId);
-    await this.destroySessions(targets, transportId);
+    await this.destroySessions(targets, transportId, 'transport');
   }
 
   /** Cancels the affected tasks, removes the records and awaits their teardown. */
   private async destroySessions(
     targets: ExecSessionRecord<SessionRuntime, unknown>[],
     taskOwner: string,
+    by: 'binding' | 'transport',
   ): Promise<void> {
     const targetIds = new Set(targets.map((record) => record.id));
 
     // Cancel linked tasks first, so a settling eval cannot flip them to completed.
     for (const [taskId, link] of [...this.taskLinks]) {
       if (!targetIds.has(link.sessionId) && link.owner !== taskOwner) continue;
+      let honoured = false;
+      try {
+        honoured = this.tasks.get(link.owner, taskId).status === 'working';
+      } catch {
+        honoured = false;
+      }
       this.tasks.cancel(taskId);
+      this.emitTaskCancel(taskId, undefined, honoured, by);
       this.tasks.remove(taskId);
       this.taskLinks.delete(taskId);
       this.taskMedia.delete(taskId);

@@ -232,6 +232,13 @@ export interface StartupSweepOptions {
   /** Rewrite `state.json` for the new boot after the sweep. Defaults to true. */
   resetState?: boolean;
   lockRetries?: number;
+  /**
+   * Instance lock file. Defaults to `<root>/state.db.lock`; the server passes the
+   * layout path so acquire and release can never disagree.
+   */
+  lockPath?: string;
+  /** Directory for `orphans-<bootId>.json`. Defaults to `<root>/ledger`. */
+  reportDir?: string;
 }
 
 export type SweepStatus = 'swept' | 'locked' | 'same-boot';
@@ -312,8 +319,8 @@ function fileSafe(id: string): string {
   return safe === '' ? 'boot' : safe;
 }
 
-export function orphansReportPath(root: string, bootId: string): string {
-  return join(root, 'ledger', `orphans-${fileSafe(bootId)}.json`);
+export function orphansReportPath(root: string, bootId: string, reportDir?: string): string {
+  return join(reportDir ?? join(root, 'ledger'), `orphans-${fileSafe(bootId)}.json`);
 }
 
 /** AI run directories older than this are removed even without a ledger record. */
@@ -370,9 +377,14 @@ function cleanOldAiRunDirs(root: string, now: number, report: SweepReport, clean
   }
 }
 
-/** Writes `ledger/orphans-<bootId>.json` and returns its absolute path. */
-export function writeOrphansReport(root: string, bootId: string, report: SweepReport): string {
-  const path = orphansReportPath(root, bootId);
+/** Writes `orphans-<bootId>.json` and returns its absolute path. */
+export function writeOrphansReport(
+  root: string,
+  bootId: string,
+  report: SweepReport,
+  reportDir?: string,
+): string {
+  const path = orphansReportPath(root, bootId, reportDir);
   writeJsonAtomic(path, {
     bootId: report.bootId,
     previousBootId: report.previousBootId,
@@ -413,7 +425,7 @@ export function startupSweep(options: StartupSweepOptions): SweepReport {
   };
 
   const lock = acquireInstanceLock({
-    lockPath: join(options.root, 'state.db.lock'),
+    lockPath: options.lockPath ?? join(options.root, 'state.db.lock'),
     pid: options.pid ?? process.pid,
     bootId: options.bootId,
     startedAt,
@@ -613,7 +625,7 @@ export function startupSweep(options: StartupSweepOptions): SweepReport {
   for (const runDir of aiRunDirs) cleanAiRunDir(options.root, runDir, report, cleanedAiRuns);
   cleanOldAiRunDirs(options.root, now().getTime(), report, cleanedAiRuns);
 
-  report.reportPath = writeOrphansReport(options.root, options.bootId, report);
+  report.reportPath = writeOrphansReport(options.root, options.bootId, report, options.reportDir);
   if (options.resetState ?? true) {
     ledger.writeState({
       bootId: options.bootId,

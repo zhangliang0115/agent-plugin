@@ -55,12 +55,14 @@ test('every tool is alwaysLoad and only run_script and report_problem lack annot
   const byName = new Map(listTools().map((tool) => [tool.name, tool]));
   assert.equal(byName.get('run_script')?.annotations, undefined);
   assert.equal(byName.get('report_problem')?.annotations, undefined);
-  for (const name of ['search_tools', 'describe_tools', 'wait_tasks'] as const) {
+  for (const name of ['search_tools', 'describe_tools'] as const) {
     assert.deepEqual(byName.get(name)?.annotations, {
       readOnlyHint: true,
       idempotentHint: true,
     });
   }
+  // `wait_tasks` consumes results, so a retry answers ALREADY_CONSUMED (01 §4.2).
+  assert.deepEqual(byName.get('wait_tasks')?.annotations, { readOnlyHint: true });
 });
 
 test('run_script description stays within the 2KB ceiling and mentions the async path', () => {

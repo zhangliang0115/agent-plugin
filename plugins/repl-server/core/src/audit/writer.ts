@@ -12,11 +12,11 @@ import { join } from 'node:path';
 
 import { redactDeep } from './redact.ts';
 
-export const AUDIT_SCHEMA_VERSION = 1;
-/** File name pattern for the default `audit` prefix; kept for compatibility. */
-export const AUDIT_FILE_PATTERN = /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/;
+export const AUDIT_SCHEMA_VERSION = 2;
+/** File name pattern for the default `events` prefix. */
+export const AUDIT_FILE_PATTERN = /^events-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const FILE_PREFIX_PATTERN = /^[a-z][a-z0-9-]*$/;
-const DEFAULT_FILE_PREFIX = 'audit';
+const DEFAULT_FILE_PREFIX = 'events';
 export const DEFAULT_MAX_QUEUE_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_RETENTION_DAYS = 14;
 export const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -37,8 +37,7 @@ export interface AuditWriterOptions {
   /** Directory that holds `<prefix>-YYYY-MM-DD.jsonl`. Created when missing. */
   dir: string;
   /**
-   * Daily file prefix, `[a-z][a-z0-9-]*`. Defaults to `audit`; the server uses
-   * `protocol` for the frame log so `readProtocolFrames` finds it.
+   * Daily file prefix, `[a-z][a-z0-9-]*`. Defaults to `events`.
    */
   filePrefix?: string;
   /** Default identity; a per-event identity overrides it. */

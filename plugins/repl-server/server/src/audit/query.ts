@@ -31,11 +31,14 @@ export const AUDIT_STATS_CACHE_TTL_MS = 10_000;
 export const AUDIT_STATS_TIMEOUT_GRACE_MS = 250;
 
 const DAY_MS = 86_400_000;
-const AUDIT_FILE = /^audit-(\d{4}-\d{2}-\d{2})\.jsonl$/;
-const PROTOCOL_FILE = /^protocol-(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const EVENTS_FILE = /^events-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const READ_CHUNK = 64 * 1024;
 
-export type AuditLogKind = 'audit' | 'protocol';
+/**
+ * There is one stream. Frames and control events share `events-YYYY-MM-DD`,
+ * so readers never need to know which writer produced a row.
+ */
+export type AuditLogKind = 'events';
 export const AUDIT_STATUSES = ['ok', 'error', 'timeout'] as const;
 export type AuditStatus = (typeof AUDIT_STATUSES)[number];
 
@@ -320,13 +323,13 @@ export function parseLimit(
   return parsed;
 }
 
-function filePattern(kind: AuditLogKind): RegExp {
-  return kind === 'protocol' ? PROTOCOL_FILE : AUDIT_FILE;
+function filePattern(_kind: AuditLogKind): RegExp {
+  return EVENTS_FILE;
 }
 
 /**
- * Lists `audit-*` / `protocol-*` files intersecting the day range, oldest
- * first. A missing directory is an empty log, not an error.
+ * Lists `events-*` files intersecting the day range, oldest first. A missing
+ * directory is an empty log, not an error.
  */
 export async function listAuditFiles(
   dir: string,
@@ -528,7 +531,13 @@ export function eventStatus(event: AuditEvent): AuditStatus {
   return 'ok';
 }
 
+/** Frame rows share the file; the audit list only returns them when asked. */
+const FRAME_EVENTS = new Set(['proto_in', 'proto_out', 'protocol_dropped']);
+
 export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
+  // `events-*.jsonl` holds both kinds of row, so the default view must exclude
+  // frames explicitly: a caller that wants them names `event=proto_in`.
+  if (filter.events === undefined && FRAME_EVENTS.has(event.event)) return false;
   if (filter.from !== undefined || filter.to !== undefined) {
     const ts = typeof event.ts === 'string' ? Date.parse(event.ts) : Number.NaN;
     if (!Number.isFinite(ts)) return false;
@@ -672,7 +681,7 @@ export async function queryAudit(
   const events: AuditEvent[] = [];
   let last: LocatedAuditEvent | null = null;
   let hasMore = false;
-  for await (const located of streamAuditEvents(dir, 'audit', normalized, { cursor })) {
+  for await (const located of streamAuditEvents(dir, 'events', normalized, { cursor })) {
     if (events.length >= limit) {
       hasMore = true;
       break;
@@ -698,7 +707,7 @@ export async function readEvalTrace(
     throw new InvalidAuditFilterError('exec and evalId are required', { exec, evalId });
   }
   const events: AuditEvent[] = [];
-  for await (const { event } of streamAuditEvents(dir, 'audit', normalizeFilter({ exec, evalId }))) {
+  for await (const { event } of streamAuditEvents(dir, 'events', normalizeFilter({ exec, evalId }))) {
     events.push(event);
   }
   events.sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
@@ -754,7 +763,7 @@ export async function listExecSessions(
 ): Promise<ExecSessionSummary[]> {
   const normalized = ensureAuditFilter(filter);
   const sessions = new Map<string, SessionAccumulator>();
-  for await (const { event } of streamAuditEvents(dir, 'audit', normalized)) {
+  for await (const { event } of streamAuditEvents(dir, 'events', normalized)) {
     const exec = typeof event.exec === 'string' ? event.exec : null;
     if (exec === null || exec === '') continue;
     const ts = Date.parse(event.ts);
@@ -865,7 +874,7 @@ export async function countAudit(
   const normalized = ensureAuditFilter(filter);
   const stopAfter = options.stopAfter;
   let count = 0;
-  for await (const _event of streamAuditEvents(dir, 'audit', normalized)) {
+  for await (const _event of streamAuditEvents(dir, 'events', normalized)) {
     count += 1;
     if (stopAfter !== undefined && count >= stopAfter) {
       return { count, truncated: true };
@@ -890,7 +899,7 @@ export async function* exportAuditJsonl(
   const normalized = ensureAuditFilter(filter);
   const maxRows = options.maxRows ?? AUDIT_EXPORT_MAX_ROWS;
   let emitted = 0;
-  for await (const { event } of streamAuditEvents(dir, 'audit', normalized)) {
+  for await (const { event } of streamAuditEvents(dir, 'events', normalized)) {
     if (emitted >= maxRows) return;
     yield `${JSON.stringify(event)}\n`;
     emitted += 1;
@@ -1063,6 +1072,7 @@ const STATS_WORKER_SOURCE = [
   '    if (filter.from !== null && ts < filter.from) return false;',
   '    if (filter.to !== null && ts > filter.to) return false;',
   '  }',
+  '  if (filter.events === null && (event.event === "proto_in" || event.event === "proto_out" || event.event === "protocol_dropped")) return false;',
   '  if (filter.events !== null && filter.events.indexOf(event.event) === -1) return false;',
   '  if (filter.client !== undefined && event.client !== filter.client) return false;',
   '  if (filter.clientName !== undefined && event.clientName !== filter.clientName) return false;',
@@ -1100,7 +1110,10 @@ const STATS_WORKER_SOURCE = [
   'function addTo(bucket, event) {',
   '  bucket.calls += 1;',
   '  if (event.ok === false) bucket.errors += 1;',
-  '  if (typeof event.ms === "number" && Number.isFinite(event.ms)) bucket.durations.push(event.ms);',
+  '  // Latency is execution only: a busy gate must not look like a slow tool.',
+  '  var elapsed = typeof event.ms === "number" && Number.isFinite(event.ms) ? event.ms : null;',
+  '  var queued = typeof event.queueMs === "number" && Number.isFinite(event.queueMs) ? event.queueMs : 0;',
+  '  if (elapsed !== null) bucket.durations.push(Math.max(0, elapsed - queued));',
   '  if (typeof event.queueMs === "number" && Number.isFinite(event.queueMs)) bucket.queues.push(event.queueMs);',
   '}',
   '',
@@ -1310,7 +1323,7 @@ export class AuditStatsService {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
       throw new InvalidAuditFilterError('timeoutMs must be >= 0', { timeoutMs });
     }
-    const files = await listAuditFiles(dir, 'audit', normalized.from, normalized.to);
+    const files = await listAuditFiles(dir, 'events', normalized.from, normalized.to);
     const workerFilter = statsWorkerFilter(normalized);
     const cacheKey = createHash('sha256')
       .update(JSON.stringify({ dir, files, filter: workerFilter, groupBy }))

@@ -4,6 +4,8 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   tool_call: '工具调用',
   tool_result: '工具结果',
   tool_denied: '工具拒绝',
+  async_dispatch: '异步派发',
+  task_cancel: '任务取消',
   eval_start: '执行开始',
   eval_end: '执行结束',
   eval_cancel: '执行取消',
@@ -23,6 +25,7 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   report_status: '报告状态',
   report_alert: '报告告警',
   alert_test: '告警测试',
+  payload_high_water: '载荷高水位',
 };
 
 /** Every event name with a Chinese label; dropdown options use this order. */

@@ -276,67 +276,350 @@ body {
   background: transparent !important;
 }
 
-.timeline {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  max-height: calc(100vh - 250px);
-  overflow: auto;
+/* Request process view: summary numbers, time composition and the waterfall. */
+.proc {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.timeline-axis {
+.proc-stats {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  padding-bottom: 6px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.proc-stat {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-inset);
+}
+
+.proc-stat-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.proc-stat-value {
+  margin-top: 1px;
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.proc-stat-share {
+  margin-left: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.proc-stat-hint {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.proc-compose-head {
   margin-bottom: 6px;
+}
+
+.proc-compose {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface-inset);
+}
+
+.proc-compose-seg {
+  display: block;
+  height: 100%;
+}
+
+.proc-seg-ingress,
+.proc-seg-egress {
+  background: #1677ff;
+}
+
+.proc-seg-script {
+  background: #8b93a3;
+}
+
+.proc-seg-tool {
+  background: #13c2c2;
+}
+
+.proc-compose-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.proc-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+
+.proc-wf {
+  max-height: calc(100vh - 400px);
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.proc-axis,
+.proc-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 240px) minmax(0, 1fr) 66px 52px;
+  gap: 0 10px;
+  align-items: center;
+}
+
+.proc-axis {
+  padding-bottom: 5px;
+  margin-bottom: 4px;
   border-bottom: 1px solid var(--border);
   color: var(--text-faint);
   font-size: 10.5px;
 }
 
-.timeline-axis span:nth-child(2) {
-  text-align: center;
+.proc-ticks {
+  display: flex;
+  justify-content: space-between;
 }
 
-.timeline-axis span:last-child {
-  text-align: right;
-}
-
-.timeline-row {
-  display: grid;
-  grid-template-columns: 150px 1fr;
-  gap: 10px;
-  align-items: center;
+.proc-row {
   min-height: 20px;
+  border-radius: 4px;
 }
 
-.timeline-label {
+.proc-row--tool:hover,
+.proc-row--script:hover {
+  background: var(--accent-soft);
+}
+
+.proc-row--tool.proc-tone-error {
+  background: rgba(255, 77, 79, 0.09);
+}
+
+/* A tool row is a button: it opens the step card under itself. */
+.proc-row--clickable {
+  cursor: pointer;
+}
+
+.proc-row--clickable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.proc-row--open {
+  background: var(--accent-soft);
+}
+
+.proc-caret {
+  flex: 0 0 auto;
+  width: 10px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* The wait is a thin band, not part of the tool's own duration. */
+.wf-queue {
+  position: absolute;
+  top: 8px;
+  height: 3px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(
+    to right,
+    rgba(250, 173, 20, 0.85) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+/* Unfinished call: the right edge fades instead of stopping at a hard cap. */
+.wf-bar--open {
+  mask-image: linear-gradient(to right, #000 70%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 70%, transparent 100%);
+}
+
+.proc-detail {
+  padding: 8px 10px 10px;
+  margin: 2px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-inset);
+}
+
+.proc-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.proc-detail-io {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .proc-detail-io {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.proc-detail-col {
+  min-width: 0;
+}
+
+.proc-label {
+  display: flex;
+  gap: 6px;
   overflow: hidden;
   color: var(--text-muted);
   font-size: 11.5px;
   white-space: nowrap;
+}
+
+.proc-label-text {
+  flex: 0 0 auto;
+  max-width: 62%;
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.timeline-track {
+.proc-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  text-overflow: ellipsis;
+}
+
+.proc-row--request .proc-label,
+.proc-row--response .proc-label {
+  color: var(--text);
+}
+
+.proc-row--eval .proc-label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.proc-row--tool.proc-tone-error .proc-label {
+  color: #ff7875;
+}
+
+.proc-track {
   position: relative;
-  height: 14px;
+  height: 18px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--border) 0 1px,
+    transparent 1px 25%
+  );
 }
 
-.timeline-bar {
+.wf-bar {
   position: absolute;
-  top: 3px;
+  top: 5px;
   height: 8px;
-  border-radius: 4px;
+  border-radius: 2px;
+  background: #1677ff;
 }
 
-.timeline-marker {
+.wf-mark {
   position: absolute;
-  top: 3px;
+  top: 5px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  background: #1677ff;
   transform: translateX(-50%);
+}
+
+.proc-row--tool.proc-tone-ok .wf-bar {
+  background: #13c2c2;
+}
+
+.proc-row--tool.proc-tone-error .wf-bar,
+.proc-tone-error.proc-row--response .wf-mark {
+  background: #ff4d4f;
+}
+
+.proc-row--denied .wf-bar,
+.proc-row--denied .wf-mark {
+  background: #faad14;
+}
+
+.proc-row--script .wf-bar {
+  background: rgba(139, 147, 163, 0.55);
+}
+
+.proc-row--eval .wf-bar {
+  background: rgba(139, 147, 163, 0.3);
+}
+
+.proc-row--response .wf-mark {
+  background: #52c41a;
+}
+
+.proc-num {
+  font-size: 11.5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.proc-share {
+  color: var(--text-faint);
+}
+
+.proc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.proc-swatch {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.proc-swatch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.proc-notes {
+  margin: 0;
+  padding: 9px 12px 9px 26px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.8;
 }
 
 .code-block {

@@ -133,3 +133,20 @@ export interface OfficialToolsSyncResult {
 export interface OfficialToolsSync {
   ensure(options?: { force?: boolean }): Promise<OfficialToolsSyncResult>;
 }
+
+/** Where one tool call spent its wait, from the outermost gate inwards. */
+export type ToolWaitReason = 'binding-quota' | 'server-write-lock' | 'exclusive-gate' | 'keyed-gate';
+
+/**
+ * Out-of-band sink for a tool call's timing observations.
+ *
+ * The gateway owns the audit row but the wait happens deeper (pool quota, the
+ * server's write lock, the exclusive gate), so the reason travels back up here
+ * instead of being guessed from durations. It is deliberately not part of
+ * `ToolCallRequest`: that type is what the script asked for, this is what the
+ * server observed.
+ */
+export interface ToolCallObservation {
+  /** Records where the call waited; the first report wins. */
+  noteWait(reason: ToolWaitReason): void;
+}

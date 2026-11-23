@@ -69,8 +69,20 @@ export function formatDuration(ms: number | null | undefined): string {
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
-/** Byte size with one decimal below 100 units: `512 B`, `4.2 KB`, `12 MB`. */
-export function formatBytes(bytes: number | null | undefined): string {
+/**
+ * Duration with one decimal below ten seconds. The audit tables use
+ * {@link formatDuration}; the process view compares steps of a few hundred
+ * milliseconds, where rounding to whole seconds hides the difference.
+ */
+export function formatDurationFine(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1) return '<1ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  return formatDuration(ms);
+}
+
+/** Byte size with one decimal below 100 units: `512 B`, `4.2 KB`, `12 MB`. */export function formatBytes(bytes: number | null | undefined): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return '—';
   if (bytes < 1024) return `${Math.round(bytes)} B`;
   let value = bytes / 1024;

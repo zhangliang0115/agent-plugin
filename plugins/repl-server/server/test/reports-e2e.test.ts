@@ -18,6 +18,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import test, { after, before, type TestContext } from 'node:test';
 
 import { assemble, type Assembly } from '../src/assembly.ts';
+import { createLayout, type DataLayout } from '../src/layout.ts';
 import { openStateDb } from '../src/db/migrate.ts';
 import { createDbReportStore } from '../src/reports/store.ts';
 import { startFakeWebhook, type FakeWebhook } from './fixtures/fake-webhook/server.ts';
@@ -110,7 +111,7 @@ interface Harness {
   assembly: Assembly;
   base: string;
   root: string;
-  dataDir: string;
+  layout: DataLayout;
   dbPath: string;
   /** Closes the assembly exactly once, leaving files on disk for inspection. */
   closeAssembly(): Promise<void>;
@@ -120,8 +121,8 @@ interface Harness {
 
 async function startHarness(): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'repl-reports-e2e-'));
-  const dataDir = join(root, 'repl-server');
-  const dbPath = join(dataDir, 'state.db');
+  const layout = createLayout(root);
+  const dbPath = layout.stateDb;
   const assembly = await assemble({ root, log: () => undefined });
   await new Promise<void>((resolve) => assembly.server.listen(0, '127.0.0.1', resolve));
   const address = assembly.server.address();
@@ -140,7 +141,7 @@ async function startHarness(): Promise<Harness> {
     assembly,
     base,
     root,
-    dataDir,
+    layout,
     dbPath,
     closeAssembly,
     async dispose() {
@@ -257,10 +258,10 @@ function countReports(db: DatabaseSync, where = '1 = 1'): number {
   return Number(row?.['n'] ?? -1);
 }
 
-/** Reads every daily audit JSONL file in `<dataDir>/audit`. */
-async function readAuditEvents(dataDir: string): Promise<Array<Record<string, unknown>>> {
-  const dir = join(dataDir, 'audit');
-  const names = (await readdir(dir)).filter((name) => /^audit-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
+/** Reads every daily event JSONL file in the `log/` domain. */
+async function readAuditEvents(layout: DataLayout): Promise<Array<Record<string, unknown>>> {
+  const dir = layout.log;
+  const names = (await readdir(dir)).filter((name) => /^events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name));
   const events: Array<Record<string, unknown>> = [];
   for (const name of names) {
     const text = await readFile(join(dir, name), 'utf8');
@@ -358,7 +359,7 @@ test('report_problem answers before the webhook is released and sends exactly on
 
   // Audit is metadata only; flush by closing, then read the JSONL.
   await app.closeAssembly();
-  const events = await readAuditEvents(app.dataDir);
+  const events = await readAuditEvents(app.layout);
 
   const created = events.filter(
     (event) => event['event'] === 'report_created' && event['reportId'] === outcome.reportId,
@@ -393,9 +394,16 @@ test('report_problem answers before the webhook is released and sends exactly on
   ]);
 
   const serialized = JSON.stringify(events);
-  assert.doesNotMatch(serialized, /DETAIL-ONLY-MARKER|CONTEXT-ONLY-MARKER/);
-  assert.doesNotMatch(serialized, /Bash hangs while npm test runs/);
+  // Report rows (created/alert/state) stay metadata-only: no title, no detail,
+  // no context (`06 §5.4`). Protocol frames are the raw record of what the
+  // client sent, so the arguments survive there by design (`09 §三`).
+  const reportRows = events.filter((event) => String(event['event'] ?? '').startsWith('report_'));
+  const reportText = JSON.stringify(reportRows);
+  assert.doesNotMatch(reportText, /DETAIL-ONLY-MARKER|CONTEXT-ONLY-MARKER/);
+  assert.doesNotMatch(reportText, /Bash hangs while npm test runs/);
   assert.doesNotMatch(serialized, new RegExp(WEBHOOK_KEY.replaceAll('-', '\\-')));
+  const frameRows = events.filter((event) => String(event['event'] ?? '').startsWith('proto_'));
+  assert.match(JSON.stringify(frameRows), /DETAIL-ONLY-MARKER/);
 });
 
 // ---------------------------------------------------------------------------

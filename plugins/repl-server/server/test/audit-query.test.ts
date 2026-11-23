@@ -170,18 +170,13 @@ async function createFixture(t: { after(fn: () => unknown): void }): Promise<Fix
   const day17 = auditEvents.filter((event) => event.ts === DAY_17_TS);
   const day18 = auditEvents.filter((event) => event.ts !== DAY_17_TS);
   await writeFile(
-    join(dir, 'audit-2026-11-17.jsonl'),
+    join(dir, 'events-2026-11-17.jsonl'),
     `${day17.map((event) => JSON.stringify(event)).join('\n')}\n`,
     'utf8',
   );
   await writeFile(
-    join(dir, 'audit-2026-11-18.jsonl'),
-    `${day18.map((event) => JSON.stringify(event)).join('\n')}\n{"torn":\n`,
-    'utf8',
-  );
-  await writeFile(
-    join(dir, 'protocol-2026-11-18.jsonl'),
-    `${protocolEvents.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    join(dir, 'events-2026-11-18.jsonl'),
+    `${[...day18, ...protocolEvents].map((event) => JSON.stringify(event)).join('\n')}\n{"torn":\n`,
     'utf8',
   );
   return { dir, auditEvents };
@@ -311,7 +306,7 @@ test('queryAudit finds ai_run events by status and serverId', async (t) => {
   const failed = { ...base, ts: new Date(DAY_18 + 10).toISOString(), outcome: 'error', code: 'AI_TIMEOUT' };
   const passed = { ...base, ts: new Date(DAY_18 + 20).toISOString() };
   await writeFile(
-    join(dir, 'audit-2026-11-18.jsonl'),
+    join(dir, 'events-2026-11-18.jsonl'),
     `${[JSON.stringify(failed), JSON.stringify(passed)].join('\n')}\n`,
     'utf8',
   );
@@ -440,17 +435,17 @@ test('multi-value filters accept repeated and comma-separated params', async (t)
 
 test('listAuditFiles filters by UTC day and sorted order', async (t) => {
   const { dir } = await createFixture(t);
-  const all = await listAuditFiles(dir, 'audit');
+  const all = await listAuditFiles(dir, 'events');
   assert.deepEqual(
     all.map((file) => file.split('/').pop()),
-    ['audit-2026-11-17.jsonl', 'audit-2026-11-18.jsonl'],
+    ['events-2026-11-17.jsonl', 'events-2026-11-18.jsonl'],
   );
-  const day18Only = await listAuditFiles(dir, 'audit', DAY_18);
+  const day18Only = await listAuditFiles(dir, 'events', DAY_18);
   assert.deepEqual(
     day18Only.map((file) => file.split('/').pop()),
-    ['audit-2026-11-18.jsonl'],
+    ['events-2026-11-18.jsonl'],
   );
-  assert.deepEqual(await listAuditFiles(join(dir, 'missing'), 'audit'), []);
+  assert.deepEqual(await listAuditFiles(join(dir, 'missing'), 'events'), []);
 });
 
 test('readEvalTrace returns the ordered trace for one exec + evalId', async (t) => {
@@ -521,7 +516,7 @@ test('client name and version filter independently and the legacy client filter 
     { v: 1, ts: at(30), event: 'tool_result', client: 'legacy-only', ok: true },
   ];
   await writeFile(
-    join(dir, 'audit-2026-11-18.jsonl'),
+    join(dir, 'events-2026-11-18.jsonl'),
     `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
     'utf8',
   );
@@ -589,8 +584,9 @@ test('stats aggregate tool results in a worker thread', async (t) => {
   assert.equal(stats.calls, 3);
   assert.equal(stats.errors, 1);
   assert.ok(Math.abs(stats.errorRate - 1 / 3) < 1e-9);
-  assert.equal(stats.p50, 20);
-  assert.equal(stats.p95, 200);
+  // Latency is execution only: 20-5=15, 200-50=150, 5-0=5.
+  assert.equal(stats.p50, 15);
+  assert.equal(stats.p95, 150);
   assert.ok(stats.queueAvgMs !== null && Math.abs(stats.queueAvgMs - 55 / 3) < 1e-9);
   assert.match(stats.snapshotId, /^[0-9a-f]{32}$/);
   assert.ok(stats.scannedRows >= 15);
@@ -601,7 +597,7 @@ test('stats aggregate tool results in a worker thread', async (t) => {
   });
   assert.equal(errorsOnly.calls, 1);
   assert.equal(errorsOnly.errors, 1);
-  assert.equal(errorsOnly.p50, 200);
+  assert.equal(errorsOnly.p50, 150);
 
   const bothStatuses = await computeAuditStats(
     dir,
@@ -827,7 +823,7 @@ test('frames endpoint filters by tool, protocol status and execution result', as
     { ...common, ts: at(30), event: 'proto_in', id: 4, method: 'tools/call', params: { name: 'run_script' } },
   ];
   await writeFile(
-    join(dir, 'protocol-2026-11-18.jsonl'),
+    join(dir, 'events-2026-11-18.jsonl'),
     `${extra.map((event) => JSON.stringify(event)).join('\n')}\n`,
     { encoding: 'utf8', flag: 'a' },
   );

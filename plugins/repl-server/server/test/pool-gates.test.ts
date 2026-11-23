@@ -340,3 +340,45 @@ test('updateLimits validates values and keeps the previous ones on rejection', (
   assert.equal(gates.callsPerBinding, 2);
   assert.equal(gates.queuedPerBinding, 3);
 });
+
+test('onWait names the per-binding quota when the quota is full', async () => {
+  const gates = new PoolGates({ callsPerBinding: 1, queuedPerBinding: 4 });
+  const hold = deferred();
+  const reasons: string[] = [];
+
+  const running = gates.run('pg', 'cb_a', 'parallel', () => hold.promise);
+  await tick();
+
+  const queued = gates.run('pg', 'cb_a', 'parallel', () => 'two', (reason) => reasons.push(reason));
+  await tick();
+  assert.deepEqual(reasons, ['binding-quota']);
+
+  hold.resolve();
+  await Promise.all([running, queued]);
+});
+
+test('onWait names the write lock and the exclusive gate', async () => {
+  const gates = new PoolGates({ callsPerBinding: 4 });
+
+  // A serial call has to drain the running read first.
+  const readHold = deferred();
+  const read = gates.run('pg', 'cb_a', 'parallel', () => readHold.promise);
+  await tick();
+  const lockReasons: string[] = [];
+  const write = gates.run('pg', 'cb_a', 'serial', () => 'w', (reason) => lockReasons.push(reason));
+  await tick();
+  assert.ok(lockReasons.includes('server-write-lock'), `got ${lockReasons.join(',')}`);
+  readHold.resolve();
+  await Promise.all([read, write]);
+
+  // An exclusive call waits for the in-flight call to drain.
+  const hold = deferred();
+  const running = gates.run('pg', 'cb_a', 'parallel', () => hold.promise);
+  await tick();
+  const exclusiveReasons: string[] = [];
+  const exclusive = gates.run('pg', 'cb_b', 'exclusive', () => 'x', (reason) => exclusiveReasons.push(reason));
+  await tick();
+  assert.ok(exclusiveReasons.includes('exclusive-gate'), `got ${exclusiveReasons.join(',')}`);
+  hold.resolve();
+  await Promise.all([running, exclusive]);
+});

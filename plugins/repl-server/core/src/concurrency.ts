@@ -66,6 +66,18 @@ export class RwLock {
     return this.writer;
   }
 
+  /**
+   * Writers queued behind the current holder. Read-only observation used to
+   * explain *why* a serial call waited; it never affects scheduling.
+   */
+  get pendingWriters(): number {
+    let count = 0;
+    for (const waiter of this.queue) {
+      if (waiter.kind === 'write') count += 1;
+    }
+    return count;
+  }
+
   private drain(): void {
     if (this.writer) return;
     const head = this.queue[0];

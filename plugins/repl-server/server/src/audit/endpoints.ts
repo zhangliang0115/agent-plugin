@@ -11,6 +11,7 @@
  * - `auditEvalTraceEndpoint`      GET /admin/api/audit/evals/:exec/:evalId
  * - `auditSessionsEndpoint`       GET /admin/api/audit/sessions
  * - `auditFramesEndpoint`         GET /admin/api/audit/frames
+ * - `auditPayloadEndpoint`        GET /admin/api/audit/payload
  * - `auditStatsEndpoint`          GET /admin/api/audit/stats
  * - `auditExportEndpoint`         GET /admin/api/audit/export
  *
@@ -19,6 +20,8 @@
  *
  * @module
  */
+
+import { PAYLOAD_RANGE_LIMIT, readPayload, type PayloadReadMode } from '@zhangliang0115/repl-server-core';
 
 import type { AuditEvent, Clock, RequestIdentity } from '../ports.ts';
 
@@ -89,6 +92,8 @@ export interface AuditEndpointsOptions {
   frameMaxPageSize?: number;
   /** Frame scan row ceiling; reaching it marks the response truncated. Default 100000. */
   frameScanMaxLines?: number;
+  /** Retention counters, merged into the stats response when present. */
+  retention?: () => unknown;
 }
 
 export interface AuditEndpoints {
@@ -96,6 +101,7 @@ export interface AuditEndpoints {
   evalTrace(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   sessions(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   frames(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
+  payload(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   stats(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   export(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
 }
@@ -260,6 +266,10 @@ async function collectProtocolFrames(
   state: CollectedFrames,
   maxLines: number,
 ): Promise<void> {
+  // Frame rows are excluded from the default audit view, so name them here
+  // instead of relying on the caller's filter.
+  const frameFilter: AuditFilter =
+    filter.events === undefined ? { ...filter, events: ['proto_in', 'proto_out'] } : filter;
   for await (const line of readAuditLines(dir, kind, { from: range.from, to: range.to })) {
     if (state.scannedLines >= maxLines) {
       state.truncated = true;
@@ -274,7 +284,7 @@ async function collectProtocolFrames(
       state.droppedKeys.add(key);
       // Drop counters are process-global, so only the request window applies.
       // A ts that cannot be parsed cannot be placed in the window.
-      if (!matchesFilter(event, { from: range.from, to: range.to })) continue;
+      if (!matchesFilter(event, { from: range.from, to: range.to, events: ['protocol_dropped'] })) continue;
       if (typeof event.count === 'number') state.droppedFrames += event.count;
       continue;
     }
@@ -282,7 +292,7 @@ async function collectProtocolFrames(
     const key = frameDedupeKey(event);
     if (state.frameKeys.has(key)) continue;
     state.frameKeys.add(key);
-    if (!matchesFilter(event, filter)) continue;
+    if (!matchesFilter(event, frameFilter)) continue;
     state.events.push(event);
   }
 }
@@ -301,14 +311,8 @@ async function readProtocolFrames(
     scannedLines: 0,
     truncated: false,
   };
-  // Frame storage moved from audit-*.jsonl to protocol-*.jsonl, so read both:
-  // old records stay visible after a restart writes the first protocol file,
-  // and the overlap is deduped by a stable event key. The line budget spans
-  // both files; once it is spent the legacy file is skipped.
-  await collectProtocolFrames(dir, 'protocol', filter, range, state, maxLines);
-  if (!state.truncated) {
-    await collectProtocolFrames(dir, 'audit', filter, range, state, maxLines);
-  }
+  // One stream: frames live in `events-*.jsonl` next to the control events.
+  await collectProtocolFrames(dir, 'events', filter, range, state, maxLines);
   return {
     frames: pairProtocolFrames(state.events),
     droppedFrames: state.droppedFrames,
@@ -433,6 +437,60 @@ export async function auditFramesEndpoint(
   }
 }
 
+const PAYLOAD_MODES: ReadonlySet<string> = new Set(['full', 'head', 'tail', 'range']);
+
+/**
+ * GET /admin/api/audit/payload?ref=&mode=full|head|tail|range&offset=&limit=
+ *
+ * Serves one blob named by a `*Ref` field on an audit row. Rows never carry a
+ * body above `INLINE_MAX_BYTES`, so this is the only way the UI can show a
+ * large tool result; `ref` is resolved strictly below the log root.
+ */
+export async function auditPayloadEndpoint(
+  options: AuditEndpointsOptions,
+  request: AuditEndpointRequest,
+): Promise<AuditEndpointResult> {
+  try {
+    const ref = param(request.params, 'ref');
+    if (ref === undefined) throw new InvalidAuditFilterError('ref is required');
+    const rawMode = param(request.params, 'mode') ?? 'full';
+    if (!PAYLOAD_MODES.has(rawMode)) {
+      throw new InvalidAuditFilterError('mode must be full, head, tail or range', { mode: rawMode });
+    }
+    const mode = rawMode as PayloadReadMode;
+    const limit = param(request.params, 'limit');
+    const offset = param(request.params, 'offset');
+    const numeric = (name: string, value: string | undefined): number | undefined => {
+      if (value === undefined) return undefined;
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        throw new InvalidAuditFilterError(`${name} must be a non-negative integer`, { [name]: value });
+      }
+      return parsed;
+    };
+    const slice = await readPayload(options.dir, ref, {
+      mode,
+      limit: Math.min(numeric('limit', limit) ?? PAYLOAD_RANGE_LIMIT, PAYLOAD_RANGE_LIMIT),
+      offset: numeric('offset', offset),
+    });
+    if (slice === null) {
+      return errorResult(404, 'PAYLOAD_NOT_FOUND', 'no payload blob for this ref', { ref });
+    }
+    return jsonResult(200, {
+      ref,
+      mode,
+      total: slice.total,
+      start: slice.start,
+      end: slice.end,
+      truncated: slice.truncated,
+      // Decoded text: every blob is written from a JSON serialization.
+      body: slice.body.toString('utf8'),
+    });
+  } catch (error) {
+    return endpointError(error);
+  }
+}
+
 /** GET /admin/api/audit/stats?from=&to=&groupBy= */
 export async function auditStatsEndpoint(
   options: AuditEndpointsOptions,
@@ -444,7 +502,12 @@ export async function auditStatsEndpoint(
     const groupBy = parseStatsGroupBy(param(request.params, 'groupBy'));
     const service = statsService ?? defaultStatsService(options);
     const result = await service.compute(options.dir, filter, { groupBy });
-    return jsonResult(200, result);
+    // The retention sweep owns the on-disk budget; surfacing it here keeps
+    // "why did yesterday disappear" answerable without a second endpoint.
+    return jsonResult(
+      200,
+      options.retention === undefined ? result : { ...result, retention: options.retention() },
+    );
   } catch (error) {
     return endpointError(error);
   }
@@ -505,6 +568,7 @@ export function createAuditEndpoints(options: AuditEndpointsOptions): AuditEndpo
     evalTrace: (request) => auditEvalTraceEndpoint(options, request),
     sessions: (request) => auditSessionsEndpoint(options, request),
     frames: (request) => auditFramesEndpoint(options, request),
+    payload: (request) => auditPayloadEndpoint(options, request),
     stats: (request) => auditStatsEndpoint(options, request, statsService),
     export: (request) => auditExportEndpoint(options, request),
   };

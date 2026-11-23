@@ -5,6 +5,8 @@ import {
   eventWindow,
   isAsyncResponse,
   isProtocolFrame,
+  matchesDetailKeys,
+  requestDetailKeys,
   requestRunIds,
   toolCallOutcome,
 } from '../src/lib/request-detail.ts';
@@ -86,4 +88,27 @@ test('toolCallOutcome separates protocol success from execution failure', () => 
   assert.equal(toolCallOutcome({ error: { code: 'INTERNAL' } }), null, 'JSON-RPC errors are not tool results');
   assert.equal(toolCallOutcome(null), null);
   assert.equal(toolCallOutcome({ result: {} }), null, 'no isError means no tool result');
+});
+
+test('requestDetailKeys links an async dispatch through evalTaskId', () => {
+  const events = [
+    { event: 'eval_start', requestId: 7, runId: 'r-1' },
+    { event: 'async_dispatch', requestId: 7, evalTaskId: 'task_a' },
+    { event: 'async_dispatch', requestId: '7', evalTaskId: 'task_b' },
+    { event: 'async_dispatch', requestId: 8, evalTaskId: 'task_other' },
+    // `async_dispatch` carries no runId, so this must not be the only link.
+    { event: 'tool_call', requestId: 7, runId: 'r-1' },
+  ];
+  assert.deepEqual(requestDetailKeys(events, 7), { runIds: ['r-1'], taskIds: ['task_a', 'task_b'] });
+  assert.deepEqual(requestDetailKeys(events, null), { runIds: [], taskIds: [] });
+});
+
+test('matchesDetailKeys follows the open panel by runId or task id', () => {
+  const keys = { runIds: ['r-1'], taskIds: ['task_a'] };
+  assert.equal(matchesDetailKeys({ event: 'tool_result', runId: 'r-1' }, keys), true);
+  assert.equal(matchesDetailKeys({ event: 'eval_end', runId: 'r-2' }, keys), false);
+  assert.equal(matchesDetailKeys({ event: 'task_cancel', taskId: 'task_a' }, keys), true);
+  assert.equal(matchesDetailKeys({ event: 'task_settle', evalTaskId: 'task_a' }, keys), true);
+  assert.equal(matchesDetailKeys({ event: 'tool_result', runId: 'r-1' }, { runIds: [], taskIds: [] }), false);
+  assert.equal(matchesDetailKeys(null, keys), false);
 });
