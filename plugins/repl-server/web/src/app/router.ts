@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 export type ManageTab =
   | 'servers'
   | 'tools'
+  | 'scripts'
   | 'clients'
   | 'secrets'
   | 'tags'
@@ -23,6 +24,7 @@ export interface RouteState {
 export const MANAGE_TABS: ReadonlyArray<{ id: ManageTab; label: string }> = [
   { id: 'servers', label: '服务端' },
   { id: 'tools', label: '工具' },
+  { id: 'scripts', label: '脚本库' },
   { id: 'clients', label: '客户端' },
   { id: 'secrets', label: '密钥' },
   { id: 'tags', label: '标签' },

@@ -16,12 +16,12 @@ function fixture(t: TestContext): ReturnType<typeof openStateDb> {
   return db;
 }
 
-test('seedBuiltinTools writes the five protocol tools once', (t) => {
+test('seedBuiltinTools writes the seven protocol tools once', (t) => {
   const db = fixture(t);
   assert.equal(getRevision(db), 0);
 
   const first = seedBuiltinTools(db);
-  assert.deepEqual(first, { inserted: 5, filled: 0 });
+  assert.deepEqual(first, { inserted: 7, filled: 0 });
   assert.equal(getRevision(db), 1);
 
   const rows = listTools(db, BUILTIN_SERVER_ID);
@@ -40,7 +40,7 @@ test('seedBuiltinTools writes the five protocol tools once', (t) => {
   const second = seedBuiltinTools(db);
   assert.deepEqual(second, { inserted: 0, filled: 0 });
   assert.equal(getRevision(db), 1, 'an idempotent seed must not bump the revision');
-  assert.equal(listTools(db, BUILTIN_SERVER_ID).length, 5);
+  assert.equal(listTools(db, BUILTIN_SERVER_ID).length, 7);
 });
 
 test('seedBuiltinTools preserves admin fields and only fills empty upstream fields', (t) => {

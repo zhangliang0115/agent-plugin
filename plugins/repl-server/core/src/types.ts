@@ -109,7 +109,18 @@ export type WorkerToHost =
   | { t: 'error'; evalId: number; message: string; stack?: string; layer?: TimeoutLayer }
   | { t: 'snapshot'; evalId: number; buf: ArrayBuffer };
 
-export interface EvalTaskEvent {
+/** Execution identity carried by the task table (design 10 §7.4). */
+export interface EvalTaskMeta {
+  runId?: string;
+  scriptId?: string;
+  scriptVersion?: number;
+  scriptMode?: 'exact' | 'parameterized';
+  /** Args summary capped at 512 characters; the full args stay in `script_runs`. */
+  argsPreview?: string;
+  entryMode?: 'code' | 'script';
+}
+
+export interface EvalTaskEvent extends EvalTaskMeta {
   taskId: string;
   evalId: number;
   status: FinishedTaskStatus;

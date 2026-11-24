@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -222,6 +222,146 @@ export function createSchemaV7(db: DatabaseSync): void {
   if (!columns.has('resolved_at')) {
     db.exec('ALTER TABLE reports ADD COLUMN resolved_at TEXT');
   }
+}
+
+/**
+ * DDL for schema v8: execution archive, script identity, immutable versions and
+ * the P3 candidate queue, plus their FTS index and triggers (design 10 §5.5).
+ * Everything the script library needs is created here; later phases add no
+ * migration and only leave `script_candidates` / `scripts_fts` idle until used.
+ * No foreign keys: a version's `source_run_id` may dangle once the archive row
+ * expires, and consistency is kept by the repository's transactions.
+ */
+export const SCHEMA_V8_SQL = `
+-- Execution archive for run_script itself; it is not a second execution path.
+CREATE TABLE IF NOT EXISTS script_runs (
+  run_id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  exec_id TEXT,
+  eval_id INTEGER,
+  request_id TEXT,
+  binding TEXT,
+  client_name TEXT NOT NULL DEFAULT '',
+  client_version TEXT NOT NULL DEFAULT '',
+  workspace TEXT NOT NULL,
+  entry_tool TEXT NOT NULL,
+  entry_mode TEXT NOT NULL CHECK (entry_mode IN ('code', 'script')),
+  script_id TEXT,
+  script_version INTEGER,
+  script_mode TEXT CHECK (script_mode IS NULL OR script_mode IN ('exact', 'parameterized')),
+  args_json TEXT,
+  args_preview TEXT,
+  code TEXT,
+  code_bytes INTEGER,
+  code_sha256 TEXT,
+  ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+  error TEXT,
+  result_bytes INTEGER,
+  duration_ms INTEGER,
+  tools_used_json TEXT NOT NULL DEFAULT '[]',
+  purpose TEXT NOT NULL DEFAULT 'run' CHECK (purpose IN ('run', 'test'))
+);
+
+CREATE INDEX IF NOT EXISTS script_runs_expires_idx ON script_runs (expires_at);
+CREATE INDEX IF NOT EXISTS script_runs_created_idx ON script_runs (created_at DESC);
+CREATE INDEX IF NOT EXISTS script_runs_code_idx ON script_runs (code_sha256);
+CREATE INDEX IF NOT EXISTS script_runs_script_idx ON script_runs (script_id, script_version);
+
+CREATE TABLE IF NOT EXISTS scripts (
+  script_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  mode TEXT NOT NULL CHECK (mode IN ('exact', 'parameterized')),
+  active_version INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'disabled', 'archived')),
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  source_run_id TEXT,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS scripts_status_idx ON scripts (status);
+
+CREATE TABLE IF NOT EXISTS script_versions (
+  script_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('exact', 'parameterized')),
+  code TEXT NOT NULL,
+  code_bytes INTEGER NOT NULL,
+  code_sha256 TEXT NOT NULL,
+  input_schema_json TEXT NOT NULL,
+  example_args_json TEXT,
+  status TEXT NOT NULL CHECK (status IN ('draft', 'active', 'superseded', 'archived')),
+  changelog TEXT,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  source_run_id TEXT,
+  verified_run_id TEXT,
+  activated_at TEXT,
+  PRIMARY KEY (script_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS script_versions_status_idx ON script_versions (script_id, status);
+CREATE INDEX IF NOT EXISTS script_versions_source_idx ON script_versions (source_run_id);
+
+-- P3 review queue and the P2 search index are created now so the schema does
+-- not need another migration when those phases land; P1 code leaves them idle.
+CREATE TABLE IF NOT EXISTS script_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  code TEXT NOT NULL,
+  code_sha256 TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  source_run_ids_json TEXT NOT NULL DEFAULT '[]',
+  suggested_name TEXT,
+  suggested_description TEXT,
+  suggested_tags_json TEXT,
+  suggested_input_schema_json TEXT,
+  suggested_code TEXT,
+  score REAL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'accepted', 'rejected')),
+  script_id TEXT,
+  reviewed_at TEXT,
+  reviewed_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS script_candidates_status_idx ON script_candidates (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS script_candidates_code_idx ON script_candidates (code_sha256);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS scripts_fts USING fts5(
+  script_id UNINDEXED,
+  name,
+  description,
+  tags_json,
+  content='scripts',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS scripts_ai AFTER INSERT ON scripts BEGIN
+  INSERT INTO scripts_fts(rowid, script_id, name, description, tags_json)
+  VALUES (new.rowid, new.script_id, new.name, new.description, new.tags_json);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_ad AFTER DELETE ON scripts BEGIN
+  INSERT INTO scripts_fts(scripts_fts, rowid, script_id, name, description, tags_json)
+  VALUES ('delete', old.rowid, old.script_id, old.name, old.description, old.tags_json);
+END;
+
+CREATE TRIGGER IF NOT EXISTS scripts_au AFTER UPDATE ON scripts BEGIN
+  INSERT INTO scripts_fts(scripts_fts, rowid, script_id, name, description, tags_json)
+  VALUES ('delete', old.rowid, old.script_id, old.name, old.description, old.tags_json);
+  INSERT INTO scripts_fts(rowid, script_id, name, description, tags_json)
+  VALUES (new.rowid, new.script_id, new.name, new.description, new.tags_json);
+END;
+`;
+
+export function createSchemaV8(db: DatabaseSync): void {
+  db.exec(SCHEMA_V8_SQL);
 }
 
 /** Raised when repository input violates a storage invariant. */

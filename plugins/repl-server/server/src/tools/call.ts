@@ -3,6 +3,7 @@
 import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import type { ReportService } from '../reports/service.ts';
+import { ScriptError, type SaveScriptInput, type ScriptService } from '../scripts/service.ts';
 import { describeTools, type DescribeToolsInput } from './describe.ts';
 import { reportProblemCall } from './report.ts';
 import {
@@ -37,6 +38,10 @@ export interface ToolCallContext {
   visibility?: ToolVisibility;
   /** This request's search_tools definition, carrying the catalog-derived enums. */
   searchToolsDefinition?: ToolDefinition;
+  /** Saved-script library; absent only in focused tests that never use it. */
+  scripts?: ScriptService;
+  /** Audit sink for top-level tool events without an eval (`script_saved`). */
+  audit?: (event: Record<string, unknown> & { event: string }) => void;
 }
 
 export type ToolCallResponse = CallToolResult | CreateTaskResult;
@@ -53,12 +58,22 @@ export class UnknownToolError extends JsonRpcError {
 }
 
 interface RunScriptArguments {
-  code: string;
+  code?: string;
+  scriptId?: string;
+  scriptVersion?: number;
+  args?: Record<string, unknown>;
+  activateOnSuccess?: boolean;
   timeout?: number;
   async?: boolean;
   workspace?: string;
   visibleTools?: string[];
   excludeTags?: string[];
+}
+
+interface SearchScriptsArguments {
+  query?: string;
+  tags?: string[];
+  limit?: number;
 }
 
 interface WaitTasksArguments {
@@ -103,13 +118,13 @@ function runScriptFailure(code: string, message: string): CallToolResult {
   };
 }
 
-function asyncAcknowledgement(evalId: number, evalTaskId: string): CallToolResult {
+function asyncAcknowledgement(evalId: number, evalTaskId: string, runId: string): CallToolResult {
   return {
     resultType: 'complete',
     content: [
       {
         type: 'text',
-        text: `<repl-output eval="${evalId}" async="true" task="${escapeXmlAttribute(evalTaskId)}"></repl-output>`,
+        text: `<repl-output eval="${evalId}" run="${escapeXmlAttribute(runId)}" async="true" task="${escapeXmlAttribute(evalTaskId)}"></repl-output>`,
       },
     ],
     isError: false,
@@ -141,18 +156,88 @@ function failureFromError(error: unknown): CallToolResult {
   return runScriptFailure(errorCode(error), errorMessage(error));
 }
 
+function scriptFailure(error: unknown): CallToolResult {
+  if (error instanceof ScriptError) return toolFailure(error.code, error.message);
+  return toolFailure(errorCode(error), errorMessage(error));
+}
+
 async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<ToolCallResponse> {
   const validation = validateToolArguments('run_script', input);
   if (!validation.ok) return runScriptFailure(validation.code, validation.message);
 
   const args = validation.value as unknown as RunScriptArguments;
+  const hasCode = typeof args.code === 'string';
+  const hasScript = typeof args.scriptId === 'string' && args.scriptId !== '';
+  if (hasCode === hasScript) {
+    return runScriptFailure(
+      'INVALID_ARGUMENT',
+      'exactly one of code or scriptId is required',
+    );
+  }
+  if (!hasScript && (args.args !== undefined || args.scriptVersion !== undefined || args.activateOnSuccess !== undefined)) {
+    return runScriptFailure(
+      'INVALID_ARGUMENT',
+      'args, scriptVersion and activateOnSuccess require scriptId',
+    );
+  }
+
   const mode = resolveDispatchMode('run_script', args, ctx.tasksDeclared === true);
+  const actor = { createdBy: ctx.identity.binding ?? ctx.identity.mcp };
+
+  let code = args.code ?? '';
+  let scriptFields: Pick<
+    ScriptRequest,
+    'scriptId' | 'scriptVersion' | 'scriptMode' | 'args' | 'purpose'
+  > = { purpose: 'run' };
+  let activateOnSuccess = false;
+
+  if (hasScript) {
+    if (ctx.scripts === undefined) {
+      return runScriptFailure('MCP_SERVER_UNAVAILABLE', 'the script library is not wired');
+    }
+    let resolved;
+    try {
+      resolved = ctx.scripts.resolveExecution(
+        {
+          scriptId: args.scriptId as string,
+          ...(args.scriptVersion === undefined ? {} : { scriptVersion: args.scriptVersion }),
+          ...(args.args === undefined ? {} : { args: args.args }),
+        },
+        { actor },
+      );
+    } catch (error) {
+      return failureFromError(error);
+    }
+    if (args.activateOnSuccess === true) {
+      // The target must still be a draft before dispatch; the settle-time archive
+      // re-checks it so a concurrent activation/archive wins without failing the run.
+      if (resolved.version.status !== 'draft') {
+        return runScriptFailure(
+          'SCRIPT_VERSION_NOT_DRAFT',
+          `script ${resolved.script.scriptId} version ${resolved.version.version} is not a draft`,
+        );
+      }
+      activateOnSuccess = true;
+    }
+    code = resolved.code;
+    scriptFields = {
+      scriptId: resolved.script.scriptId,
+      scriptVersion: resolved.version.version,
+      scriptMode: resolved.version.mode,
+      args: resolved.args,
+      purpose: resolved.purpose,
+    };
+  }
 
   const request: ScriptRequest = {
-    code: args.code,
+    code,
     ...(args.timeout === undefined ? {} : { timeoutMs: args.timeout }),
     async: mode !== 'sync',
     identity: ctx.identity,
+    entryMode: hasScript ? 'script' : 'code',
+    actor,
+    ...scriptFields,
+    ...(activateOnSuccess ? { activateOnSuccess: true } : {}),
     ...(ctx.requestId === undefined || ctx.requestId === null ? {} : { requestId: ctx.requestId }),
   };
   if (args.workspace !== undefined) request.workspace = args.workspace;
@@ -161,7 +246,8 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
 
   if (mode === 'sync') {
     try {
-      return toCallToolResult(await ctx.gateway.runScript(request));
+      const outcome = await ctx.gateway.runScript(request);
+      return toCallToolResult(outcome);
     } catch (error) {
       return failureFromError(error);
     }
@@ -170,9 +256,66 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
   try {
     const dispatched = await ctx.gateway.dispatchScript(request);
     if (mode === 'task') return ctx.tasks.create(ownerOf(ctx.identity), dispatched.taskId);
-    return asyncAcknowledgement(dispatched.evalId, dispatched.taskId);
+    return asyncAcknowledgement(dispatched.evalId, dispatched.taskId, dispatched.runId);
   } catch (error) {
     return failureFromError(error);
+  }
+}
+
+async function saveScriptCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
+  const validation = validateToolArguments('save_script', input);
+  if (!validation.ok) return toolFailure(validation.code, validation.message);
+  if (ctx.scripts === undefined) {
+    return toolFailure('MCP_SERVER_UNAVAILABLE', 'the script library is not wired');
+  }
+  const args = validation.value as unknown as SaveScriptInput;
+  try {
+    const result = ctx.scripts.save(
+      { createdBy: ctx.identity.binding ?? ctx.identity.mcp },
+      args,
+    );
+    ctx.audit?.({
+      event: 'script_saved',
+      ok: true,
+      scriptId: result.scriptId,
+      version: result.version,
+      mode: result.mode,
+      name: args.name ?? null,
+      sourceRunId: args.runId ?? null,
+      status: result.status,
+      activeVersion: result.activeVersion,
+      warnings: result.warnings,
+    });
+    return jsonResult(result, false);
+  } catch (error) {
+    ctx.audit?.({
+      event: 'script_saved',
+      ok: false,
+      scriptId: args.scriptId ?? null,
+      name: args.name ?? null,
+      sourceRunId: args.runId ?? null,
+      error: { code: errorCode(error), message: errorMessage(error) },
+    });
+    return scriptFailure(error);
+  }
+}
+
+async function searchScriptsCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
+  const validation = validateToolArguments('search_scripts', input);
+  if (!validation.ok) return toolFailure(validation.code, validation.message);
+  if (ctx.scripts === undefined) {
+    return toolFailure('MCP_SERVER_UNAVAILABLE', 'the script library is not wired');
+  }
+  const args = validation.value as unknown as SearchScriptsArguments;
+  try {
+    const items = ctx.scripts.search({
+      ...(args.query === undefined ? {} : { query: args.query }),
+      ...(args.tags === undefined ? {} : { tags: args.tags }),
+      ...(args.limit === undefined ? {} : { limit: args.limit }),
+    });
+    return jsonResult({ scripts: items }, false);
+  } catch (error) {
+    return scriptFailure(error);
   }
 }
 
@@ -255,6 +398,10 @@ export async function callTool(
       return waitTasksCall(args, ctx);
     case 'report_problem':
       return reportProblemCall(args, ctx);
+    case 'save_script':
+      return saveScriptCall(args, ctx);
+    case 'search_scripts':
+      return searchScriptsCall(args, ctx);
     default:
       throw new UnknownToolError(name);
   }

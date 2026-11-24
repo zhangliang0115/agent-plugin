@@ -130,9 +130,10 @@ function failure(tool: string, input: unknown): string {
   return result.message;
 }
 
-test('report_problem is the fifth and last tool with a frozen, always-load schema', () => {
+test('report_problem is the fifth tool with a frozen, always-load schema', () => {
   const names = listTools().map((tool) => tool.name);
-  assert.equal(names[names.length - 1], 'report_problem');
+  assert.equal(names[4], 'report_problem');
+  assert.deepEqual(names.slice(5), ['save_script', 'search_scripts']);
   const tool = getToolDefinition('report_problem');
   assert.ok(tool !== undefined);
   assert.equal(tool._meta['anthropic/alwaysLoad'], true);

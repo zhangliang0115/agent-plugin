@@ -9,6 +9,7 @@ import {
   createSchemaV4,
   createSchemaV6,
   createSchemaV7,
+  createSchemaV8,
   SCHEMA_VERSION,
 } from './schema.ts';
 
@@ -85,6 +86,10 @@ export function migrate(db: DatabaseSync): number {
     if (current < 7) {
       applyV7(db);
       current = 7;
+    }
+    if (current < 8) {
+      applyV8(db);
+      current = 8;
     }
   });
   return current;
@@ -215,4 +220,11 @@ function applyV7(db: DatabaseSync): void {
   createSchemaV7(db);
   db.prepare("UPDATE meta SET value = '7' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 7');
+}
+
+/** Adds the script archive and library tables; tables only, no data move (10 §5). */
+function applyV8(db: DatabaseSync): void {
+  createSchemaV8(db);
+  db.prepare("UPDATE meta SET value = '8' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 8');
 }

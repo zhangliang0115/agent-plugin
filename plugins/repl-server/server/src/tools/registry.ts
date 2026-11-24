@@ -1,4 +1,4 @@
-/** Frozen MCP tool surface: the five tool definitions, argument validation and result shapes. @module */
+/** Frozen MCP tool surface: the seven tool definitions, argument validation and result shapes. @module */
 
 import type { CatalogTool, ScriptOutcome } from '../ports.ts';
 
@@ -7,7 +7,9 @@ export type ToolName =
   | 'search_tools'
   | 'describe_tools'
   | 'wait_tasks'
-  | 'report_problem';
+  | 'report_problem'
+  | 'save_script'
+  | 'search_scripts';
 
 export interface JsonSchemaProperty {
   readonly type: 'string' | 'integer' | 'boolean' | 'array' | 'object';
@@ -66,6 +68,8 @@ export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox ag
 - Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
 - Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
 - Pass async: true for long jobs, then collect the task with wait_tasks.
+- Instead of code, pass scriptId (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
+- Results carry a run="<id>" attribute; save_script turns a successful run into a reusable script.
 - visibleTools and excludeTags narrow this call only; they cannot widen access.
 - Results: official tool JSON is parsed automatically; MCP tools return { text, images?, documents? } with raw text, so call JSON.parse(result.text) when the payload is JSON.
 - Use the MCP tools search_tools/describe_tools (outside the script) to find canonical names and input schemas. Do not guess tool names.`;
@@ -82,17 +86,26 @@ const WAIT_TASKS_DESCRIPTION =
 const REPORT_PROBLEM_DESCRIPTION =
   'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
 
+const SAVE_SCRIPT_DESCRIPTION =
+  'Save a successful run_script execution as a reusable script, or update an existing one. Pass runId plus mode=exact to store that run\'s code as an active zero-argument script. Pass mode=parameterized with rewritten code and an inputSchema to store a draft; test it with run_script({ scriptId, scriptVersion, args }) and activate on success. With scriptId, name/description/tags update in place; code, inputSchema or mode changes need baseVersion and append a draft.';
+
+const SEARCH_SCRIPTS_DESCRIPTION =
+  'Find saved scripts in the global library. Returns each script\'s scriptId, active version, inputSchema and exampleArgs; execute one with run_script({ scriptId, args }). Only active scripts are returned. Use save_script to create or update.';
+
 const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
     code: { type: 'string' },
+    scriptId: { type: 'string' },
+    scriptVersion: { type: 'integer', minimum: 1 },
+    args: { type: 'object' },
+    activateOnSuccess: { type: 'boolean' },
     timeout: { type: 'integer', minimum: 1 },
     async: { type: 'boolean', default: false },
     workspace: { type: 'string' },
     visibleTools: { type: 'array', items: { type: 'string' } },
     excludeTags: { type: 'array', items: { type: 'string' } },
   },
-  required: ['code'],
   additionalProperties: false,
 });
 
@@ -140,13 +153,43 @@ export const REPORT_PROBLEM_SCHEMA: ToolInputSchema = deepFreeze({
   additionalProperties: false,
 });
 
+const SAVE_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
+  type: 'object',
+  properties: {
+    runId: { type: 'string' },
+    scriptId: { type: 'string' },
+    baseVersion: { type: 'integer', minimum: 1 },
+    mode: { type: 'string', enum: ['exact', 'parameterized'] },
+    name: { type: 'string', minLength: 1, maxLength: 120 },
+    description: { type: 'string', minLength: 1, maxLength: 2000 },
+    tags: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+    code: { type: 'string' },
+    inputSchema: { type: 'object' },
+    exampleArgs: { type: 'object' },
+    changelog: { type: 'string', maxLength: 1000 },
+  },
+  additionalProperties: false,
+});
+
+const SEARCH_SCRIPTS_SCHEMA: ToolInputSchema = deepFreeze({
+  type: 'object',
+  properties: {
+    query: { type: 'string', maxLength: 200 },
+    tags: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+    limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 },
+  },
+  additionalProperties: false,
+});
+
 /**
  * `tools/list` order is frozen: run_script, search_tools, describe_tools, wait_tasks,
- * report_problem. `run_script` carries no annotations because scripts write files and run
- * commands; marking it read-only would let plan mode through and duplicate a retried call
- * (docs/protocol.md §3.3). `report_problem` also carries none: it writes a row and does not
- * promise idempotency (06 §3.1). `wait_tasks` is read-only but **not** idempotent: it consumes
- * results, so a retried call answers `ALREADY_CONSUMED` instead of the same payload (01 §4.2).
+ * report_problem, save_script, search_scripts. `run_script` carries no annotations because
+ * scripts write files and run commands; marking it read-only would let plan mode through and
+ * duplicate a retried call (docs/protocol.md §3.3). `report_problem` also carries none: it
+ * writes a row and does not promise idempotency (06 §3.1). `wait_tasks` is read-only but
+ * **not** idempotent: it consumes results, so a retried call answers `ALREADY_CONSUMED`
+ * instead of the same payload (01 §4.2). `save_script` writes rows and carries none;
+ * `search_scripts` is a pure read (10 §7.1).
  */
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly ToolDefinition[]>([
   {
@@ -181,6 +224,19 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = deepFreeze<readonly T
     description: REPORT_PROBLEM_DESCRIPTION,
     inputSchema: REPORT_PROBLEM_SCHEMA,
     _meta: { 'anthropic/alwaysLoad': true },
+  },
+  {
+    name: 'save_script',
+    description: SAVE_SCRIPT_DESCRIPTION,
+    inputSchema: SAVE_SCRIPT_SCHEMA,
+    _meta: { 'anthropic/alwaysLoad': true },
+  },
+  {
+    name: 'search_scripts',
+    description: SEARCH_SCRIPTS_DESCRIPTION,
+    inputSchema: SEARCH_SCRIPTS_SCHEMA,
+    _meta: { 'anthropic/alwaysLoad': true },
+    annotations: { readOnlyHint: true, idempotentHint: true },
   },
 ]);
 

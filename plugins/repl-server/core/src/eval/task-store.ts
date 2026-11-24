@@ -15,7 +15,7 @@
 import { LIMITS } from '../constants.ts';
 import { ReplError } from '../errors.ts';
 import { newId } from '../ids.ts';
-import type { EvalTaskEvent, FinishedTaskStatus, StructuredToolError, TaskStatus } from '../types.ts';
+import type { EvalTaskEvent, EvalTaskMeta, FinishedTaskStatus, StructuredToolError, TaskStatus } from '../types.ts';
 
 /**
  * Process-wide retention floor for the task table. It is deliberately larger
@@ -67,7 +67,7 @@ export interface TaskConsumeResult {
 }
 
 /** Read-only view for `tasks/get`. `get` is idempotent and never consumes. */
-export interface TaskSnapshot {
+export interface TaskSnapshot extends EvalTaskMeta {
   taskId: string;
   evalId: number;
   /** Includes `working`; `wait`/`consume` events only carry terminal states. */
@@ -123,7 +123,7 @@ export class AlreadyConsumedError extends ReplError {
   }
 }
 
-interface TaskRecord {
+interface TaskRecord extends EvalTaskMeta {
   taskId: string;
   evalId: number;
   owner: string;
@@ -143,6 +143,18 @@ function assertOwner(owner: string): void {
   if (typeof owner !== 'string' || owner.length === 0) {
     throw new TypeError('owner must be a non-empty string (bindingId or mcpSessionId)');
   }
+}
+
+/** Copies only the defined execution-identity fields onto a snapshot or event. */
+function metaOf(record: EvalTaskMeta): EvalTaskMeta {
+  return {
+    ...(record.runId === undefined ? {} : { runId: record.runId }),
+    ...(record.scriptId === undefined ? {} : { scriptId: record.scriptId }),
+    ...(record.scriptVersion === undefined ? {} : { scriptVersion: record.scriptVersion }),
+    ...(record.scriptMode === undefined ? {} : { scriptMode: record.scriptMode }),
+    ...(record.argsPreview === undefined ? {} : { argsPreview: record.argsPreview }),
+    ...(record.entryMode === undefined ? {} : { entryMode: record.entryMode }),
+  };
 }
 
 function assertCapacity(name: string, value: number): void {
@@ -221,7 +233,7 @@ export class TaskStore {
    * the owner's slice or the whole table is full of live records and no
    * expired/consumed record can be evicted.
    */
-  create(evalId: number, owner: string): string {
+  create(evalId: number, owner: string, meta: EvalTaskMeta = {}): string {
     assertOwner(owner);
     if (!Number.isInteger(evalId) || evalId < 0) {
       throw new TypeError('evalId must be a non-negative integer');
@@ -239,6 +251,7 @@ export class TaskStore {
       updatedAt: now,
       expiresAt: now + this.ttlMs,
       consumed: false,
+      ...meta,
     };
     this.tasks.set(taskId, record);
     this.changed();
@@ -493,6 +506,7 @@ export class TaskStore {
       evalId: record.evalId,
       status: record.status,
       elapsedMs: record.elapsedMs ?? Math.max(0, this.clock.now() - record.createdAt),
+      ...metaOf(record),
     };
     if (record.result !== undefined) event.result = record.result;
     if (record.stdout !== undefined) event.stdout = record.stdout;
@@ -510,6 +524,7 @@ export class TaskStore {
       updatedAt: record.updatedAt,
       expiresAt: record.expiresAt,
       consumed: record.consumed,
+      ...metaOf(record),
     };
     if (record.result !== undefined) snapshot.result = record.result;
     if (record.stdout !== undefined) snapshot.stdout = record.stdout;

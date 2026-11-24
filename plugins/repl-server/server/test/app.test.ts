@@ -13,7 +13,7 @@ import type { Catalog, ExecutionGateway } from '../src/ports.ts';
 
 const gateway: ExecutionGateway = {
   runScript: async () => ({ content: '<repl-output eval="1"></repl-output>', isError: false }),
-  dispatchScript: async () => ({ taskId: 't_test', evalId: 1 }),
+  dispatchScript: async () => ({ taskId: 't_test', evalId: 1, runId: 'run_test' }),
   waitTasks: async () => ({ ok: true, events: [], pending: 0 }),
   getTask: async () => null,
   cancelTask: async () => false,

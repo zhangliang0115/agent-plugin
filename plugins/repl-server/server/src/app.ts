@@ -9,6 +9,7 @@ import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
 import type { ReportService } from './reports/service.ts';
 import type { TransportSessionRegistry } from './sessions/transport.ts';
 import type { McpTaskStore } from './tasks/mcp-tasks.ts';
+import type { ScriptService } from './scripts/service.ts';
 import { VERSION } from '@zhangliang0115/repl-server-core';
 
 export interface McpContext {
@@ -22,6 +23,10 @@ export interface McpContext {
   requestId: string | number | null;
   /** Present when the report pipeline is wired; `report_problem` needs it. */
   reports?: ReportService;
+  /** Present when the script library is wired; save_script/search_scripts need it. */
+  scripts?: ScriptService;
+  /** Audit sink for tool events outside an eval. */
+  audit?: (event: Record<string, unknown> & { event: string }) => void;
 }
 
 export interface AppOptions {
@@ -35,6 +40,10 @@ export interface AppOptions {
   dispatcher: JsonRpcDispatcher<McpContext>;
   /** Report service for the `report_problem` tool. */
   reports?: ReportService;
+  /** Script library for `save_script` / `search_scripts` and scriptId runs. */
+  scripts?: ScriptService;
+  /** Audit sink for top-level tool events that have no eval (e.g. `script_saved`). */
+  audit?: (event: Record<string, unknown> & { event: string }) => void;
   /** Returns true when the admin layer wrote the response. */
   admin?: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
   /** Protocol-frame audit hooks (`summary`/`full` decided by the writer). */
@@ -261,6 +270,8 @@ export function createApp(options: AppOptions): Server {
         requestId:
           typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,
         ...(options.reports === undefined ? {} : { reports: options.reports }),
+        ...(options.scripts === undefined ? {} : { scripts: options.scripts }),
+        ...(options.audit === undefined ? {} : { audit: options.audit }),
       };
 
       const started = Date.now();

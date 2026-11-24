@@ -36,7 +36,7 @@ function failure(tool: string, input: unknown): string {
   return result.message;
 }
 
-test('tools/list exposes the five tools in the frozen order', () => {
+test('tools/list exposes the seven tools in the frozen order', () => {
   const names = listTools().map((tool) => tool.name);
   assert.deepEqual(names, [
     'run_script',
@@ -44,18 +44,21 @@ test('tools/list exposes the five tools in the frozen order', () => {
     'describe_tools',
     'wait_tasks',
     'report_problem',
+    'save_script',
+    'search_scripts',
   ]);
   assert.deepEqual([...TOOL_ORDER], names);
 });
 
-test('every tool is alwaysLoad and only run_script and report_problem lack annotations', () => {
+test('every tool is alwaysLoad and only run_script, report_problem and save_script lack annotations', () => {
   for (const tool of listTools()) {
     assert.equal(tool._meta['anthropic/alwaysLoad'], true);
   }
   const byName = new Map(listTools().map((tool) => [tool.name, tool]));
   assert.equal(byName.get('run_script')?.annotations, undefined);
   assert.equal(byName.get('report_problem')?.annotations, undefined);
-  for (const name of ['search_tools', 'describe_tools'] as const) {
+  assert.equal(byName.get('save_script')?.annotations, undefined);
+  for (const name of ['search_tools', 'describe_tools', 'search_scripts'] as const) {
     assert.deepEqual(byName.get(name)?.annotations, {
       readOnlyHint: true,
       idempotentHint: true,
@@ -82,13 +85,16 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     type: 'object',
     properties: {
       code: { type: 'string' },
+      scriptId: { type: 'string' },
+      scriptVersion: { type: 'integer', minimum: 1 },
+      args: { type: 'object' },
+      activateOnSuccess: { type: 'boolean' },
       timeout: { type: 'integer', minimum: 1 },
       async: { type: 'boolean', default: false },
       workspace: { type: 'string' },
       visibleTools: { type: 'array', items: { type: 'string' } },
       excludeTags: { type: 'array', items: { type: 'string' } },
     },
-    required: ['code'],
     additionalProperties: false,
   });
   assert.deepEqual(getToolDefinition('search_tools')?.inputSchema, {
@@ -130,6 +136,32 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     required: ['title', 'detail', 'severity'],
     additionalProperties: false,
   });
+  assert.deepEqual(getToolDefinition('save_script')?.inputSchema, {
+    type: 'object',
+    properties: {
+      runId: { type: 'string' },
+      scriptId: { type: 'string' },
+      baseVersion: { type: 'integer', minimum: 1 },
+      mode: { type: 'string', enum: ['exact', 'parameterized'] },
+      name: { type: 'string', minLength: 1, maxLength: 120 },
+      description: { type: 'string', minLength: 1, maxLength: 2000 },
+      tags: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+      code: { type: 'string' },
+      inputSchema: { type: 'object' },
+      exampleArgs: { type: 'object' },
+      changelog: { type: 'string', maxLength: 1000 },
+    },
+    additionalProperties: false,
+  });
+  assert.deepEqual(getToolDefinition('search_scripts')?.inputSchema, {
+    type: 'object',
+    properties: {
+      query: { type: 'string', maxLength: 200 },
+      tags: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+      limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 },
+    },
+    additionalProperties: false,
+  });
 });
 
 test('the published tool surface cannot be mutated', () => {
@@ -147,7 +179,7 @@ test('the published tool surface cannot be mutated', () => {
 });
 
 test('validateToolArguments enforces required fields, types and additionalProperties', () => {
-  assert.match(failure('run_script', {}), /code is required/);
+  assert.equal(validateToolArguments('run_script', {}).ok, true, 'code/scriptId are checked by the handler');
   assert.match(failure('run_script', null), /must be an object/);
   assert.match(failure('run_script', []), /must be an object/);
   assert.match(failure('run_script', { code: 3 }), /code must be a string/);

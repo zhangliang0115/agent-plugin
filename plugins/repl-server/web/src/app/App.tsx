@@ -5,6 +5,7 @@ import {
   ApartmentOutlined,
   ApiOutlined,
   AppstoreOutlined,
+  CodeOutlined,
   CompassOutlined,
   DashboardOutlined,
   FileSearchOutlined,
@@ -33,6 +34,7 @@ import { RequestsPage } from './pages/RequestsPage.tsx';
 import { ReportsPage } from './pages/ReportsPage.tsx';
 import { ServersPage } from './pages/ServersPage.tsx';
 import { ToolsPage } from './pages/ToolsPage.tsx';
+import { ScriptsPage } from './pages/ScriptsPage.tsx';
 import { ClientsPage } from './pages/ClientsPage.tsx';
 import { SecretsPage } from './pages/SecretsPage.tsx';
 import { TagsPage } from './pages/TagsPage.tsx';
@@ -48,6 +50,7 @@ const THEME_KEY = 'repl-server.admin.theme';
 const TAB_ICONS: Record<ManageTab, React.ReactNode> = {
   servers: <ClusterOutlined />,
   tools: <ToolOutlined />,
+  scripts: <CodeOutlined />,
   clients: <ApiOutlined />,
   secrets: <KeyOutlined />,
   tags: <TagsOutlined />,
@@ -254,6 +257,8 @@ function Page({ route }: { route: RouteState }): React.ReactElement {
       return <ServersPage />;
     case 'tools':
       return <ToolsPage serverId={route.server} />;
+    case 'scripts':
+      return <ScriptsPage />;
     case 'clients':
       return <ClientsPage />;
     case 'secrets':

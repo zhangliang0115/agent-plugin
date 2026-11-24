@@ -73,11 +73,15 @@ export interface AuditSubjectEvent {
   method?: unknown;
   kind?: unknown;
   server?: unknown;
+  scriptId?: unknown;
+  scriptName?: unknown;
   [key: string]: unknown;
 }
 
-/** Tool for calls; the Chinese `kind` for `ai_run`; the event name as the last resort. */
+/** Script name or id first (script-mode evals), then tool/kind/method, then the event name. */
 export function eventSubject(event: AuditSubjectEvent): string {
+  const scriptId = text(event['scriptId']);
+  if (scriptId !== null) return text(event['scriptName']) ?? scriptId;
   const kind = text(event['kind']);
   if (event['event'] === 'ai_run' && kind !== null) return aiRunKindLabel(kind);
   return (

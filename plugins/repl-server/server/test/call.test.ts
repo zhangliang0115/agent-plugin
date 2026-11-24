@@ -85,7 +85,11 @@ class FakeGateway implements ExecutionGateway {
   };
   runError: unknown = null;
   dispatchError: unknown = null;
-  dispatched: { taskId: string; evalId: number } = { taskId: 'ev_1', evalId: 7 };
+  dispatched: { taskId: string; evalId: number; runId: string } = {
+    taskId: 'ev_1',
+    evalId: 7,
+    runId: 'run_1',
+  };
   waitResult: unknown = { ok: true, timedOut: false, events: [], pending: 0 };
   waitError: unknown = null;
 
@@ -95,7 +99,7 @@ class FakeGateway implements ExecutionGateway {
     return this.runOutcome;
   }
 
-  async dispatchScript(request: ScriptRequest): Promise<{ taskId: string; evalId: number }> {
+  async dispatchScript(request: ScriptRequest): Promise<{ taskId: string; evalId: number; runId: string }> {
     this.dispatchCalls.push(request);
     if (this.dispatchError !== null) throw this.dispatchError;
     return this.dispatched;
@@ -234,7 +238,7 @@ test('argument validation failures are tool-layer errors', async () => {
   const h = harness();
   const missing = asCallResult(await callTool('run_script', {}, h.ctx));
   assert.equal(missing.isError, true);
-  assert.match(textOf(missing), /<error>INVALID_ARGUMENT: run_script\.code is required/);
+  assert.match(textOf(missing), /<error>INVALID_ARGUMENT: exactly one of code or scriptId is required/);
 
   const extra = asCallResult(await callTool('run_script', { code: 'x', nope: 1 }, h.ctx));
   assert.equal(extra.isError, true);
@@ -248,7 +252,7 @@ test('argument validation failures are tool-layer errors', async () => {
 
 test('async: true always returns a normal result with an evalTaskId', async () => {
   const h = harness({ tasksDeclared: true });
-  h.gateway.dispatched = { taskId: 'ev_42', evalId: 12 };
+  h.gateway.dispatched = { taskId: 'ev_42', evalId: 12, runId: 'run_42' };
 
   const result = asCallResult(
     await callTool('run_script', { code: 'x', async: true, timeout: 5000 }, h.ctx),
@@ -258,7 +262,7 @@ test('async: true always returns a normal result with an evalTaskId', async () =
     content: [
       {
         type: 'text',
-        text: '<repl-output eval="12" async="true" task="ev_42"></repl-output>',
+        text: '<repl-output eval="12" run="run_42" async="true" task="ev_42"></repl-output>',
       },
     ],
     isError: false,
@@ -280,7 +284,7 @@ test('async: true without timeout has no deadline', async () => {
 
 test('a declaring client gets a CreateTaskResult above 30000 ms', async () => {
   const h = harness({ tasksDeclared: true });
-  h.gateway.dispatched = { taskId: 'ev_9', evalId: 4 };
+  h.gateway.dispatched = { taskId: 'ev_9', evalId: 4, runId: 'run_9' };
 
   const result = await callTool('run_script', { code: 'x', timeout: 35_000 }, h.ctx);
   assert.equal(isCreateTaskResult(result), true);

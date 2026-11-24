@@ -12,7 +12,7 @@
  *    green if `/logs/payload` were deleted. Roots that the deep pass can see are now
  *    compared path-by-path in both directions.
  *
- * Field-level shapes stay manual; §10 of the doc says so. An explicit `PLANNED` list
+ * Field-level shapes stay manual; §11 of the doc says so. An explicit `PLANNED` list
  * covers the one endpoint the design specifies before the code does, so the guard stays
  * honest instead of being loosened.
  *

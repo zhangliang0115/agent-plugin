@@ -80,7 +80,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const first = openStateDb(file);
   try {
-    assert.equal(readUserVersion(first), 7);
+    assert.equal(readUserVersion(first), 8);
     assert.equal(count(first, 'SELECT count(*) AS n FROM servers'), 2);
     const seeds = first
       .prepare('SELECT id, transport, category FROM servers ORDER BY id')
@@ -102,7 +102,14 @@ test('migration creates the current schema once and seeds the fixed servers', (t
       .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
       .all()
       .map((row) => String(row['name']));
-    assert.deepEqual(triggers, ['tools_ad', 'tools_ai', 'tools_au']);
+    assert.deepEqual(triggers, [
+      'scripts_ad',
+      'scripts_ai',
+      'scripts_au',
+      'tools_ad',
+      'tools_ai',
+      'tools_au',
+    ]);
     assert.ok(first.prepare("SELECT name FROM sqlite_master WHERE name = 'tools_fts'").get());
     assert.equal(first.prepare('PRAGMA journal_mode').get()?.['journal_mode'], 'wal');
     assert.equal(first.prepare('PRAGMA foreign_keys').get()?.['foreign_keys'], 1);
@@ -114,7 +121,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const second = openStateDb(file);
   try {
-    assert.equal(readUserVersion(second), 7);
+    assert.equal(readUserVersion(second), 8);
     assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2);
     assert.equal(
       count(second, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"),
@@ -146,7 +153,7 @@ test('V3 backfills untouched seed rows and preserves edited ones', (t) => {
 
   const upgraded = openStateDb(file);
   try {
-    assert.equal(readUserVersion(upgraded), 7);
+    assert.equal(readUserVersion(upgraded), 8);
     const official = upgraded
       .prepare("SELECT label, category, tags_json FROM servers WHERE id = '__official__'")
       .get();

@@ -44,7 +44,7 @@ class FakeGateway implements ExecutionGateway {
     throw new Error('runScript is not used by the tasks layer');
   }
 
-  async dispatchScript(): Promise<{ taskId: string; evalId: number }> {
+  async dispatchScript(): Promise<{ taskId: string; evalId: number; runId: string }> {
     throw new Error('dispatchScript is not used by the tasks layer');
   }
 

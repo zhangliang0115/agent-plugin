@@ -98,6 +98,8 @@ export interface AuditFilterInput {
   methods?: string[];
   /** Eval correlation id shared by `eval_start`/`eval_end`/tool events. */
   runId?: string;
+  /** Saved script that produced an eval (`scriptId` on eval/dispatch/saved events). */
+  scriptId?: string;
 }
 
 /** Normalized filter; timestamps are epoch milliseconds. */
@@ -128,6 +130,7 @@ export interface AuditFilter {
   method?: string;
   methods?: string[];
   runId?: string;
+  scriptId?: string;
 }
 
 function parseTimestampValue(value: string | number | Date): number {
@@ -232,6 +235,8 @@ export function normalizeFilter(input: AuditFilterInput = {}): AuditFilter {
   setListFilter(filter, 'method', 'methods', combinedList(input.method, input.methods));
   const runId = optionalText(input.runId);
   if (runId !== undefined) filter.runId = runId;
+  const scriptId = optionalText(input.scriptId);
+  if (scriptId !== undefined) filter.scriptId = scriptId;
   if (input.id !== undefined) {
     const id = String(input.id).trim();
     if (id !== '') filter.id = id;
@@ -303,6 +308,7 @@ export function parseAuditQueryParams(params: URLSearchParams): AuditFilter {
   assign('id', firstParam(params, 'id'));
   assign('method', listParam(params, 'method'));
   assign('runId', firstParam(params, 'runId'));
+  assign('scriptId', firstParam(params, 'scriptId'));
   const events = params.getAll('event');
   if (events.length > 0) input.event = events;
   return normalizeFilter(input);
@@ -618,6 +624,7 @@ export function matchesFilter(event: AuditEvent, filter: AuditFilter): boolean {
     return false;
   }
   if (filter.runId !== undefined && event.runId !== filter.runId) return false;
+  if (filter.scriptId !== undefined && event.scriptId !== filter.scriptId) return false;
   return true;
 }
 

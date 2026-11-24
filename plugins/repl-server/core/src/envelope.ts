@@ -2,6 +2,8 @@
 
 export interface EnvelopeParts {
   evalId: number;
+  /** Execution id; rendered as `run="..."`. */
+  runId?: string;
   log?: string;
   result?: string;
   error?: string;
@@ -24,6 +26,7 @@ function escapeAttr(text: string): string {
 /** Builds `<repl-output>` with the optional attributes frozen in docs/protocol.md. */
 export function renderEnvelope(parts: EnvelopeParts): string {
   const attrs: string[] = [`eval="${parts.evalId}"`];
+  if (parts.runId !== undefined) attrs.push(`run="${escapeAttr(parts.runId)}"`);
   if (parts.async === true) attrs.push('async="true"');
   if (parts.evalTaskId !== undefined) attrs.push(`task="${escapeAttr(parts.evalTaskId)}"`);
   if (parts.reset === true) attrs.push('reset="1"');

@@ -30,7 +30,9 @@ import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
 import { JsonView } from '../components/JsonView.tsx';
 import { PayloadViewer } from '../components/PayloadViewer.tsx';
+import { ScriptInfoCard } from '../components/ScriptInfoCard.tsx';
 import { payloadView } from '../../lib/payload-view.ts';
+import { scriptInfoFromEvent } from '../../lib/script-info.ts';
 import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
 import {
   aiRunKindLabel,
@@ -107,6 +109,8 @@ interface AuditFilters {
   servers: string[];
   statuses: string[];
   minMs: string;
+  /** Exact `scriptId` on script-mode eval events; empty means no filter. */
+  scriptId: string;
   live: boolean;
   /** Preset minutes as a string (`'60'`); empty means a custom from/to range. */
   range: string;
@@ -1018,6 +1022,15 @@ export function LogsPage(): React.ReactElement {
                 onPressEnter={applyDraft}
               />
             </Field>
+            <Field label="脚本 ID">
+              <Input
+                value={draft.scriptId}
+                placeholder="s_..."
+                style={{ width: 200 }}
+                onChange={(event) => setDraft({ ...draft, scriptId: event.target.value })}
+                onPressEnter={applyDraft}
+              />
+            </Field>
             <Field label="实时">
               <Switch
                 checked={draft.live}
@@ -1183,6 +1196,8 @@ export function LogsPage(): React.ReactElement {
                 ]}
               />
             </Card>
+
+            <ScriptInfoCard info={scriptInfoFromEvent(selected)} />
 
             <EventIO event={selected} />
           </Space>
@@ -1358,6 +1373,7 @@ function defaultAuditFilters(now: number = Date.now()): AuditFilters {
     servers: [],
     statuses: [],
     minMs: '',
+    scriptId: '',
     live: true,
     range: DEFAULT_RANGE,
   };
@@ -1420,6 +1436,7 @@ function readFiltersFromHash(): AuditFilters {
       STATUS_OPTIONS.some((option) => option.value === value),
     ),
     minMs: pickMinMs(params.get('minMs')),
+    scriptId: params.get('scriptId')?.trim() ?? '',
     live: params.get('live') !== '0',
     range: rangeValue,
   };
@@ -1439,6 +1456,7 @@ function writeFiltersToHash(filters: AuditFilters): void {
   setListParam(params, 'server', filters.servers);
   setListParam(params, 'status', filters.statuses);
   if (filters.minMs !== '') params.set('minMs', filters.minMs);
+  if (filters.scriptId !== '') params.set('scriptId', filters.scriptId);
   params.set('live', filters.live ? '1' : '0');
   const next = `#/logs?${params.toString()}`;
   if (window.location.hash === next) return;
@@ -1497,6 +1515,7 @@ function filterQuery(filters: AuditFilters): Record<string, string | number | un
     server: joinFilter(filters.servers),
     status: joinFilter(filters.statuses),
     minMs: emptyToUndefined(filters.minMs),
+    scriptId: emptyToUndefined(filters.scriptId),
   };
 }
 
@@ -1691,6 +1710,8 @@ function matchesFilters(event: AuditEvent, filters: AuditFilters): boolean {
     const duration = eventDuration(event);
     if (!Number.isFinite(minimum) || duration === null || duration < minimum) return false;
   }
+  const scriptId = filters.scriptId.trim();
+  if (scriptId !== '' && eventText(event, 'scriptId') !== scriptId) return false;
   return true;
 }
 

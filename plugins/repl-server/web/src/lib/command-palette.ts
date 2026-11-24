@@ -21,6 +21,7 @@ export const PALETTE_PAGES: readonly PaletteItem[] = [
   { kind: '页面', label: '报告', hint: '监控', path: '/reports' },
   { kind: '页面', label: '服务端', hint: '系统管理', path: '/manage', tab: 'servers' },
   { kind: '页面', label: '工具', hint: '系统管理', path: '/manage', tab: 'tools' },
+  { kind: '页面', label: '脚本库', hint: '系统管理', path: '/manage', tab: 'scripts' },
   { kind: '页面', label: '客户端', hint: '系统管理', path: '/manage', tab: 'clients' },
   { kind: '页面', label: '密钥', hint: '系统管理', path: '/manage', tab: 'secrets' },
   { kind: '页面', label: '标签', hint: '系统管理', path: '/manage', tab: 'tags' },

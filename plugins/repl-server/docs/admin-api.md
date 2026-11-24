@@ -85,6 +85,20 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | PUT | `/alerts/config` | 改告警配置；可写/清除 webhook | 同步 |
 | POST | `/alerts/test` | 发一条测试消息 | 同步，排入同一发送队列；最长约 10.5s + 队列/冷却等待 |
 | POST | `/alerts/preview` | 渲染一条合成报告的企业微信消息 | 同步，不发网络 |
+| GET | `/scripts` | 脚本列表，按状态/关键词过滤、游标分页 | 同步 |
+| GET | `/scripts/:id` | 脚本元数据与 active 版本号 | 同步 |
+| PATCH | `/scripts/:id` | 改名称/描述/标签/状态 | 同步 |
+| GET | `/scripts/:id/versions` | 版本列表（不含 code） | 同步 |
+| GET | `/scripts/:id/versions/:version` | 版本详情（含 code/inputSchema/exampleArgs） | 同步 |
+| POST | `/scripts/:id/versions` | 管理端编辑生成 draft（mode 固定；exact 需 `runId`） | 同步，201 |
+| POST | `/scripts/:id/versions/:version/activate` | 激活或回滚到指定版本 | 同步 |
+| GET | `/scripts/:id/versions/:version/diff` | 与 `baseVersion` 的逐行 diff | 同步 |
+| GET | `/scripts/:id/runs` | 该脚本的执行历史，游标分页 | 同步 |
+| POST | `/scripts/:id/test` | 管理端同步测试（`purpose='test'`） | 同步 |
+| GET | `/script-candidates` | 候选列表，按状态过滤、游标分页 | 同步 |
+| POST | `/script-candidates/scan` | 扫描成功代码执行，聚类并生成/刷新候选 | 同步，AI 建议受 `ai.timeoutMs` 限制 |
+| POST | `/script-candidates/:id/accept` | 接受候选，生成 draft 脚本 | 同步 |
+| POST | `/script-candidates/:id/reject` | 拒绝候选 | 同步 |
 
 **资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 7 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
 
@@ -217,13 +231,15 @@ data: {"id":"op_...","state":"ok"}
 
 ```
 from, to          时间范围（UTC）
-event             事件类型，可多选；含 `ai_run`（管理端 AI 调用）
+event             事件类型，可多选；含 `ai_run`（管理端 AI 调用）、`script_saved`（save_script 成功/失败）
 clientName        客户端自报名称，精确匹配；可多选
 clientVersion     客户端自报版本，精确匹配；可多选
 client            旧参数：按 `name/version` 原始标签精确匹配，保留兼容
 binding           token 身份；可多选
 exec, evalId      执行会话 / eval；只给 `evalId` 不给 `exec` 时返回 400，因为它在会话内才唯一
 taskId            异步任务；匹配事件里的 `evalTaskId`
+runId             一次执行；匹配事件里的 `runId`
+scriptId          保存脚本；匹配事件里的 `scriptId`（`eval_start` / `eval_end` / `async_dispatch` / `script_saved`）
 tool, server      工具与来源；可多选（`server` 同时匹配 `serverId`）
 method            协议方法；可多选
 status            ok | error | timeout；可多选。按事件类型映射：`tool_result.ok=false` → error；`eval_end.outcome=timeout` → timeout；`eval_end.outcome=error` / `worker_dead` → error；`eval_end.outcome=cancelled` → ok（取消不算失败）；`ai_run.outcome=error` → error，其余 → ok；其他事件默认 ok
@@ -453,10 +469,111 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `INVALID_SEVERITY` / `UNKNOWN_EVENT` / `WEBHOOK_URL_INVALID` | 422 | PUT 告警配置 |
 | `INVALID_TAGS` | 422 | PUT `/tags`：条目格式、重复 key、动作键或系统托管项被改动 |
 | `TAG_POLICY_VIOLATION` | 422 | 创建/PATCH server、写工具标签、AI 标注 apply：违反 server 0–2 / 工具叠加 1–4 / 不重复 / 禁动作键 |
+| `SCRIPT_NOT_FOUND` / `SCRIPT_VERSION_NOT_FOUND` | 404 | 脚本库端点 |
+| `SCRIPT_RUN_NOT_FOUND` / `SCRIPT_RUN_EXPIRED` | 404 | 脚本库来源执行 |
+| `SCRIPT_NAME_CONFLICT` / `SCRIPT_MODE_CONFLICT` / `SCRIPT_VERSION_CONFLICT` | 409 | 脚本库写端点 |
+| `SCRIPT_VERSION_NOT_DRAFT` / `SCRIPT_DISABLED` / `SCRIPT_ARCHIVED` / `SCRIPT_NOT_ACTIVE` / `SCRIPT_RUN_NOT_SUCCESSFUL` | 409 | 脚本库生命周期 |
+| `SCRIPT_ARGS_INVALID` / `SCRIPT_INPUT_SCHEMA_INVALID` / `SCRIPT_CODE_INVALID` | 422 | 脚本库写端点 |
+| `SCRIPT_FORBIDDEN` | 403 | 非 owner 修改脚本，或非 owner/admin 测试 draft（管理端请求视为 admin，不触发） |
+| `SCRIPT_CANDIDATE_NOT_FOUND` | 404 | 候选审核端点 |
+| `SCRIPT_CANDIDATE_ALREADY_REVIEWED` | 409 | 候选已接受或已拒绝 |
+| `SCRIPT_CANDIDATE_INCOMPLETE` | 422 | 候选没有建议名称/描述，accept 请求体也未补齐 |
 | `WEBHOOK_NOT_CONFIGURED` | 422 | 测试端点 |
 | `ALERT_TEST_THROTTLED` | 429 | 测试端点 |
 
-## 10. 校验覆盖边界
+## 10. 脚本库端点
+
+脚本库是全局命名空间：`scripts` 没有 workspace 字段，名称全局唯一；`script_runs.workspace` 只记录执行上下文。最小 ACL 以 `scripts.created_by` 为 owner：agent 只能修改/激活/归档自己创建的脚本，admin 管理全部；所有 agent 可搜索和执行 active 脚本，draft 测试限 owner/admin。管理端请求一律视为 admin，不做 owner 限制。保存与版本响应带密钥扫描 `warnings`（只告警，不阻断、不改写代码）：`{ field, kind, severity, count }`，不含匹配原文。`save_script` 成功与失败都会写 `script_saved` 审计事件（`ok`、`scriptId`、`version`、`mode`、`name`、`sourceRunId`、`error`；成功事件带 `warnings`）。
+
+#### `GET /admin/api/scripts`
+
+查询参数：
+
+| 参数 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `status` | `draft` / `active` / `disabled` / `archived` | — | 过滤 |
+| `q` | string | — | 在 name/description/tags 上 LIKE |
+| `limit` | integer 1..200 | 50 | 页大小 |
+| `cursor` | string | — | 上一页的 `nextCursor` |
+
+响应 `{ "items": [script], "nextCursor": string | null }`。`script` 含 `scriptId`、`name`、`description`、`tags`、`mode`、`activeVersion`、`status`、`createdBy`、`createdAt`、`updatedAt`、`sourceRunId`、`useCount`、`lastUsedAt`，以及 `script_runs` 聚合的 `runCount`、`successCount`、`successRate`（0–1，四位小数；无执行时为 0）。排序固定 `updated_at DESC, script_id DESC`；游标是 keyset（`{v:1, updatedAt, scriptId}` 的 base64）。
+
+#### `GET /admin/api/scripts/:id`
+
+`200 { "script": {...} }`，字段同列表项（含执行统计）；不存在 `404 SCRIPT_NOT_FOUND`。
+
+#### `PATCH /admin/api/scripts/:id`
+
+```jsonc
+{ "name": "new-name", "description": "…", "tags": ["ops"], "status": "disabled" }
+```
+
+字段全部可选，至少给一个；未知字段 `400 UNKNOWN_FIELD`。`status=active` 要求脚本已有 active 版本，否则 `422 INVALID_FIELD`。重名 `409 SCRIPT_NAME_CONFLICT`。
+
+#### `GET /admin/api/scripts/:id/versions`
+
+`200 { "items": [version] }`，按版本号升序；列表项不含 `code`（含 `codeBytes` / `codeSha256` 便于判断变化）。
+
+#### `GET /admin/api/scripts/:id/versions/:version`
+
+`200 { "version": {...}, "warnings": [...] }`，含 `code`、`inputSchema`、`exampleArgs`、`status`、`createdBy`、`sourceRunId`、`verifiedRunId`、`activatedAt`。管理端编辑仍可看到原文 `code`；`warnings` 是对该版本 `code` 与 `exampleArgs` 的密钥扫描告警，仅用于页面提示。
+
+#### `POST /admin/api/scripts/:id/versions`
+
+```jsonc
+{ "mode": "parameterized", "runId": "run_…", "code": "return args.x;", "inputSchema": {...},
+  "exampleArgs": { "x": 1 }, "changelog": "add one" }
+```
+
+生成新 draft 版本，`createdBy` 记为 `admin`；`mode` 省略时沿用脚本当前模式，改变模式返回 `409 SCRIPT_MODE_CONFLICT`。`runId` 可选，可空但提供时必须是一次成功、未过期的执行，写入 `sourceRunId`。`exact` 脚本必须给 `runId` 且不能提交 `code`：源码取自该执行的 `code`，`sourceRunId` 与 `verifiedRunId` 都记这个 run；`parameterized` 提交 `code` + `inputSchema`，`runId` 只记来源。校验规则与 `save_script` 相同：`inputSchema` 超出 P1 子集 `422 SCRIPT_INPUT_SCHEMA_INVALID`，代码语法错误或超过 1 MiB `422 SCRIPT_CODE_INVALID`。返回 `201 { "version": {...}, "warnings": [...] }`；`warnings` 与版本详情同一口径。
+
+#### `POST /admin/api/scripts/:id/versions/:version/activate`
+
+只激活已有成功测试记录的版本（`verifiedRunId` 非空；也可用于回滚到 superseded 版本）：目标版本变 active，旧 active 变 superseded，`scripts.active_version` 与 `status` 同步。未测试版本 `409 SCRIPT_VERSION_NOT_DRAFT`；目标不存在 `404 SCRIPT_VERSION_NOT_FOUND`，脚本或版本 archived `409 SCRIPT_ARCHIVED`。
+
+#### `GET /admin/api/scripts/:id/versions/:version/diff?baseVersion=n`
+
+返回 `{ "fromVersion": n, "toVersion": :version, "lines": [{"type": "same" | "add" | "del", "text": "…"}] }`。逐行 diff，公共前后缀不参与 LCS；`baseVersion` 必填且两个版本都必须存在，缺失 `400 INVALID_QUERY`，版本不存在 `404 SCRIPT_VERSION_NOT_FOUND`。
+
+#### `GET /admin/api/scripts/:id/runs`
+
+返回该脚本的执行历史（`script_runs` 中 `script_id = :id` 的行），固定 `created_at DESC, run_id DESC`，`limit` 1..200（默认 50），`cursor` 为 `{v:1, createdAt, runId}` 的 base64。行字段与 `script_runs` 一致（`runId`、`evalId`、`argsPreview`、`scriptMode`、`ok`、`error`、`durationMs`、`toolsUsed`、`purpose` 等），但不返回明文 `args` 和源码 `code`；`argsPreview` 是执行时写入的脱敏摘要（上限 512 字符），`codeBytes` / `codeSha256` 仅用于判断变化。源码仍可在版本详情（`GET /versions/:version`）查看，供管理员编辑。点开某行时复用现有请求详情，不另建详情页。
+
+#### `POST /admin/api/scripts/:id/test`
+
+```jsonc
+{ "version": 1, "args": { "x": 1 }, "activateOnSuccess": false }
+```
+
+字段全部可选；省略 `version` 用 active 版本（draft 脚本无 active 时 `409 SCRIPT_NOT_ACTIVE`），`args` 按版本 `inputSchema` 校验（`422 SCRIPT_ARGS_INVALID`）。管理端身份同步执行一次 `purpose='test'` 的 eval，不更新 `use_count`；`activateOnSuccess` 只接受 draft 版本（否则 `409 SCRIPT_VERSION_NOT_DRAFT`），成功时同一归档事务内激活。响应 `200 { "runId": string | null, "ok": boolean, "durationMs": number | null, "output": string, "error": string | null, "activated": boolean, "status": string, "secretWarnings": [...] }`：`output` 是 test 执行结果（不是 `script_runs` 行），`durationMs` / `error` 取自同一 `runId` 的归档行，`activated` 表示本次执行完成了激活，`status` 是目标版本执行后的状态；`secretWarnings` 是对测试 `args` 的密钥扫描汇总（仅提示，不阻断）。执行失败也是 200（`ok=false`），只有请求/生命周期错误走 4xx。
+
+**执行历史复用**：脚本执行仍是 `run_script` 的一次 eval，请求列表/过程/协议帧/事件全部复用；`eval_start` / `eval_end` / `async_dispatch` 带 `runId`、`entryTool`、`entryMode`、`scriptId`、`scriptVersion`、`scriptMode`、`argsBytes`、`argsPreview`，以及疑似密钥时的 `secretWarnings`（`field` / `kind` / `severity` / `count`）。事件里的 `argsPreview` 已脱敏；协议帧保留原始 `args`（已知风险）。
+
+### 脚本候选端点
+
+候选队列只服务人工审核：扫描不创建脚本，接受后才按 `save_script` 的同一套校验生成 **draft**，测试成功后才激活。
+
+#### `GET /admin/api/script-candidates`
+
+查询参数：`status`（`pending` / `accepted` / `rejected`，省略为全部）、`limit`（1..200，默认 50）、`cursor`（上一页的 `nextCursor`）。响应 `{ "items": [candidate], "nextCursor": string | null }`；排序固定 `created_at DESC, candidate_id DESC`，游标是 `{v:1, createdAt, candidateId}` 的 base64。`candidate` 含 `candidateId`、`createdAt`、`code`、`codeSha256`、`workspace`、`sourceRunIds`、`suggestedName`、`suggestedDescription`、`suggestedTags`、`suggestedInputSchema`、`suggestedCode`、`score`、`status`、`scriptId`、`reviewedAt`、`reviewedBy`。
+
+#### `POST /admin/api/script-candidates/scan`
+
+请求体可省略，或给 `{ "limit": 500 }`（1..2000，默认 500）。扫描 `script_runs` 中 `ok=1`、`entry_mode='code'`、`code` 非空且未过期的执行，按归一化后的代码形状（忽略格式、注释与字面量值）聚类，来源 `exec_id` 作为会话。按代表性代码的 `code_sha256` 去重：已有 `pending` 刷新 `sourceRunIds`/`score`/确定性建议；已有 `accepted` / `rejected` 不覆盖；其余插入新候选。
+
+配置了 AI 时会为每个待写入候选生成名称、描述、标签与参数化建议；AI 未启用、调用失败或输出不合法只写 `warnings`，确定性建议保留，扫描本身仍成功。响应 `{ "scanned", "created", "updated", "warnings": [...] }`；`scanned` 是本次参与分析的执行数。重复扫描同一批执行是幂等的（第二次 `created=0`）。
+
+#### `POST /admin/api/script-candidates/:id/accept`
+
+只接受 `pending` 候选，否则 `409 SCRIPT_CANDIDATE_ALREADY_REVIEWED`；不存在 `404 SCRIPT_CANDIDATE_NOT_FOUND`。请求体全部可选，可覆盖 `name`、`description`、`tags`、`code`、`inputSchema`、`exampleArgs`；未覆盖时用候选的建议值。候选同时有建议 `suggestedCode` 与 `suggestedInputSchema` 时用这对参数化建议，否则退回候选原始 `code` + 空 schema（`{"type":"object","properties":{}}`）。
+
+生成脚本固定为 `parameterized` **draft**，`createdBy` / `reviewedBy` 均为 `admin`，并执行与 `save_script` 相同的校验：名称全局唯一冲突 `409 SCRIPT_NAME_CONFLICT`，代码语法错误或超限 `422 SCRIPT_CODE_INVALID`，schema 超出 P1 子集 `422 SCRIPT_INPUT_SCHEMA_INVALID`，`exampleArgs` 不满足 schema `422 SCRIPT_ARGS_INVALID`。候选缺少建议名称/描述且请求体未补齐时 `422 SCRIPT_CANDIDATE_INCOMPLETE`。响应 `{ "candidate": candidate, "script": { scriptId, version, status, activeVersion, mode, warnings } }`；`warnings` 为该次保存的密钥扫描告警，接受不自动激活。
+
+#### `POST /admin/api/script-candidates/:id/reject`
+
+只处理 `pending` 候选，写 `status='rejected'` 与 `reviewedAt` / `reviewedBy='admin'`；重复拒绝 `409 SCRIPT_CANDIDATE_ALREADY_REVIEWED`。响应 `{ "candidate": candidate }`。
+
+## 11. 校验覆盖边界
 
 `doc-admin.ts` 分两层比对。
 

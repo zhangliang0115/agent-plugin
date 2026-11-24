@@ -278,6 +278,25 @@ test('matchesFilter and parseAuditQueryParams support the eval runId', () => {
   assert.equal(parseAuditQueryParams(new URLSearchParams('runId=run_1')).runId, 'run_1');
 });
 
+test('matchesFilter and parseAuditQueryParams support scriptId', () => {
+  const event = {
+    event: 'eval_end',
+    ts: new Date(DAY_18).toISOString(),
+    exec: 'es_1',
+    scriptId: 's_01JABCDEFGHJKMNPQRSTVWXYZ0',
+  };
+  assert.equal(
+    matchesFilter(event, normalizeFilter({ scriptId: 's_01JABCDEFGHJKMNPQRSTVWXYZ0' })),
+    true,
+  );
+  assert.equal(matchesFilter(event, normalizeFilter({ scriptId: 's_other' })), false);
+  assert.equal(
+    parseAuditQueryParams(new URLSearchParams('scriptId=s_01JABCDEFGHJKMNPQRSTVWXYZ0')).scriptId,
+    's_01JABCDEFGHJKMNPQRSTVWXYZ0',
+  );
+  assert.equal(parseAuditQueryParams(new URLSearchParams('scriptId=%20')).scriptId, undefined);
+});
+
 test('queryAudit finds ai_run events by status and serverId', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'repl-audit-ai-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

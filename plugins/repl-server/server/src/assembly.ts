@@ -18,6 +18,8 @@ import { createAdminConfigRoutes, operationStarterFromLauncher } from './admin/c
 import { createAdminReportsHandler } from './admin/reports.ts';
 import { createAdminAlertsHandler } from './admin/alerts.ts';
 import { createAdminAiHandler } from './admin/ai.ts';
+import { createAdminScriptsHandler } from './admin/scripts.ts';
+import { createAdminScriptCandidatesHandler } from './admin/script-candidates.ts';
 import { parseCreateServer } from './admin/servers.ts';
 import { createEventHub } from './admin/events.ts';
 import { createAdminSession } from './admin/session.ts';
@@ -32,7 +34,7 @@ import { createSessionPruner } from './serve/session-prune.ts';
 import { METRICS_PREFIX, createLayout } from './layout.ts';
 import { createAlertConfigStore } from './alerts/config-store.ts';
 import { createAlertDispatcher } from './alerts/dispatcher.ts';
-import { createAiService } from './ai/index.ts';
+import { createAiService, createAiRunner } from './ai/index.ts';
 import { type HostAllowlist } from './auth/tokens.ts';
 import { splitClientLabel } from './client-info.ts';
 import { createDbReportStore } from './reports/store.ts';
@@ -68,6 +70,9 @@ import { mcpClientFactory, mcpTransportFactory } from './pool/adapters/client.ts
 import { createServeRuntime } from './serve/runtime.ts';
 import { createOfficialToolsSync } from './serve/official-sync.ts';
 import { createServeCallTool } from './serve/adapter.ts';
+import { ScriptService } from './scripts/service.ts';
+import { ScriptCandidatesService } from './scripts/candidates.ts';
+import { createAiCandidateSuggester } from './scripts/candidate-suggester.ts';
 import { loadLocalTokens, stateDbPath } from './local-tokens.ts';
 import { createMethodTable } from './mcp/methods.ts';
 import { INSTRUCTIONS } from './mcp/discover.ts';
@@ -154,6 +159,9 @@ const SWEEP_INTERVAL_MS = 60_000;
 /** How often the oldest in-flight eval is checked against {@link STUCK_EVAL_WARN_MS}. */
 const EVAL_WATCHDOG_INTERVAL_MS = 60_000;
 
+/** `script_runs` retention sweep: boot plus at most once a day (design 10 §5.1). */
+const SCRIPT_RUN_PRUNE_INTERVAL_MS = 86_400_000;
+
 /**
  * Stops accepting connections and waits for the listener to close. Idle
  * keep-alive sockets are dropped first; a lingering request cannot hold
@@ -221,6 +229,19 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const db = openStateDb(stateDbPath(dataDir));
   migrate(db);
   applyBuiltinSeed(db, log);
+
+  const scripts = new ScriptService({ db, now: () => clock.now() });
+  try {
+    const pruned = scripts.pruneExpiredRuns();
+    if (pruned > 0) {
+      log(`pruned ${pruned} expired script run(s)`, { level: 'info', scope: 'scripts', pruned });
+    }
+  } catch (error) {
+    log(`script run retention failed: ${(error as Error).message}`, {
+      level: 'error',
+      scope: 'scripts',
+    });
+  }
 
   const eventsHub = createEventHub();
   const auditHub = createEventHub();
@@ -489,6 +510,12 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     audit: auditSink,
   });
 
+  const aiRunner = createAiRunner({
+    dataDir,
+    clock,
+    log,
+    bootId: ledgerBootId,
+  });
   aiService = createAiService({
     db,
     servers: serverStore,
@@ -498,12 +525,23 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     dataDir,
     parseCreateServer,
     log,
+    runner: aiRunner,
     bootId: ledgerBootId,
     onAiRun: (event) => {
       audit.recordTask({ ...event, ts: event.ts ?? new Date().toISOString() });
     },
   });
   const ai = aiService;
+
+  // P3 suggestions share the AI runner and settings; a failed or disabled AI
+  // only adds a scan warning and leaves the deterministic candidate intact.
+  const scriptCandidates = new ScriptCandidatesService({
+    db,
+    scripts,
+    suggester: createAiCandidateSuggester({ db, runner: aiRunner }),
+    now: () => clock.now(),
+    log,
+  });
 
   // Admin mutations feed the AI annotation pipeline; the AI service keeps its
   // own direct store for its create path, so hooks are added only here.
@@ -645,6 +683,18 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       // Only this execution session's serve handle is released; a sibling
       // session in the same workspace keeps its own process (design 03 §2.2).
       await serveRuntime.release(session.workspace, { execSessionId: session.id });
+    },
+    onScriptRun: (record) => {
+      const archived = scripts.archiveRun(record);
+      if (archived.activationSkipped !== undefined) {
+        log(
+          `script activation skipped for ${record.scriptId ?? '?'} v${record.scriptVersion ?? '?'}: current state ${archived.activationSkipped}`,
+          { level: 'warn', scope: 'scripts', runId: record.runId },
+        );
+      }
+      if (record.ok && record.entryMode === 'script' && record.purpose !== 'test' && record.scriptId) {
+        scripts.noteUsage(record.scriptId);
+      }
     },
   });
 
@@ -795,6 +845,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     createAdminAlertsHandler({ alerts: alertConfig, dispatcher: alertDispatcher }),
     createAdminDiscoveryHandler({ service: discoveryService }),
     createAdminAiHandler({ ai }),
+    createAdminScriptsHandler({ scripts, gateway }),
+    createAdminScriptCandidatesHandler({ candidates: scriptCandidates }),
     ...audit.handlers(),
   ];
 
@@ -983,6 +1035,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     tasks,
     dispatcher,
     reports,
+    scripts,
+    audit: (event) => {
+      audit.recordTask({ ...event, ts: new Date().toISOString() });
+    },
     log,
     onSessionActivity: (transportId, identity) => {
       sessionActivity.set(transportId, {
@@ -1022,6 +1078,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   let closePromise: Promise<void> | null = null;
   let activeSweep: Promise<IdleSweepResult | null> | null = null;
   let lastReportPruneAt = 0;
+  let lastScriptRunPruneAt = 0;
   const sweepNow = (): Promise<IdleSweepResult | null> => {
     if (closing || activeSweep !== null) return Promise.resolve(null);
     const run = (async (): Promise<IdleSweepResult | null> => {
@@ -1057,6 +1114,26 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
             log(`report retention failed: ${(error as Error).message}`, {
               level: 'error',
               scope: 'reports',
+            });
+          }
+        }
+        // Script archives expire after 30 days; a daily pass is enough and keeps
+        // this out of the audit retention budget (design 10 §5.1).
+        if (now - lastScriptRunPruneAt >= SCRIPT_RUN_PRUNE_INTERVAL_MS) {
+          lastScriptRunPruneAt = now;
+          try {
+            const deleted = scripts.pruneExpiredRuns();
+            if (deleted > 0) {
+              log(`pruned ${deleted} expired script run(s)`, {
+                level: 'info',
+                scope: 'scripts',
+                deleted,
+              });
+            }
+          } catch (error) {
+            log(`script run retention failed: ${(error as Error).message}`, {
+              level: 'error',
+              scope: 'scripts',
             });
           }
         }

@@ -185,7 +185,10 @@ test('run_script executes JavaScript end to end', async (t) => {
     result: { isError: boolean; content: Array<{ text: string }> };
   };
   assert.equal(body.result.isError, false);
-  assert.match(body.result.content[0]?.text ?? '', /<repl-output eval="\d+"><result>42<\/result><\/repl-output>/);
+  assert.match(
+    body.result.content[0]?.text ?? '',
+    /<repl-output eval="\d+" run="[0-9a-f-]+"><result>42<\/result><\/repl-output>/,
+  );
 });
 
 test('run_script reports the user line for a syntax error', async (t) => {
@@ -284,6 +287,8 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
     'describe_tools',
     'wait_tasks',
     'report_problem',
+    'save_script',
+    'search_scripts',
   ]);
 
   const search = await rpc(

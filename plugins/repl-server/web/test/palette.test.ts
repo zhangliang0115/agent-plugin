@@ -16,6 +16,7 @@ test('filterPaletteItems matches labels, hints and kind', () => {
   assert.deepEqual(filterPaletteItems(items, '系统管理').map((item) => item.label), [
     '服务端',
     '工具',
+    '脚本库',
     '客户端',
     '密钥',
     '标签',

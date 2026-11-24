@@ -46,6 +46,8 @@ import { resolveWorkspace, type WorkspaceFileSystem } from '../sessions/workspac
 import { canonicalToolName as catalogToolName } from '../tools/registry.ts';
 import { type CapacityLimits } from './capacity.ts';
 import { bashConcurrency } from './bash-classify.ts';
+import type { ArchiveRunOptions } from '../scripts/service.ts';
+import { redactSecrets, secretWarningsOf } from '../scripts/security/secrets.ts';
 import {
   ExecSessionRegistry,
   type ExecSession as ExecSessionRecord,
@@ -177,6 +179,11 @@ export interface ExecGatewayOptions {
   taskStore?: TaskStore;
   /** Structured log sink; defaults to `console.warn` for the few diagnostics here. */
   log?: LogFn;
+  /**
+   * Execution archive sink (design 10 §6.1). Called once per settled eval; a
+   * throw is logged and never changes the eval result.
+   */
+  onScriptRun?: (record: ArchiveRunOptions) => void;
 }
 
 /** The narrowing carried by one `run_script` call into the eval it starts. */
@@ -222,6 +229,8 @@ interface SessionRuntime {
   /** Correlation id of each running eval, stamped into its tool events. */
   readonly runIds: Map<number, string>;
   readonly media: Map<number, EvalMedia>;
+  /** Canonical tool names each eval called; archived as `tools_used_json`. */
+  readonly toolsUsed: Map<number, Set<string>>;
   /** Set once the idle sweep hibernated this runtime; reset when the next eval begins. */
   hibernated: boolean;
   /** Set once the idle sweep released this runtime's serve handle; reset with `hibernated`. */
@@ -263,6 +272,24 @@ function jsonBytes(value: unknown): number | undefined {
   try {
     const text = typeof value === 'string' ? value : JSON.stringify(value);
     return text === undefined ? undefined : Buffer.byteLength(text, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Script args summary shared by audit events, task views and `script_runs.args_preview`. */
+const SCRIPT_ARGS_PREVIEW_MAX = 512;
+
+/**
+ * Redaction runs before truncation so a cut never leaves a partial credential
+ * that the scanner can no longer recognize. The full `args_json` stays raw.
+ */
+function argsPreviewOf(args: Record<string, unknown> | undefined): string | undefined {
+  if (args === undefined) return undefined;
+  try {
+    const json = JSON.stringify(args);
+    if (json === undefined) return undefined;
+    return redactSecrets(json).slice(0, SCRIPT_ARGS_PREVIEW_MAX);
   } catch {
     return undefined;
   }
@@ -405,11 +432,13 @@ function outcomeOf(
   settlement: EvalSettlement,
   media: EvalMedia | undefined,
   outputLimits: Partial<OutputLimits>,
+  runId?: string,
 ): ScriptOutcomeWithOmitted {
   if (settlement.asyncDispatched === true) {
     return {
       content: renderEnvelope({
         evalId: settlement.evalId,
+        ...(runId === undefined ? {} : { runId }),
         async: true,
         evalTaskId: settlement.evalTaskId,
         reset: settlement.contextReset,
@@ -436,6 +465,7 @@ function outcomeOf(
   const outcome: ScriptOutcomeWithOmitted = {
     content: renderEnvelope({
       evalId: settlement.evalId,
+      ...(runId === undefined ? {} : { runId }),
       log,
       result: normalized.result,
       error: settlement.ok
@@ -566,6 +596,7 @@ export class ExecGateway implements ExecutionGateway {
   private readonly outputLimits: Partial<OutputLimits>;
   private readonly workspaceFs: WorkspaceFileSystem | undefined;
   private readonly tasks: TaskStore;
+  private readonly onScriptRun: ((record: ArchiveRunOptions) => void) | undefined;
   private readonly execSessions: ExecSessionRegistry<SessionRuntime, unknown>;
   private readonly runtimes = new Map<string, SessionRuntime>();
   /** Teardown promise of every removed exec session, keyed by session id. */
@@ -592,6 +623,7 @@ export class ExecGateway implements ExecutionGateway {
     this.now = options.now ?? (() => Date.now());
     this.clock = options.clock ?? { now: this.now };
     this.workspaceFs = options.workspaceFs;
+    this.onScriptRun = options.onScriptRun;
     this.toolTimeouts = { ...DEFAULT_TOOL_CALL_TIMEOUTS, ...options.toolTimeouts };
     this.defaultMaxEvalMs = resolveDefaultMaxEvalMs(options.defaultMaxEvalMs);
     this.outputLimits = options.outputLimits ?? {};
@@ -684,6 +716,7 @@ export class ExecGateway implements ExecutionGateway {
       deadlines: new Map(),
       runIds: new Map(),
       media: new Map(),
+      toolsUsed: new Map(),
       hibernated: false,
       serveReleased: false,
     };
@@ -857,6 +890,12 @@ export class ExecGateway implements ExecutionGateway {
 
     const queuedAt = this.now();
     const binding = runtime.bindings.get(call.evalId) ?? null;
+    let used = runtime.toolsUsed.get(call.evalId);
+    if (used === undefined) {
+      used = new Set();
+      runtime.toolsUsed.set(call.evalId, used);
+    }
+    used.add(name);
     const gate = this.gateOf(call);
     // Where this call waited. The keyed gate is observed here by elapsed time;
     // the pool's gates report themselves through `observation`.
@@ -1048,6 +1087,75 @@ export class ExecGateway implements ExecutionGateway {
     };
   }
 
+  /** Entry metadata shared by `eval_start`, `eval_end` and `async_dispatch` (10 §7.4). */
+  private entryFields(request: ScriptRequest): Record<string, unknown> {
+    const argsBytes = request.args === undefined ? undefined : jsonBytes(request.args);
+    const argsPreview = argsPreviewOf(request.args);
+    // Count-only summary; never carries the matched text (design 10 §11).
+    const secretWarnings = secretWarningsOf('args', request.args);
+    return {
+      entryTool: 'run_script',
+      entryMode: request.entryMode ?? 'code',
+      ...(request.scriptId === undefined ? {} : { scriptId: request.scriptId }),
+      ...(request.scriptVersion === undefined ? {} : { scriptVersion: request.scriptVersion }),
+      ...(request.scriptMode === undefined ? {} : { scriptMode: request.scriptMode }),
+      ...(argsBytes === undefined ? {} : { argsBytes }),
+      ...(argsPreview === undefined ? {} : { argsPreview }),
+      ...(secretWarnings.length === 0 ? {} : { secretWarnings }),
+    };
+  }
+
+  /** Appends one settled eval to `script_runs`; archive failures never change the result. */
+  private archiveRun(
+    request: ScriptRequest,
+    runtime: SessionRuntime,
+    settlement: EvalSettlement,
+    runId: string,
+  ): void {
+    const toolsUsed = [...(runtime.toolsUsed.get(settlement.evalId) ?? [])];
+    runtime.toolsUsed.delete(settlement.evalId);
+    if (this.onScriptRun === undefined) return;
+    const entryMode = request.entryMode ?? 'code';
+    try {
+      this.onScriptRun({
+        runId,
+        createdAt: new Date(this.now()).toISOString(),
+        execId: runtime.record.id,
+        evalId: settlement.evalId,
+        requestId: request.requestId ?? null,
+        binding: runtime.record.binding,
+        clientName: request.identity.clientName ?? '',
+        clientVersion: request.identity.clientVersion ?? '',
+        workspace:
+          request.workspace === undefined || request.workspace.trim() === ''
+            ? ''
+            : runtime.record.workspace,
+        entryTool: 'run_script',
+        entryMode,
+        scriptId: request.scriptId ?? null,
+        scriptVersion: request.scriptVersion ?? null,
+        scriptMode: request.scriptMode ?? null,
+        args: request.args ?? null,
+        argsPreview: argsPreviewOf(request.args) ?? null,
+        code: settlement.ok && entryMode === 'code' ? request.code : null,
+        ok: settlement.ok,
+        error: settlement.ok ? null : (settlement.error ?? settlement.outcome),
+        resultBytes: jsonBytes(settlement.result) ?? 0,
+        durationMs: settlement.ms,
+        toolsUsed,
+        purpose: request.purpose ?? 'run',
+        ...(request.actor === undefined ? {} : { actor: request.actor }),
+        activateOnSuccess: request.activateOnSuccess === true,
+      });
+    } catch (error) {
+      this.log(`script run archive failed: ${(error as Error).message}`, {
+        level: 'warn',
+        scope: 'exec',
+        runId,
+      });
+    }
+  }
+
   private emitEvalStart(
     request: ScriptRequest,
     exec: ExecSessionRecord<SessionRuntime, unknown>,
@@ -1066,6 +1174,7 @@ export class ExecGateway implements ExecutionGateway {
       ...(start.timeoutMs === undefined ? {} : { timeoutMs: start.timeoutMs }),
       workspace: exec.workspace,
       ...this.identityFields(request),
+      ...this.entryFields(request),
       ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
       codeBytes: Buffer.byteLength(request.code, 'utf8'),
       codeSha256: createHash('sha256').update(request.code, 'utf8').digest('hex'),
@@ -1087,6 +1196,7 @@ export class ExecGateway implements ExecutionGateway {
       evalId: settlement.evalId,
       workspace: exec.workspace,
       ...this.identityFields(request),
+      ...this.entryFields(request),
       ok: settlement.ok,
       outcome: settlement.outcome,
       ...(settlement.layer === undefined ? {} : { layer: settlement.layer }),
@@ -1120,13 +1230,17 @@ export class ExecGateway implements ExecutionGateway {
       );
       this.emitEvalEnd(request, record, settlement, runId);
       const media = this.mediaOfSettlement(runtime, settlement);
-      return outcomeOf(settlement, media, this.outputLimits);
+      const outcome = outcomeOf(settlement, media, this.outputLimits, runId);
+      this.archiveRun(request, runtime, settlement, runId);
+      return { ...outcome, runId };
     } finally {
       this.execSessions.endEval(record);
     }
   }
 
-  async dispatchScript(request: ScriptRequest): Promise<{ taskId: string; evalId: number }> {
+  async dispatchScript(
+    request: ScriptRequest,
+  ): Promise<{ taskId: string; evalId: number; runId: string }> {
     this.assertUsable();
     const { runtime, record } = await this.runtimeFor(request);
     let released = false;
@@ -1142,14 +1256,23 @@ export class ExecGateway implements ExecutionGateway {
       const deadline = timeoutMs === undefined ? undefined : this.now() + timeoutMs;
       const owner = ownerKey(request.identity);
       this.pruneTaskTracking();
-      const created = this.tasks.create(0, owner);
+      const runId = randomUUID();
+      const argsPreview = argsPreviewOf(request.args);
+      const created = this.tasks.create(0, owner, {
+        runId,
+        ...(request.scriptId === undefined ? {} : { scriptId: request.scriptId }),
+        ...(request.scriptVersion === undefined ? {} : { scriptVersion: request.scriptVersion }),
+        ...(request.scriptMode === undefined ? {} : { scriptMode: request.scriptMode }),
+        ...(argsPreview === undefined ? {} : { argsPreview }),
+        entryMode: request.entryMode ?? 'code',
+      });
       taskId = created;
       this.taskLinks.set(created, { sessionId: record.id, owner });
-      const runId = randomUUID();
 
       const onSettled = (settled: EvalSettlement): void => {
         this.finishTask(created, runtime, settled);
         this.emitEvalEnd(request, record, settled, runId);
+        this.archiveRun(request, runtime, settled, runId);
         release();
       };
 
@@ -1168,14 +1291,16 @@ export class ExecGateway implements ExecutionGateway {
       this.emitAudit({
         event: 'async_dispatch',
         exec: record.id,
+        runId,
         evalTaskId: created,
         evalId: receipt.evalId,
         ttlMs: this.tasks.ttl,
         workspace: record.workspace,
         ...this.identityFields(request),
+        ...this.entryFields(request),
         ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
       });
-      return { taskId: created, evalId: receipt.evalId };
+      return { taskId: created, evalId: receipt.evalId, runId };
     } catch (error) {
       if (taskId !== undefined) {
         const code = error instanceof ReplError ? error.code : 'DISPATCH_FAILED';
@@ -1245,6 +1370,11 @@ export class ExecGateway implements ExecutionGateway {
       lastUpdatedAt: new Date(snapshot.updatedAt).toISOString(),
       ttlMs: snapshot.expiresAt - snapshot.createdAt,
       pollIntervalMs: LIMITS.taskPollIntervalMs,
+      ...(snapshot.runId === undefined ? {} : { runId: snapshot.runId }),
+      ...(snapshot.scriptId === undefined ? {} : { scriptId: snapshot.scriptId }),
+      ...(snapshot.scriptVersion === undefined ? {} : { scriptVersion: snapshot.scriptVersion }),
+      ...(snapshot.scriptMode === undefined ? {} : { scriptMode: snapshot.scriptMode }),
+      ...(snapshot.argsPreview === undefined ? {} : { argsPreview: snapshot.argsPreview }),
     };
     if (snapshot.result !== undefined) {
       const media = this.taskMedia.get(taskId);
@@ -1583,6 +1713,7 @@ export class ExecGateway implements ExecutionGateway {
     runtime.bindings.clear();
     runtime.deadlines.clear();
     runtime.media.clear();
+    runtime.toolsUsed.clear();
     for (const active of [...runtime.session.activeEvals.values()]) {
       this.abortEval(runtime, active.evalId);
     }

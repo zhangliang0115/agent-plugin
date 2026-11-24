@@ -225,6 +225,13 @@ export interface TaskView {
   readonly lastUpdatedAt: string;
   readonly ttlMs: number;
   readonly pollIntervalMs: number;
+  /** Execution id and saved-script identity, echoed from the archived run. */
+  readonly runId?: string;
+  readonly scriptId?: string;
+  readonly scriptVersion?: number;
+  readonly scriptMode?: 'exact' | 'parameterized';
+  /** Args summary capped at 512 characters. */
+  readonly argsPreview?: string;
   result?: CallToolResult;
   error?: { code: string; message: string; data?: unknown };
 }
@@ -238,6 +245,11 @@ function toTaskView(taskId: string, snapshot: TaskSnapshot): TaskView {
     lastUpdatedAt: snapshot.lastUpdatedAt,
     ttlMs: snapshot.ttlMs,
     pollIntervalMs: snapshot.pollIntervalMs,
+    ...(snapshot.runId === undefined ? {} : { runId: snapshot.runId }),
+    ...(snapshot.scriptId === undefined ? {} : { scriptId: snapshot.scriptId }),
+    ...(snapshot.scriptVersion === undefined ? {} : { scriptVersion: snapshot.scriptVersion }),
+    ...(snapshot.scriptMode === undefined ? {} : { scriptMode: snapshot.scriptMode }),
+    ...(snapshot.argsPreview === undefined ? {} : { argsPreview: snapshot.argsPreview }),
   };
   if (snapshot.result !== undefined) {
     view.result = toCallToolResult(snapshot.result);
