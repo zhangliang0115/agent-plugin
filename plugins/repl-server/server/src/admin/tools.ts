@@ -36,7 +36,8 @@ import {
   type ServerStore,
 } from './servers.ts';
 import { evaluateTagPolicy, formatTagPolicyIssues } from '../catalog/tag-policy.ts';
-import type { OfficialToolsSync } from '../ports.ts';
+import type { CatalogTool, OfficialToolsSync } from '../ports.ts';
+import { toItem } from '../tools/search.ts';
 
 export type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
 
@@ -59,6 +60,24 @@ export interface ToolRecord {
   staleOverride: boolean;
   firstSeenAt?: string;
   lastSeenAt?: string;
+  /** Lifetime `tool_result` counters from `tool_usage`. */
+  callCount: number;
+  successCount: number;
+  /** `successCount / callCount`, null until the first call. */
+  successRate: number | null;
+  lastCalledAt: string | null;
+}
+
+/** UTF-8 byte sizes of what the model can see for one tool; not token counts. */
+export interface ToolModelBytes {
+  /** `JSON.stringify` of the whole tool definition (name + description + inputSchema). */
+  definition: number;
+  /** `JSON.stringify` of the item `search_tools` returns for this tool. */
+  searchItem: number;
+  /** `JSON.stringify(inputSchema ?? {})`. */
+  schema: number;
+  /** Effective description string (override applied). */
+  description: number;
 }
 
 /** Fields an admin may patch. `description` is the override, not the upstream text. */
@@ -194,6 +213,41 @@ function effectiveTags(server: ServerRecord, tool: ToolRecord): string[] {
   return [...new Set([...server.tags, ...tool.tags])];
 }
 
+/**
+ * Sizes the model-visible payloads. `searchItem` goes through `search_tools`'
+ * own `toItem`, and category/summary/name follow the catalog snapshot rules
+ * (server-level category/summary, bare names for `builtin` transports).
+ */
+function modelBytesOf(tool: ToolRecord, server: ServerRecord): ToolModelBytes {
+  const schema = tool.schema ?? {};
+  const description = tool.descriptionOverride ?? tool.description ?? '';
+  const builtin = server.transport === 'builtin';
+  const modelName = builtin ? tool.name : `${server.id}.${tool.name}`;
+  const catalogTool: CatalogTool = {
+    name: tool.name,
+    kind: builtin ? 'builtin' : 'mcp',
+    description,
+    tags: effectiveTags(server, tool),
+    inputSchema: schema,
+    concurrency: tool.concurrency,
+    enabled: tool.enabled,
+  };
+  if (!builtin) catalogTool.server = server.id;
+  if (server.category !== null && server.category !== '') {
+    catalogTool.category = server.category;
+  }
+  if (server.summary !== null && server.summary !== '') catalogTool.summary = server.summary;
+  return {
+    definition: Buffer.byteLength(
+      JSON.stringify({ name: modelName, description, inputSchema: schema }),
+      'utf8',
+    ),
+    searchItem: Buffer.byteLength(JSON.stringify(toItem(catalogTool, modelName)), 'utf8'),
+    schema: Buffer.byteLength(JSON.stringify(schema), 'utf8'),
+    description: Buffer.byteLength(description, 'utf8'),
+  };
+}
+
 /** Rejects a tool patch that would break the descriptive-tag policy. */
 function assertToolTagPolicy(server: ServerRecord, tool: ToolRecord, patch: ToolPatch): void {
   // A pure metadata edit cannot change the tag state; only tag writes and
@@ -219,6 +273,7 @@ function viewTool(tool: ToolRecord, server: ServerRecord): Record<string, unknow
   const description = tool.descriptionOverride ?? tool.description;
   return {
     ...tool,
+    modelBytes: modelBytesOf(tool, server),
     effective: {
       description,
       enabled: tool.enabled,

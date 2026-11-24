@@ -10,6 +10,7 @@ import { stateLabel } from './common.tsx';
 import { FrameColumn, type FrameEvent } from './FramePayload.tsx';
 import { PayloadViewer } from './PayloadViewer.tsx';
 import { RequestProcess } from './RequestProcess.tsx';
+import { ScriptCodeCard } from './ScriptCodeCard.tsx';
 import { ScriptInfoCard } from './ScriptInfoCard.tsx';
 import type { ApiClient } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
@@ -168,6 +169,11 @@ export function RequestDetailDrawer({
       {pair === null ? null : (
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <ScriptInfoCard info={scriptInfo} />
+          <ScriptCodeCard
+            key={`${pair.mcp}:${String(pair.id ?? '')}:${pair.request?.ts ?? ''}`}
+            request={pair.request}
+            method={pair.method}
+          />
           <Tabs
             items={[
               {

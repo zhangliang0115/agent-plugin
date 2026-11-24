@@ -10,7 +10,8 @@ import { assemble, type AssemblyOptions } from '../src/assembly.ts';
 import { createClientBinding } from '../src/db/clients.ts';
 import { getRevision } from '../src/db/meta.ts';
 import { createServer } from '../src/db/servers.ts';
-import { upsertTool } from '../src/db/tools.ts';
+import { upsertTool, getTool } from '../src/db/tools.ts';
+import { searchTools as searchSnapshot } from '../src/tools/search.ts';
 
 const ADMIN_TOKEN = 'test-admin-token';
 
@@ -191,6 +192,59 @@ test('run_script executes JavaScript end to end', async (t) => {
   );
 });
 
+test('tool_result events accumulate lifetime usage; denied calls do not', async (t) => {
+  let calls = 0;
+  const app = await start({
+    callTool: async () => {
+      calls += 1;
+      if (calls === 2) throw new Error('boom');
+      return { ok: true };
+    },
+  });
+  t.after(app.close);
+
+  createServer(app.assembly.db, { id: 'fake', label: 'Fake', transport: 'stdio', command: 'node' });
+  upsertTool(app.assembly.db, 'fake', {
+    name: 'query',
+    inputSchema: { type: 'object', properties: {} },
+  });
+  app.assembly.catalog.refreshServer('fake');
+
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  const run = async (id: number, code: string, extra: Record<string, unknown> = {}) =>
+    await rpc(
+      app.base,
+      {
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name: 'run_script', arguments: { code, ...extra } },
+      },
+      session,
+    );
+
+  await run(2, 'return await tools.mcp.fake.query({});');
+  let usage = getTool(app.assembly.db, 'fake', 'query');
+  assert.ok(usage);
+  assert.equal(usage.callCount, 1);
+  assert.equal(usage.successCount, 1);
+  assert.ok(usage.lastCalledAt !== null);
+
+  await run(3, 'return await tools.mcp.fake.query({});');
+  usage = getTool(app.assembly.db, 'fake', 'query');
+  assert.ok(usage);
+  assert.equal(usage.callCount, 2);
+  assert.equal(usage.successCount, 1, 'a failed tool_result still counts as a call');
+
+  // `visibleTools` denies before the transport, so no `tool_result` exists.
+  await run(4, 'return await tools.mcp.fake.query({});', { visibleTools: ['fake.other'] });
+  usage = getTool(app.assembly.db, 'fake', 'query');
+  assert.ok(usage);
+  assert.equal(usage.callCount, 2, 'tool_denied must not count');
+  assert.equal(usage.successCount, 1);
+});
+
 test('run_script reports the user line for a syntax error', async (t) => {
   const app = await start();
   t.after(app.close);
@@ -299,6 +353,56 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
   const searched = (await search.json()) as { result: { isError: boolean; content: Array<{ text: string }> } };
   assert.equal(searched.result.isError, false);
   assert.ok(Array.isArray(JSON.parse(searched.result.content[0]?.text ?? 'null')));
+});
+
+test('search_tools serves non-empty queries from SQLite, not the cached snapshot', async (t) => {
+  const app = await start();
+  t.after(app.close);
+  const db = app.assembly.db;
+
+  createServer(db, {
+    id: 'fresh',
+    label: 'Fresh',
+    transport: 'stdio',
+    command: 'node',
+    summary: 'Inserted without a catalog refresh',
+  });
+  upsertTool(db, 'fresh', {
+    name: 'fresh_tool',
+    description: 'Reachable only through the search port',
+    inputSchema: { type: 'object' },
+  });
+  // The row is committed to SQLite but never refreshed into the in-memory
+  // snapshot. Only a search_tools call routed to the FTS/LIKE port can see it.
+  assert.deepEqual(
+    searchSnapshot(app.assembly.catalog.snapshot(), { query: 'fresh_tool' }),
+    [],
+    'the cached snapshot never saw the row',
+  );
+
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  await discover.json();
+  const search = await rpc(
+    app.base,
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'search_tools', arguments: { query: 'fresh_tool' } },
+    },
+    session,
+  );
+  const body = (await search.json()) as {
+    result: { isError: boolean; content: Array<{ text: string }> };
+  };
+  assert.equal(body.result.isError, false);
+  assert.deepEqual(
+    (JSON.parse(body.result.content[0]?.text ?? '[]') as Array<{ name: string }>).map(
+      (item) => item.name,
+    ),
+    ['fresh.fresh_tool'],
+  );
 });
 
 test('assembled server records full protocol frames with request and response payloads', async (t) => {

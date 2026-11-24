@@ -105,6 +105,31 @@ export function scriptInfoFromRequest(request: unknown): ScriptInfo | null {
   };
 }
 
+/** Inline `code` of an ad-hoc `run_script` call; `null` when params is another shape. */
+export function scriptCodeFromParams(params: unknown): string | null {
+  if (typeof params !== 'object' || params === null) return null;
+  const call = params as { name?: unknown; arguments?: unknown };
+  if (call.name !== 'run_script') return null;
+  if (typeof call.arguments !== 'object' || call.arguments === null) return null;
+  const code = (call.arguments as Record<string, unknown>)['code'];
+  return typeof code === 'string' && code !== '' ? code : null;
+}
+
+/** `code` from a request frame; externalised params carry no inline body. */
+export function scriptCodeFromRequest(request: unknown): string | null {
+  if (typeof request !== 'object' || request === null) return null;
+  return scriptCodeFromParams((request as { params?: unknown }).params);
+}
+
+/**
+ * Whether a 2 KiB params preview belongs to `run_script`. Externalised params
+ * keep no tool name of their own, so the preview is the only signal available
+ * before fetching; this is a pre-check, the loaded body is checked again.
+ */
+export function isRunScriptParamsPreview(preview: unknown): boolean {
+  return typeof preview === 'string' && preview !== '' && /"name"\s*:\s*"run_script"/u.test(preview);
+}
+
 /** First event carrying a script id; `eval_start` arrives before `tool_call` rows. */
 export function scriptInfoFromEvents(
   events: readonly Record<string, unknown>[] | null | undefined,

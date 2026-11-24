@@ -14,6 +14,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
@@ -33,12 +34,13 @@ import { ToolSchemaDoc } from '../components/ToolSchemaDoc.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError, isTimeoutError, timeoutSignal } from '../../lib/api.ts';
-import { formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
+import { formatBytes, formatDuration, formatJson, formatNumber, formatTimestamp } from '../../lib/format.ts';
+import { toolStatsFrom, toolUsageText, type ToolStats } from '../../lib/tool-stats.ts';
 import { navigate } from '../router.ts';
 
 type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
 
-interface ToolRecord {
+interface ToolRecord extends ToolStats {
   serverId: string;
   name: string;
   displayName: string | null;
@@ -252,7 +254,8 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
           `/servers/${encodeURIComponent(serverId)}/tools`,
         );
         if (!alive.current) return;
-        setTools(Array.isArray(response.tools) ? response.tools : []);
+        const records = Array.isArray(response.tools) ? response.tools : [];
+        setTools(records.map((tool) => ({ ...tool, ...toolStatsFrom(tool) })));
         setToolServer(response.server);
         setToolNotice(typeof response.notice === 'string' ? response.notice : null);
         const nextRevision = typeof response.revision === 'number' ? response.revision : 0;
@@ -423,6 +426,48 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         },
       },
       {
+        title: '使用次数',
+        key: 'callCount',
+        width: 90,
+        align: 'right' as const,
+        render: (_value: unknown, tool: ToolRecord) => formatNumber(tool.callCount),
+      },
+      {
+        title: '执行统计',
+        key: 'usage',
+        width: 190,
+        render: (_value: unknown, tool: ToolRecord) => (
+          <span className="mono">{toolUsageText(tool)}</span>
+        ),
+      },
+      {
+        title: '最近使用',
+        key: 'lastCalledAt',
+        width: 170,
+        render: (_value: unknown, tool: ToolRecord) => (
+          <span className="mono">{formatTimestamp(tool.lastCalledAt)}</span>
+        ),
+      },
+      {
+        title: '模型字节',
+        key: 'modelBytes',
+        width: 110,
+        render: (_value: unknown, tool: ToolRecord) => (
+          <Tooltip
+            title={
+              <div>
+                <div>definition：{formatBytes(tool.modelBytes.definition)}</div>
+                <div>searchItem：{formatBytes(tool.modelBytes.searchItem)}</div>
+                <div>schema：{formatBytes(tool.modelBytes.schema)}</div>
+                <div>description：{formatBytes(tool.modelBytes.description)}</div>
+              </div>
+            }
+          >
+            <span className="mono">{formatBytes(tool.modelBytes.definition)}</span>
+          </Tooltip>
+        ),
+      },
+      {
         title: '操作',
         width: 140,
         render: (_value: unknown, tool: ToolRecord) => (
@@ -518,7 +563,9 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         setRevision(response.revision);
         setTools((prev) =>
           prev.map((item) =>
-            item.serverId === tool.serverId && item.name === tool.name ? response.tool : item,
+            item.serverId === tool.serverId && item.name === tool.name
+              ? { ...response.tool, ...toolStatsFrom(response.tool) }
+              : item,
           ),
         );
       } catch (error) {
@@ -900,6 +947,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             columns={columns}
             pagination={false}
             tableLayout="fixed"
+            scroll={{ x: 1700 }}
             locale={{
               emptyText: (
                 <Empty

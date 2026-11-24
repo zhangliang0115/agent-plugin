@@ -139,6 +139,15 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 
 管理端 UI 已不再编辑 `type`；`type` 保留为兼容字段与管理端检索过滤器。`type` 与 `tags` 都不承载动作语义：`read`、`write`、`query`、`exec`、`deploy`、`destructive` 是动作键，不能作为标签。
 
+`GET /servers/:id/tools`（以及 `PATCH /tools/:serverId/:name`、`POST /tools/batch` 返回的 `tool`）每个工具还带：
+
+- `callCount` / `successCount` / `successRate` / `lastCalledAt`：来自 `tool_result` 审计事件的终身累计。每次 `tool_result`（成功或失败）计 1 次调用，`successCount` 只计 `ok=true`；`successRate = callCount > 0 ? successCount / callCount : null`；`lastCalledAt` 是最近一次调用的 ISO 8601 时间，从未调用时为 `null`（`callCount`/`successCount` 为 0）。`tool_call` 没有成败、`tool_denied` 没有结果，都不计数；脚本执行与将来的管理端测试执行都计入。工具删除后统计保留，同名工具重新出现时继承。
+- `modelBytes`：模型可见内容的 UTF-8 JSON 字节数（`Buffer.byteLength`，不是 token 数），四个键：
+  - `definition`：`JSON.stringify({ name, description, inputSchema })` 的 UTF-8 字节，即完整工具定义；只含这三个字段，不含上游工具定义里的 `_meta`、`annotations` 等其余字段。`name` 是模型看到的工具名——MCP 工具为 `server.tool`，official/builtin 为裸名；`description` 是生效描述（`description_override` 优先，缺省为空串）。
+  - `searchItem`：该工具作为 `search_tools` 结果项时的 UTF-8 字节，复用检索层的 `toItem`（`JSON.stringify(toItem(catalogTool, name))`）。形状是 `SearchToolItem`：必有 `name`（同为模型可见工具名）与 `kind`；MCP 工具带 `server`；server 配置了分类/摘要时带 `category` / `summary`；带生效 `description`；server 标签与工具标签的并集非空时带 `tags`。排序用的 `score` 不写进条目。与 `GET /search` 的 `SearchHit` 不同：后者带 `score`，且没有 `category` / `summary`。
+  - `schema`：`JSON.stringify(inputSchema ?? {})` 的 UTF-8 字节，schema 缺失时按空对象计。
+  - `description`：生效描述字符串（`description_override` 优先）的 UTF-8 字节数，不是 JSON 编码后的长度。
+
 **标签规则**（`server/src/catalog/tag-policy.ts`，server 与工具共用）：
 
 - server `tags` 0–2 个，只放对该 server 所有工具都成立的描述性标签。

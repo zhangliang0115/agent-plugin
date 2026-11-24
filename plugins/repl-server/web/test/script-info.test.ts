@@ -3,7 +3,10 @@ import test from 'node:test';
 
 import {
   argsSummary,
+  isRunScriptParamsPreview,
   mergeScriptInfo,
+  scriptCodeFromParams,
+  scriptCodeFromRequest,
   scriptInfoFromEvent,
   scriptInfoFromEvents,
   scriptInfoFromRequest,
@@ -134,6 +137,33 @@ test('mergeScriptInfo fills fields from later sources without overwriting', () =
   assert.equal(merged?.scriptMode, 'exact');
   assert.equal(merged?.argsPreview, '{"a":1}');
   assert.equal(mergeScriptInfo(null, undefined), null);
+});
+
+test('scriptCodeFromParams reads only the inline code of a run_script call', () => {
+  const params = { name: 'run_script', arguments: { code: 'return 1;\n' } };
+  assert.equal(scriptCodeFromParams(params), 'return 1;\n');
+  assert.equal(scriptCodeFromRequest({ params }), 'return 1;\n');
+  assert.equal(scriptCodeFromParams({ name: 'run_script', arguments: { scriptId: 's_1' } }), null);
+  assert.equal(scriptCodeFromParams({ name: 'run_script', arguments: { code: '' } }), null);
+  assert.equal(scriptCodeFromParams({ name: 'run_script', arguments: 'code' }), null);
+  assert.equal(scriptCodeFromParams({ name: 'search_tools', arguments: { code: 'x' } }), null);
+  assert.equal(scriptCodeFromParams(null), null);
+  assert.equal(scriptCodeFromRequest(null), null);
+  assert.equal(scriptCodeFromRequest({}), null);
+  assert.equal(scriptCodeFromRequest({ params: null }), null);
+});
+
+test('isRunScriptParamsPreview gates the external params card', () => {
+  assert.equal(isRunScriptParamsPreview('{"name":"run_script","arguments":{'), true);
+  assert.equal(isRunScriptParamsPreview('{"name": "run_script", "arguments": {}}'), true);
+  assert.equal(isRunScriptParamsPreview('{"name":"search_tools","arguments":{}}'), false);
+  assert.equal(isRunScriptParamsPreview('{"name":"run_script_extra","arguments":{}}'), false);
+  assert.equal(isRunScriptParamsPreview('{"name":"run_scr'), false);
+  assert.equal(isRunScriptParamsPreview(''), false);
+  assert.equal(isRunScriptParamsPreview('   '), false);
+  assert.equal(isRunScriptParamsPreview(null), false);
+  assert.equal(isRunScriptParamsPreview(undefined), false);
+  assert.equal(isRunScriptParamsPreview({ name: 'run_script' }), false);
 });
 
 test('argsSummary truncates long values', () => {

@@ -14,6 +14,7 @@ import {
   type ToolDefinition,
 } from './registry.ts';
 import { searchTools, type SearchToolsInput, type ToolVisibility } from './search.ts';
+import type { ToolTextSearch } from './search-fts.ts';
 import {
   McpTaskStore,
   ownerOf,
@@ -38,6 +39,8 @@ export interface ToolCallContext {
   visibility?: ToolVisibility;
   /** This request's search_tools definition, carrying the catalog-derived enums. */
   searchToolsDefinition?: ToolDefinition;
+  /** Server-side FTS text search for non-empty queries; absent in focused tests. */
+  toolTextSearch?: ToolTextSearch;
   /** Saved-script library; absent only in focused tests that never use it. */
   scripts?: ScriptService;
   /** Audit sink for top-level tool events without an eval (`script_saved`). */
@@ -323,10 +326,15 @@ async function searchToolsCall(input: unknown, ctx: ToolCallContext): Promise<Ca
   const definition = ctx.searchToolsDefinition ?? getToolDefinition('search_tools');
   const validation = validateToolArguments('search_tools', input, definition);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
-  const items = searchTools(ctx.catalog.snapshot(), {
-    ...(validation.value as SearchToolsInput),
-    ...(ctx.visibility ?? {}),
-  });
+  const args = validation.value as SearchToolsInput;
+  const query = (args.query ?? '').trim();
+  const items =
+    query !== '' && ctx.toolTextSearch !== undefined
+      ? ctx.toolTextSearch(args, ctx.visibility ?? {})
+      : searchTools(ctx.catalog.snapshot(), {
+          ...args,
+          ...(ctx.visibility ?? {}),
+        });
   return jsonResult(items, false);
 }
 

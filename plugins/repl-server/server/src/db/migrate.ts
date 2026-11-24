@@ -10,6 +10,7 @@ import {
   createSchemaV6,
   createSchemaV7,
   createSchemaV8,
+  createSchemaV9,
   SCHEMA_VERSION,
 } from './schema.ts';
 
@@ -90,6 +91,10 @@ export function migrate(db: DatabaseSync): number {
     if (current < 8) {
       applyV8(db);
       current = 8;
+    }
+    if (current < 9) {
+      applyV9(db);
+      current = 9;
     }
   });
   return current;
@@ -227,4 +232,11 @@ function applyV8(db: DatabaseSync): void {
   createSchemaV8(db);
   db.prepare("UPDATE meta SET value = '8' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 8');
+}
+
+/** Adds the lifetime tool-call counters; table only, no data move. */
+function applyV9(db: DatabaseSync): void {
+  createSchemaV9(db);
+  db.prepare("UPDATE meta SET value = '9' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 9');
 }

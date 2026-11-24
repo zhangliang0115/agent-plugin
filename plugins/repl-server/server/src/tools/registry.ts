@@ -112,7 +112,7 @@ const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
 const SEARCH_TOOLS_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
-    query: { type: 'string' },
+    query: { type: 'string', maxLength: 200 },
     server: { type: 'string' },
     category: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },
@@ -261,7 +261,7 @@ export function buildSearchToolsDefinition(
   const inputSchema = deepFreeze<ToolInputSchema>({
     type: 'object',
     properties: {
-      query: { type: 'string' },
+      query: { type: 'string', maxLength: 200 },
       server,
       category,
       tags: { type: 'array', items: tagItems },

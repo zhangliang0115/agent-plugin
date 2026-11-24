@@ -66,6 +66,12 @@ CREATE TABLE tools (
   first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
   PRIMARY KEY (server_id, name)
 );
+CREATE TABLE tool_usage (
+  server_id TEXT NOT NULL, name TEXT NOT NULL,
+  call_count INTEGER NOT NULL DEFAULT 0, success_count INTEGER NOT NULL DEFAULT 0,
+  last_called_at TEXT NOT NULL,
+  PRIMARY KEY (server_id, name)
+);
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
@@ -264,7 +270,16 @@ class SqliteServerStore implements ServerStore {
   }
 }
 
+/** Same LEFT JOIN as the real repository, so usage stats surface through the route. */
+const SELECT_TOOL = `
+SELECT t.*, u.call_count AS call_count, u.success_count AS success_count,
+       u.last_called_at AS last_called_at
+FROM tools t
+LEFT JOIN tool_usage u ON u.server_id = t.server_id AND u.name = t.name`;
+
 function rowToTool(row: Record<string, unknown>): ToolRecord {
+  const callCount = Number(row['call_count'] ?? 0);
+  const successCount = Number(row['success_count'] ?? 0);
   return {
     serverId: String(row['server_id']),
     name: String(row['name']),
@@ -282,6 +297,10 @@ function rowToTool(row: Record<string, unknown>): ToolRecord {
     staleOverride: rowInteger(row, 'stale_override') === 1,
     firstSeenAt: String(row['first_seen_at']),
     lastSeenAt: String(row['last_seen_at']),
+    callCount,
+    successCount,
+    successRate: callCount > 0 ? successCount / callCount : null,
+    lastCalledAt: rowText(row, 'last_called_at'),
   };
 }
 
@@ -333,14 +352,14 @@ class SqliteToolStore implements ToolStore {
 
   async listByServer(serverId: string): Promise<ToolRecord[]> {
     return this.db
-      .prepare('SELECT * FROM tools WHERE server_id = ? ORDER BY name')
+      .prepare(`${SELECT_TOOL} WHERE t.server_id = ? ORDER BY t.name`)
       .all(serverId)
       .map((row) => rowToTool(row));
   }
 
   async get(serverId: string, name: string): Promise<ToolRecord | null> {
     const row = this.db
-      .prepare('SELECT * FROM tools WHERE server_id = ? AND name = ?')
+      .prepare(`${SELECT_TOOL} WHERE t.server_id = ? AND t.name = ?`)
       .get(serverId, name);
     return row === undefined ? null : rowToTool(row);
   }
@@ -361,7 +380,7 @@ class SqliteToolStore implements ToolStore {
         throw new AdminApiError(409, 'REVISION_CONFLICT', 'revision conflict');
       }
       const row = this.db
-        .prepare('SELECT * FROM tools WHERE server_id = ? AND name = ?')
+        .prepare(`${SELECT_TOOL} WHERE t.server_id = ? AND t.name = ?`)
         .get(serverId, name);
       if (row === undefined) throw new AdminApiError(404, 'TOOL_NOT_FOUND', 'missing');
 
@@ -386,7 +405,7 @@ class SqliteToolStore implements ToolStore {
       const updated: ToolRecord[] = [];
       for (const update of updates) {
         const row = this.db
-          .prepare('SELECT * FROM tools WHERE server_id = ? AND name = ?')
+          .prepare(`${SELECT_TOOL} WHERE t.server_id = ? AND t.name = ?`)
           .get(update.serverId, update.name);
         if (row === undefined) throw new AdminApiError(404, 'TOOL_NOT_FOUND', 'missing');
         const next = applyToolPatch(rowToTool(row), update.patch);
@@ -556,6 +575,16 @@ function seedTool(db: DatabaseSync, tool: Partial<ToolRecord> & { serverId: stri
     now,
     now,
   );
+}
+
+function seedUsage(
+  db: DatabaseSync,
+  usage: { serverId: string; name: string; callCount: number; successCount: number; lastCalledAt: string },
+): void {
+  db.prepare(
+    `INSERT INTO tool_usage (server_id, name, call_count, success_count, last_called_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(usage.serverId, usage.name, usage.callCount, usage.successCount, usage.lastCalledAt);
 }
 
 function makeRequest(
@@ -1333,13 +1362,25 @@ test('POST /servers/:id/test maps missing secrets, success and runtime failures'
 test('GET /servers/:id/tools returns raw plus effective values', async () => {
   const env = testEnv();
   await addServer(env.serverStore, { id: 'pg', tags: ['db', 'sql'], category: 'database' });
+  const schema = {
+    type: 'object',
+    properties: { note: { type: 'string', description: '中文说明' } },
+  };
   seedTool(env.db, {
     serverId: 'pg',
     name: 'query',
-    description: 'upstream description',
-    descriptionOverride: 'admin description',
+    description: '上游描述',
+    descriptionOverride: '管理端描述',
     tags: ['read'],
     type: 'query',
+    schema,
+  });
+  seedUsage(env.db, {
+    serverId: 'pg',
+    name: 'query',
+    callCount: 3,
+    successCount: 2,
+    lastCalledAt: '2026-01-02T03:04:05.000Z',
   });
 
   const handler = createAdminToolsHandler({
@@ -1355,16 +1396,83 @@ test('GET /servers/:id/tools returns raw plus effective values', async () => {
   const tools = body['tools'] as Record<string, unknown>[];
   assert.equal(tools.length, 1);
   const tool = tools[0]!;
-  assert.equal(tool['description'], 'upstream description');
-  assert.equal(tool['descriptionOverride'], 'admin description');
+  assert.equal(tool['description'], '上游描述');
+  assert.equal(tool['descriptionOverride'], '管理端描述');
+  assert.equal(tool['callCount'], 3);
+  assert.equal(tool['successCount'], 2);
+  assert.equal(tool['successRate'], 2 / 3);
+  assert.equal(tool['lastCalledAt'], '2026-01-02T03:04:05.000Z');
   const effective = tool['effective'] as Record<string, unknown>;
-  assert.equal(effective['description'], 'admin description');
+  assert.equal(effective['description'], '管理端描述');
   assert.deepEqual(effective['tags'], ['db', 'sql', 'read']);
   assert.equal(effective['category'], 'database');
   assert.equal(effective['exposed'], true);
 
+  // Byte fields are UTF-8 JSON sizes, not character counts (the Chinese text
+  // makes the two differ) and `searchItem` reuses the search_tools item shape.
+  const modelBytes = tool['modelBytes'] as Record<string, number>;
+  const modelName = 'pg.query';
+  const description = '管理端描述';
+  assert.ok(modelBytes['description']! > description.length, 'UTF-8 bytes, not characters');
+  assert.equal(modelBytes['description'], Buffer.byteLength(description, 'utf8'));
+  assert.equal(modelBytes['schema'], Buffer.byteLength(JSON.stringify(schema), 'utf8'));
+  assert.equal(
+    modelBytes['definition'],
+    Buffer.byteLength(
+      JSON.stringify({ name: modelName, description, inputSchema: schema }),
+      'utf8',
+    ),
+  );
+  assert.equal(
+    modelBytes['searchItem'],
+    Buffer.byteLength(
+      JSON.stringify({
+        name: modelName,
+        kind: 'mcp',
+        server: 'pg',
+        category: 'database',
+        description,
+        tags: ['db', 'sql', 'read'],
+      }),
+      'utf8',
+    ),
+  );
+
   const missing = await call(handler, makeRequest('GET', '/servers/nope/tools'));
   assert.equal(missing.status, 404);
+});
+
+test('modelBytes uses bare tool names for builtin transports', async () => {
+  const env = testEnv();
+  await addServer(env.serverStore, { id: 'official', label: 'Official', transport: 'builtin' });
+  seedTool(env.db, {
+    serverId: 'official',
+    name: 'Read',
+    description: '读取文件',
+    schema: { type: 'object', properties: {} },
+  });
+
+  const handler = createAdminToolsHandler({
+    servers: env.serverStore,
+    tools: env.toolStore,
+    retrieval: { search: () => ({ results: [] }) },
+  });
+
+  const response = await call(handler, makeRequest('GET', '/servers/official/tools'));
+  assert.equal(response.status, 200);
+  const tool = (bodyOf(response)['tools'] as Record<string, unknown>[])[0]!;
+  const modelBytes = tool['modelBytes'] as Record<string, number>;
+  assert.equal(
+    modelBytes['definition'],
+    Buffer.byteLength(
+      JSON.stringify({
+        name: 'Read',
+        description: '读取文件',
+        inputSchema: { type: 'object', properties: {} },
+      }),
+      'utf8',
+    ),
+  );
 });
 
 test('PATCH /tools/:serverId/:name writes the description override with If-Match', async () => {

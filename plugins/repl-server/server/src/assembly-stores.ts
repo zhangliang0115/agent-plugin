@@ -164,6 +164,10 @@ function toAdminTool(serverId: string, row: DbToolRecord): AdminToolRecord {
     staleOverride: row.staleOverride,
     firstSeenAt: row.firstSeenAt,
     lastSeenAt: row.lastSeenAt,
+    callCount: row.callCount,
+    successCount: row.successCount,
+    successRate: row.callCount > 0 ? row.successCount / row.callCount : null,
+    lastCalledAt: row.lastCalledAt,
   };
 }
 

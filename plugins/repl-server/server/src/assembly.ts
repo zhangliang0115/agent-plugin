@@ -60,7 +60,7 @@ import {
 import { openStateDb, migrate } from './db/migrate.ts';
 import { findBindingByToken, getClientBinding } from './db/clients.ts';
 import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
-import { countToolsByServer, markAbsentToolsStale, upsertTool } from './db/tools.ts';
+import { countToolsByServer, markAbsentToolsStale, recordToolUsage, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
 import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalsOf, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
@@ -94,6 +94,7 @@ import {
   type ToolDefinition,
 } from './tools/registry.ts';
 import { isToolVisible, type ToolVisibility } from './tools/search.ts';
+import { createToolTextSearch } from './tools/search-fts.ts';
 
 export interface AssemblyOptions {
   root?: string;
@@ -251,6 +252,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       eventsHub.publish('catalog_changed', event);
     },
   });
+  const toolTextSearch = createToolTextSearch({ db });
   // One budget for the whole `log/` domain: the writers' own prune only fires
   // when a daily file rolls over, which a long-lived process can defer for
   // hours, and it never sees `payload/`.
@@ -668,7 +670,31 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         });
       }),
     onAudit: (event) => {
-      const record = { ...event, ts: new Date().toISOString() };
+      const at = new Date().toISOString();
+      const record = { ...event, ts: at };
+      // Lifetime usage counts `tool_result` only: `tool_call` has no outcome,
+      // and a denied call never reaches `tool_result`. Every tool_result counts,
+      // including future admin test runs; excluding test execution later needs
+      // a source marker on the event.
+      if (event.event === 'tool_result') {
+        const server = typeof event['server'] === 'string' ? event['server'] : '';
+        const canonical = typeof event['tool'] === 'string' ? event['tool'] : '';
+        // MCP names are canonical `<server>.<tool>`; official/builtin names are bare.
+        const name =
+          server !== '' && canonical.startsWith(`${server}.`)
+            ? canonical.slice(server.length + 1)
+            : canonical;
+        if (server !== '' && name !== '') {
+          try {
+            recordToolUsage(db, { serverId: server, name, ok: event['ok'] === true, at });
+          } catch (error) {
+            log(
+              `tool usage write failed for ${server}.${name}: ${error instanceof Error ? error.message : String(error)}`,
+              { level: 'warn', scope: 'db' },
+            );
+          }
+        }
+      }
       if (event.event.startsWith('tool_')) {
         audit.recordToolCall(record);
       } else if (event.event.startsWith('eval_')) {
@@ -940,6 +966,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         ...context,
         visibility: surface.visibility,
         searchToolsDefinition: surface.searchToolsDefinition,
+        toolTextSearch,
       });
     },
     tasksGet: async (params, context) => {

@@ -11,6 +11,7 @@ import {
   jsonText,
   readFlag,
   readJsonValue,
+  readNumber,
   readStringArray,
   readText,
   requireText,
@@ -44,6 +45,19 @@ export interface ToolRecord {
   staleOverride: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
+  /** Lifetime `tool_result` counters; zero when the tool was never called. */
+  callCount: number;
+  successCount: number;
+  lastCalledAt: string | null;
+}
+
+/** Input for one lifetime `tool_result` counter update. */
+export interface ToolUsageInput {
+  serverId: string;
+  name: string;
+  ok: boolean;
+  /** Event timestamp; stored as `last_called_at`. */
+  at: string;
 }
 
 /** One tool as reported by an upstream `tools/list`. Admin edits are preserved. */
@@ -80,8 +94,19 @@ export interface ToolWriteResult {
   revision: number;
 }
 
+const SELECT_TOOL_WITH_USAGE = `
+SELECT
+  t.*,
+  u.call_count AS call_count,
+  u.success_count AS success_count,
+  u.last_called_at AS last_called_at
+FROM tools t
+LEFT JOIN tool_usage u ON u.server_id = t.server_id AND u.name = t.name`;
+
 export function listTools(db: DatabaseSync, serverId: string): ToolRecord[] {
-  const rows = db.prepare('SELECT * FROM tools WHERE server_id = ? ORDER BY name').all(serverId);
+  const rows = db
+    .prepare(`${SELECT_TOOL_WITH_USAGE} WHERE t.server_id = ? ORDER BY t.name`)
+    .all(serverId);
   return rows.map(toTool);
 }
 
@@ -111,8 +136,28 @@ export function countToolsByServer(db: DatabaseSync): Map<string, ServerToolCoun
 }
 
 export function getTool(db: DatabaseSync, serverId: string, name: string): ToolRecord | null {
-  const row = db.prepare('SELECT * FROM tools WHERE server_id = ? AND name = ?').get(serverId, name);
+  const row = db
+    .prepare(`${SELECT_TOOL_WITH_USAGE} WHERE t.server_id = ? AND t.name = ?`)
+    .get(serverId, name);
   return row ? toTool(row) : null;
+}
+
+/**
+ * Accumulates one lifetime `tool_result` counter. The UPSERT is keyed by the
+ * `(server_id, name)` tool primary key; `tool_usage` has no foreign key, so a
+ * deleted tool's history survives and a re-added tool inherits it.
+ */
+export function recordToolUsage(db: DatabaseSync, input: ToolUsageInput): void {
+  const name = requireToolName(input.name);
+  if (input.serverId === '') throw new DbValidationError('tool usage serverId must not be empty');
+  db.prepare(`
+    INSERT INTO tool_usage (server_id, name, call_count, success_count, last_called_at)
+    VALUES (?, ?, 1, ?, ?)
+    ON CONFLICT (server_id, name) DO UPDATE SET
+      call_count = call_count + 1,
+      success_count = success_count + excluded.success_count,
+      last_called_at = excluded.last_called_at
+  `).run(input.serverId, name, input.ok ? 1 : 0, input.at);
 }
 
 export function hashToolSchema(inputSchema: unknown): string {
@@ -445,7 +490,16 @@ function toTool(row: DbRow): ToolRecord {
     staleOverride: readFlag(row, 'stale_override'),
     firstSeenAt: requireText(row, 'first_seen_at'),
     lastSeenAt: requireText(row, 'last_seen_at'),
+    callCount: readCount(row, 'call_count'),
+    successCount: readCount(row, 'success_count'),
+    lastCalledAt: readText(row, 'last_called_at'),
   };
+}
+
+/** LEFT JOIN misses read as zero; a stored NULL is never a counter. */
+function readCount(row: DbRow, column: string): number {
+  if (row[column] === null || row[column] === undefined) return 0;
+  return readNumber(row, column);
 }
 
 function mustGetTool(db: DatabaseSync, serverId: string, name: string): ToolRecord {

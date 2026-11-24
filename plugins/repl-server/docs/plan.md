@@ -128,3 +128,16 @@
 | `RST-T08` | REPL 端到端：HTTP daemon 与 stdio 传输（不启动 Claude Code） | RST-T02, RST-T03, RST-T04, RST-T05, RST-T06, RST-T07, 外部实现：HTTP daemon 启动参数（端口 0）、stdio 入口、REPL_CLAUDE_BIN/PATH 注入 | 2d |
 | `RST-T09` | Claude Code 2.1.327 E2E：headless 自动 + interactive 手工冒烟 | RST-T01, RST-T07, RST-T08 | 1d |
 | `RST-T10` | 验收矩阵、无测试闸门与 CI 命令 | RST-T01, RST-T02, RST-T03, RST-T04, RST-T05, RST-T06, RST-T07, RST-T08, RST-T09 | 1d |
+
+## 待办
+
+### MCP 协议双版本兼容（2025-11-25 legacy / 2026-07-28 modern）
+
+状态：待办，2026-11-24 记录，暂不实施。
+
+- **现象**：请求记录出现 `Unsupported protocol version: 2025-11-25`。`server/src/mcp/discover.ts:9-10` 只允许 `2026-07-28`，`initialize` 与 `server/discover` 共用同一版本数组；未知版本返回 `-32600`（`discover.ts:121-125`）。
+- **背景**：2025-11-25 是 legacy 稳定版；2026-07-28 是破坏性 modern 版本（移除 initialize/会话等），不是超集。TS SDK 1.x 仍以 2025-11-25 为 LATEST；本服务出站连接池初始版本也是 2025-11-25（`server/src/pool/adapters/client.ts:34`），所以自环/连另一个 repl-server 会触发该错误。
+- **实施方向**：拆分 `DISCOVER_PROTOCOL_VERSION`（仅 2026-07-28）与 `INITIALIZE_PROTOCOL_VERSIONS`（2025-11-25 + 2026-07-28）；legacy initialize 按请求版本返回 legacy 形状，不声明现代 tasks 语义；未知版本按 2025-11-25 规范回退到服务端最新支持版本，而不是直接 -32600。
+- **不在本次范围**：`MCP-Protocol-Version` 请求头校验（无效 400）、Streamable HTTP 无效 Origin 403，作为独立合规项记录。
+- **测试/文档**：discover/app/stdio-bridge/assembly/http-client 的版本断言；`docs/protocol.md` 支持版本说明。改完需 `node scripts/build.mjs` 并重启。
+- **验收**：2025-11-25 与 2026-07-28 的 initialize 各自被接受并回显请求版本；未知版本回退；`server/discover` 仍只报 2026-07-28；现有 2026-07-28 测试不回归。

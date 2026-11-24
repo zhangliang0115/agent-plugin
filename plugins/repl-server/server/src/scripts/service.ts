@@ -34,6 +34,7 @@ import {
   type VersionStatus,
 } from '../db/scripts.ts';
 import type { ScriptActor } from '../ports.ts';
+import { bm25Expression, buildFtsMatch, tokenizeFts } from '../search/fts-kernel.ts';
 import type { ToolDefinition, ToolInputSchema } from '../tools/registry.ts';
 import { validateToolArguments } from '../tools/registry.ts';
 import {
@@ -500,7 +501,6 @@ function requireCode(code: string | undefined): string {
 
 /** BM25 weights in `scripts_fts` column order: script_id (unindexed), name, description, tags_json. */
 const SCRIPT_BM25_WEIGHTS = [0, 3, 1, 2] as const;
-const SCRIPT_QUERY_TOKEN_RE = /[\p{Script=Han}]+|[\p{L}\p{N}]+/gu;
 const SCRIPT_QUERY_MAX_TERMS = 32;
 
 /**
@@ -509,12 +509,7 @@ const SCRIPT_QUERY_MAX_TERMS = 32;
  * the text had no indexable token and the caller should fall back to LIKE.
  */
 export function buildScriptsFtsQuery(text: string): string | null {
-  const tokens = [...text.matchAll(SCRIPT_QUERY_TOKEN_RE)].map((match) => match[0]);
-  if (tokens.length === 0) return null;
-  return tokens
-    .slice(0, SCRIPT_QUERY_MAX_TERMS)
-    .map((token) => `"${token.replaceAll('"', '""')}"*`)
-    .join(' ');
+  return buildFtsMatch(tokenizeFts(text, SCRIPT_QUERY_MAX_TERMS), 'AND');
 }
 
 function toSearchItem(row: Record<string, unknown>): ScriptSearchItem {
@@ -983,7 +978,7 @@ export class ScriptService {
         JOIN scripts s ON s.rowid = scripts_fts.rowid
         JOIN script_versions v ON v.script_id = s.script_id AND v.version = s.active_version
         WHERE ${where.join(' AND ')}
-        ORDER BY bm25(scripts_fts, ${SCRIPT_BM25_WEIGHTS.join(', ')}), s.updated_at DESC, s.script_id DESC
+        ORDER BY ${bm25Expression('scripts_fts', SCRIPT_BM25_WEIGHTS)}, s.updated_at DESC, s.script_id DESC
         LIMIT ?
       `)
       .all(...params)

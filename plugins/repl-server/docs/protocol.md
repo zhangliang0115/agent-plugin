@@ -200,7 +200,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 {
   "type": "object",
   "properties": {
-    "query": { "type": "string" },
+    "query": { "type": "string", "maxLength": 200 },
     "server": { "type": "string", "enum": ["<可见 MCP server id>"] },
     "category": { "type": "string", "enum": ["<可见分类>"] },
     "tags": { "type": "array", "items": { "type": "string", "enum": ["<可见标签>"] } },
@@ -212,7 +212,9 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 - 空 `query` 未传 `server`：返回 server 概览，每项 `{ "name", "kind": "mcp", "server", "category?", "summary?", "tags?", "toolCount", "description" }`。
 - 空 `query` 传 `server`：返回该 server 的 MCP 工具列表（仍受 `category`/`tags`/`max` 收窄），按规范名排序。
-- 非空 `query`：在工具名、有效 tags、工具 description 中匹配；`server`/`category`/`tags` 只做结构化收窄，server id 与 server summary 不参与关键词匹配。`tags` 是 all-of。
+- 非空 `query`：先走 `tools_fts` 的 FTS5 MATCH（按 Han/字母数字连续片段分词，保留大小写与重复，最多取前 32 个 token，每个 token 加引号做前缀匹配并用 `OR` 连接，按 `bm25` 计分），再把 `query` 按空白切词、转小写后按固定小批（每批 16 个词）执行 LIKE 子串扫描并合并结果；LIKE 批次另带工具名与 `<server>.<tool>` 的精确等值条件，纯标点工具名（如 `+++`）由此可达。匹配字段为工具名、生效 description、生效 tags（tool tags 与 server tags 的并集）；display_name、server id、server summary 不参与关键词匹配。`server`/`category`/`tags` 只做结构化收窄，`tags` 是 all-of。
+- 非空 `query` 的排序：先按 `scoreTool` 分数降序，再按 FTS `bm25` 升序（LIKE-only 命中没有 bm25，排在同分 FTS 命中之后），最后按规范名升序。精确名只通过 `scoreTool` 的 +10 得分体现，没有独立的精确名层级，因此 `max` 截断后的子集不保证与纯快照路径一致。空 `query` 仍走快照概览/列表。
+- 非空 `query` 的已知限制：非 ASCII 字符的大小写折叠与变音符号等价不保证命中（LIKE 的 `lower()` 只折叠 ASCII）；server id 与 server summary 不作为匹配字段，纯 server id 查询（如 `pg-main`）本身不命中；但 server id 被分隔符拆出的普通词（如 `pg`、`main`）若同时出现在工具名/description/tags 中，工具仍会作为正常关键词命中。
 - 结果项 `{ "name": "<server>.<tool>", "kind": "builtin"|"mcp", "server?", "category?", "summary?", "description?", "tags?" }`。
 - 可见性：`allowed_servers` 只约束 MCP 工具（builtin 不受约束）；`allowed_tags` 对有效 tags 做 any-of 且同样约束 builtin；空列表表示全部不可见。
 

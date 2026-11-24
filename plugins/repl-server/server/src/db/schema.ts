@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -362,6 +362,26 @@ END;
 
 export function createSchemaV8(db: DatabaseSync): void {
   db.exec(SCHEMA_V8_SQL);
+}
+
+/**
+ * DDL for schema v9: lifetime tool-call counters fed by `tool_result` audit
+ * events. Deliberately no foreign key to `tools` — deleting a tool keeps its
+ * history so a re-added tool shows the same totals.
+ */
+export const SCHEMA_V9_SQL = `
+CREATE TABLE IF NOT EXISTS tool_usage (
+  server_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  call_count INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  last_called_at TEXT NOT NULL,
+  PRIMARY KEY (server_id, name)
+);
+`;
+
+export function createSchemaV9(db: DatabaseSync): void {
+  db.exec(SCHEMA_V9_SQL);
 }
 
 /** Raised when repository input violates a storage invariant. */

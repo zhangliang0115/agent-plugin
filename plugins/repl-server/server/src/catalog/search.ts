@@ -2,6 +2,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { BUILTIN_SERVER_ID } from '../db/servers.ts';
+import { bm25Expression, buildFtsMatch, tokenizeFts } from '../search/fts-kernel.ts';
 import {
   effectiveToolDescription,
   effectiveToolTags,
@@ -20,7 +21,7 @@ export const SEARCH_MAX_LIMIT = 50;
  */
 export const BM25_WEIGHTS = [0, 3, 2.5, 1, 1.5, 2] as const;
 
-const BM25_SQL = `bm25(tools_fts, ${BM25_WEIGHTS.join(', ')})`;
+const BM25_SQL = bm25Expression('tools_fts', BM25_WEIGHTS);
 
 const TOOL_SOURCE = 'FROM tools t JOIN servers s ON s.id = t.server_id';
 const FTS_SOURCE =
@@ -86,7 +87,6 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   docs: ['document'],
 };
 
-const TOKEN_RE = /[\p{Script=Han}]+|[\p{L}\p{N}]+/gu;
 const FILTER_RE = /(?:^|\s)(server|category|tag|type):(?:"([^"]*)"|(\S+))/gi;
 const MAX_QUERY_CHARS = 16384;
 const MAX_TERMS = 32;
@@ -240,7 +240,7 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
 }
 
 function tokenize(text: string): string[] {
-  return [...text.matchAll(TOKEN_RE)].map((match) => match[0].toLowerCase());
+  return tokenizeFts(text, MAX_TERMS).map((token) => token.toLowerCase());
 }
 
 function isHan(value: string): boolean {
@@ -283,10 +283,7 @@ export function expandQueryTerms(text: string): string[] {
 
 /** Builds an FTS5 MATCH expression: every term is quoted and prefix-matched. @module */
 export function toFtsMatch(terms: readonly string[]): string {
-  return terms
-    .filter((term) => term !== '')
-    .map((term) => `"${term.replaceAll('"', '""')}"*`)
-    .join(' OR ');
+  return buildFtsMatch(terms.filter((term) => term !== ''), 'OR') ?? '';
 }
 
 function resolveFilters(request: SearchRequest, parsed: ParsedSearchQuery): ResolvedFilters {

@@ -40,7 +40,7 @@ export const SEARCH_DEFAULT_MAX = 10;
 export const OFFICIAL_TOOL_GROUP = '__official__';
 
 /** Locale-independent ordering keeps tools/list and search results stable across machines. */
-function compareNames(left: string, right: string): number {
+export function compareNames(left: string, right: string): number {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
@@ -70,7 +70,7 @@ export function isToolVisible(tool: CatalogTool, visibility: ToolVisibility = {}
   return true;
 }
 
-function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
+export function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
   if (input.server !== undefined) {
     if (input.server === OFFICIAL_TOOL_GROUP) {
       if (tool.kind !== 'builtin') return false;
@@ -88,7 +88,7 @@ function matchesFilters(tool: CatalogTool, input: SearchToolsInput): boolean {
   return true;
 }
 
-function toItem(tool: CatalogTool, name: string): SearchToolItem {
+export function toItem(tool: CatalogTool, name: string): SearchToolItem {
   const item: SearchToolItem = { name, kind: tool.kind };
   if (tool.kind === 'mcp' && tool.server !== undefined) item.server = tool.server;
   if (tool.category !== undefined) item.category = tool.category;
@@ -103,7 +103,7 @@ function toItem(tool: CatalogTool, name: string): SearchToolItem {
  * no match. Canonical names match exactly (`pg.query`), but substring matching
  * uses the bare tool name so the server id never becomes a keyword.
  */
-function scoreTool(tool: CatalogTool, canonicalName: string, terms: readonly string[]): number {
+export function scoreTool(tool: CatalogTool, canonicalName: string, terms: readonly string[]): number {
   const canonical = canonicalName.toLowerCase();
   const bareName = tool.name.toLowerCase();
   const tags = (tool.tags ?? []).map((tag) => tag.toLowerCase());

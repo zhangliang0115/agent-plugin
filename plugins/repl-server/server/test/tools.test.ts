@@ -100,7 +100,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
   assert.deepEqual(getToolDefinition('search_tools')?.inputSchema, {
     type: 'object',
     properties: {
-      query: { type: 'string' },
+      query: { type: 'string', maxLength: 200 },
       server: { type: 'string' },
       category: { type: 'string' },
       tags: { type: 'array', items: { type: 'string' } },
@@ -592,7 +592,10 @@ test('dynamic search_tools schema carries the visible server, category and tag e
     type: 'array',
     items: { type: 'string', enum: ['db', 'read'] },
   });
-  assert.deepEqual(definition.inputSchema.properties.query, { type: 'string' });
+  assert.deepEqual(definition.inputSchema.properties.query, {
+    type: 'string',
+    maxLength: 200,
+  });
   assert.deepEqual(definition.inputSchema.properties.max, {
     type: 'integer',
     minimum: 1,

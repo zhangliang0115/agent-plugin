@@ -2,9 +2,11 @@
 import { Alert, Collapse, Descriptions, Space, Table, Tag, Typography } from 'antd';
 
 import { schemaDoc, type SchemaField } from '../../lib/schema-doc.ts';
+import { formatBytes, formatNumber, formatPercent, formatTimestamp } from '../../lib/format.ts';
+import { toolStatsFrom, toolSuccessRate, type ToolStats } from '../../lib/tool-stats.ts';
 import { JsonView } from './JsonView.tsx';
 
-export interface ToolSchemaDocTool {
+export interface ToolSchemaDocTool extends Partial<ToolStats> {
   serverId: string;
   name: string;
   description: string | null;
@@ -73,6 +75,9 @@ const PARAM_COLUMNS = [
 export function ToolSchemaDoc({ tool }: { tool: ToolSchemaDocTool }): React.ReactElement {
   const doc = schemaDoc(tool.schema);
   const description = tool.descriptionOverride ?? tool.description;
+  const stats = toolStatsFrom(tool);
+  const successRate = toolSuccessRate(stats);
+  const called = stats.callCount > 0;
   const schemaIsRecord =
     typeof tool.schema === 'object' && tool.schema !== null && !Array.isArray(tool.schema);
 
@@ -113,6 +118,37 @@ export function ToolSchemaDoc({ tool }: { tool: ToolSchemaDocTool }): React.Reac
           </Tag>
         </Descriptions.Item>
         <Descriptions.Item label="并发">{tool.concurrency}</Descriptions.Item>
+      </Descriptions>
+
+      <Descriptions size="small" column={2} title="使用统计">
+        <Descriptions.Item label="使用次数">{formatNumber(stats.callCount)}</Descriptions.Item>
+        <Descriptions.Item label="成功次数">
+          {called ? formatNumber(stats.successCount) : '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="失败次数">
+          {called ? formatNumber(Math.max(0, stats.callCount - stats.successCount)) : '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="成功率">
+          {successRate === null ? '—' : formatPercent(successRate)}
+        </Descriptions.Item>
+        <Descriptions.Item label="最近使用">
+          <span className="mono">{formatTimestamp(stats.lastCalledAt)}</span>
+        </Descriptions.Item>
+      </Descriptions>
+
+      <Descriptions size="small" column={4} title="模型字节">
+        <Descriptions.Item label="definition">
+          {formatBytes(stats.modelBytes.definition)}
+        </Descriptions.Item>
+        <Descriptions.Item label="searchItem">
+          {formatBytes(stats.modelBytes.searchItem)}
+        </Descriptions.Item>
+        <Descriptions.Item label="schema">
+          {formatBytes(stats.modelBytes.schema)}
+        </Descriptions.Item>
+        <Descriptions.Item label="description">
+          {formatBytes(stats.modelBytes.description)}
+        </Descriptions.Item>
       </Descriptions>
 
       <div>
