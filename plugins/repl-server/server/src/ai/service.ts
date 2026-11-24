@@ -3,7 +3,7 @@ import type { LogFn } from '../log.ts';
  * AI service: config, proposal drafting and annotation preview/apply (08 §3–§5).
  *
  * The service owns the runner, the limiter, both in-memory caches and the
- * auto-preview bookkeeping. The admin handler is a thin route layer over this
+ * auto-annotation bookkeeping. The admin handler is a thin route layer over this
  * object; assembly injects the stores and the audit sink.
  * @module
  */
@@ -24,11 +24,18 @@ import {
 import type { SettingsStore } from '../admin/settings.ts';
 import { readTagDictionary, type TagDefinition } from '../admin/tags.ts';
 import type { ToolRecord, ToolStore } from '../admin/tools.ts';
+import { evaluateTagPolicy } from '../catalog/tag-policy.ts';
 import { getRevision } from '../db/meta.ts';
 import { isSeedServer } from '../db/servers.ts';
 import { systemClock, type Clock } from '../ports.ts';
-import { createAnnotationStore, type PendingAnnotationView } from './annotation-store.ts';
+import {
+  createAnnotationStore,
+  type PendingAnnotationError,
+  type PendingAnnotationMeta,
+  type PendingAnnotationView,
+} from './annotation-store.ts';
 import { applyAnnotation, UnknownToolError, type AnnotationPatch } from './apply.ts';
+import { repairAnnotationTags } from './tag-preview.ts';
 import {
   AI_AUTO_MIN_INTERVAL_MS,
   AI_INPUT_MAX_BYTES,
@@ -188,15 +195,15 @@ export interface AiService {
     expectedRevision: number,
   ): Promise<AnnotationApplyResponse>;
   pendingAnnotations(): Promise<{ items: PendingAnnotationView[] }>;
-  /** Marks a server as created by this process so its first `tools/list` may auto-preview. */
+  /** Marks a server as created by this process so its first `tools/list` may auto-annotate. */
   onServerCreated(serverId: string): void;
   /**
-   * Called after a `tools/list` write. Returns when the background preview settles,
-   * but production callers should not await it: the AI run is bounded by
-   * `ai.timeoutMs` and must not block tool indexing.
+   * Called after a `tools/list` write. Returns when the background annotation
+   * and apply settle, but production callers should not await it: the AI run is
+   * bounded by `ai.timeoutMs` and must not block tool indexing.
    */
   onToolsIndexed(serverId: string): Promise<void>;
-  /** PATCH/refresh/delete: a pending preview built from older metadata is stale. */
+  /** PATCH/refresh/delete: a failed auto annotation built from older metadata is stale. */
   onServerMutated(serverId: string): void;
   /**
    * Shuts the AI subsystem down: queued runs are rejected, in-flight
@@ -278,6 +285,75 @@ function toAnnotationPatch(annotation: NormalizedAnnotation): AnnotationPatch {
   if (annotation.tagSuggestions !== undefined) patch.tagSuggestions = annotation.tagSuggestions;
   if (annotation.toolOverrides !== undefined) patch.toolOverrides = annotation.toolOverrides;
   return patch;
+}
+
+function emptyProposed(): AnnotationProposedView {
+  return {
+    summary: null,
+    category: null,
+    categorySuggestion: null,
+    tags: [],
+    tagSuggestions: [],
+    toolOverrides: [],
+  };
+}
+
+/**
+ * Automatic apply body (08 §4.5): only missing server fields are filled, so an
+ * existing manual summary/category is never overwritten; nulls mean "the model
+ * proposed nothing". Suggestions never write the dictionaries, and tool tags
+ * may only reference keys that already exist.
+ */
+function buildAutoApplyBody(
+  proposed: AnnotationProposedView,
+  current: { summary: string | null; category: string | null },
+  dictionaryTags: ReadonlySet<string>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (emptyText(current.summary) && proposed.summary !== null && proposed.summary.trim() !== '') {
+    body['summary'] = proposed.summary;
+  }
+  if (emptyText(current.category) && proposed.category !== null && proposed.category.trim() !== '') {
+    body['category'] = proposed.category;
+  }
+  const tags = proposed.tags.filter((tag) => dictionaryTags.has(tag));
+  if (tags.length > 0) body['tags'] = tags;
+  const overrides: Array<{ name: string; tags: string[] }> = [];
+  for (const override of proposed.toolOverrides) {
+    const overrideTags = (override.tags ?? []).filter((tag) => dictionaryTags.has(tag));
+    if (overrideTags.length > 0) overrides.push({ name: override.name, tags: overrideTags });
+  }
+  if (overrides.length > 0) body['toolOverrides'] = overrides;
+  return body;
+}
+
+const FAILURE_MESSAGE_MAX = 1000;
+
+function annotationFailure(error: unknown): PendingAnnotationError {
+  const base = error instanceof Error ? error.message : String(error);
+  const details = error instanceof AdminApiError && isPlainObject(error.details) ? error.details : null;
+  const detailErrors: string[] = [];
+  if (details !== null && Array.isArray(details['errors'])) {
+    detailErrors.push(
+      ...details['errors'].filter((entry): entry is string => typeof entry === 'string'),
+    );
+  }
+  if (details !== null && Array.isArray(details['tools'])) {
+    for (const entry of details['tools']) {
+      if (!isPlainObject(entry)) continue;
+      const name = typeof entry['name'] === 'string' ? entry['name'] : '?';
+      const errors = Array.isArray(entry['errors'])
+        ? entry['errors'].filter((value): value is string => typeof value === 'string')
+        : [];
+      if (errors.length > 0) detailErrors.push(`${name}: ${errors.join('; ')}`);
+    }
+  }
+  const message = detailErrors.length === 0 ? base : `${base}: ${detailErrors.join('; ')}`;
+  return {
+    code: errorCode(error),
+    message:
+      message.length > FAILURE_MESSAGE_MAX ? `${message.slice(0, FAILURE_MESSAGE_MAX)}…` : message,
+  };
 }
 
 interface AnnotationDictionaries {
@@ -732,7 +808,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
 
   /**
    * Builds the annotate prompt and runs the model. `onPrecheckPassed` fires once
-   * the size cap passed and right before the model call; auto previews use it to
+   * the size cap passed and right before the model call; automatic runs use it to
    * claim the `(serverId, toolsHash)` attempt without burning it on a 422.
    */
   async function buildAnnotationPreview(
@@ -782,8 +858,17 @@ export function createAiService(deps: AiServiceDeps): AiService {
     }
 
     const restricted = restrictAnnotationToDictionary(normalized, dictionaryKeys(dictionaries));
-    const warnings = [...restricted.annotation.warnings, ...restricted.dropped];
-    if (annotationIsEmpty(restricted.annotation)) {
+    const repaired = repairAnnotationTags(
+      restricted.annotation,
+      record.tags,
+      new Map(tools.map((tool) => [tool.name, tool.tags])),
+    );
+    const warnings = [
+      ...repaired.annotation.warnings,
+      ...restricted.dropped,
+      ...repaired.warnings,
+    ];
+    if (annotationIsEmpty(repaired.annotation)) {
       warnings.push('AI 未给出可应用的标注');
     }
     emitSuccess(audit, null);
@@ -796,7 +881,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
         category: record.category,
         tags: [...record.tags],
       },
-      proposed: proposedView(restricted.annotation),
+      proposed: proposedView(repaired.annotation),
       warnings,
       omittedTools: promptResult.omittedTools,
       meta: {
@@ -882,7 +967,7 @@ export function createAiService(deps: AiServiceDeps): AiService {
       })),
       revision: result.revision,
       changed: result.changed,
-      warnings: restricted.dropped,
+      warnings: [...restricted.dropped, ...result.warnings],
     };
   }
 
@@ -894,11 +979,12 @@ export function createAiService(deps: AiServiceDeps): AiService {
         warnings: entry.warnings,
         omittedTools: entry.omittedTools,
         createdAt: entry.createdAt,
+        error: entry.error,
       })),
     };
   }
 
-  // -- auto preview ---------------------------------------------------------
+  // -- auto annotation ------------------------------------------------------
 
   function onServerCreated(serverId: string): void {
     annotations.deleteByServer(serverId);
@@ -909,24 +995,95 @@ export function createAiService(deps: AiServiceDeps): AiService {
     annotations.deleteByServer(serverId);
   }
 
+  function recordAutoFailure(input: {
+    serverId: string;
+    proposed: AnnotationProposedView;
+    warnings: string[];
+    omittedTools: number;
+    toolsHash: string;
+    meta: PendingAnnotationMeta;
+    error: unknown;
+  }): void {
+    const failure = annotationFailure(input.error);
+    annotations.put({
+      serverId: input.serverId,
+      // A retry goes through the manual apply endpoint; drop the dictionary
+      // suggestions so it cannot add new keys that only the automatic path skipped.
+      proposed: {
+        ...input.proposed,
+        categorySuggestion: null,
+        tagSuggestions: [],
+      },
+      warnings: input.warnings,
+      omittedTools: input.omittedTools,
+      createdAt: new Date(clock.now()).toISOString(),
+      toolsHash: input.toolsHash,
+      meta: input.meta,
+      error: failure,
+    });
+    log('ai auto annotation queued as failed', {
+      level: 'warn',
+      scope: 'ai',
+      kind: 'annotate',
+      server: input.serverId,
+      source: 'auto',
+      code: failure.code,
+    });
+  }
+
+  /**
+   * Applies an auto annotation through the same transaction and validation as
+   * the manual endpoint. The server row is re-read before each attempt so a
+   * concurrent edit to summary/category is never overwritten, and the revision
+   * is read immediately before the transaction; one conflict is retried.
+   * Returns null when there is nothing left to fill.
+   */
+  async function applyAutoAnnotation(
+    serverId: string,
+    buildBody: (current: { summary: string | null; category: string | null }) => Record<string, unknown>,
+  ): Promise<AnnotationApplyResponse | null> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = await deps.servers.get(serverId);
+      if (current === null) {
+        throw new AdminApiError(404, 'SERVER_NOT_FOUND', `server ${serverId} does not exist`, {
+          serverId,
+        });
+      }
+      const body = buildBody({ summary: current.summary, category: current.category });
+      if (Object.keys(body).length === 0) return null;
+      try {
+        return await annotateApply(serverId, body, getRevision(deps.db));
+      } catch (error) {
+        lastError = error;
+        if (errorCode(error) !== 'REVISION_CONFLICT') throw error;
+      }
+    }
+    throw lastError;
+  }
+
   async function maybeAutoAnnotate(serverId: string): Promise<void> {
     const ai = getAiSettings(deps.db);
     if (!ai.enabled || !ai.autoAnnotate) return;
 
     const record = await deps.servers.get(serverId);
     if (record === null || isBuiltinRecord(record)) return;
-    // Only a fully annotated server is skipped: discovery-registered servers arrive
-    // with a summary but no category/tags and still need a preview.
-    if (
-      !emptyText(record.summary) &&
-      !emptyText(record.category) &&
-      record.tags.length > 0
-    ) {
-      return;
-    }
 
     const tools = await deps.tools.listByServer(serverId);
     if (tools.length === 0) return;
+
+    // Server tags may be empty: completeness is judged by each enabled tool's
+    // effective tags (server ∪ tool) against the shared tag policy. A server that
+    // only needs its migrated tags to stay empty is therefore skipped.
+    if (
+      !emptyText(record.summary) &&
+      !emptyText(record.category) &&
+      tools.every(
+        (tool) => !tool.enabled || evaluateTagPolicy(record.tags, tool.tags).issues.length === 0,
+      )
+    ) {
+      return;
+    }
 
     const hash = hashTools(tools);
     const pending = annotations.get(serverId);
@@ -943,23 +1100,74 @@ export function createAiService(deps: AiServiceDeps): AiService {
     // simultaneous `tools/list` calls from both reaching the model.
     autoInFlight.add(key);
     lastAutoAt.set(serverId, clock.now());
+    let attemptClaimed = false;
     try {
-      const preview = await buildAnnotationPreview(serverId, 'auto', () =>
-        annotations.markAttempt(key),
-      );
-      annotations.put({
-        serverId,
-        proposed: preview.proposed,
-        warnings: preview.warnings,
-        omittedTools: preview.omittedTools,
-        createdAt: new Date(clock.now()).toISOString(),
-        toolsHash: preview.toolsHash,
-        meta: preview.meta,
+      const preview = await buildAnnotationPreview(serverId, 'auto', () => {
+        annotations.markAttempt(key);
+        attemptClaimed = true;
       });
+      const dictionaries = await annotationDictionaries();
+      const dictionaryTags = dictionaryKeys(dictionaries).tags;
+      try {
+        const applied = await applyAutoAnnotation(serverId, (current) =>
+          buildAutoApplyBody(preview.proposed, current, dictionaryTags),
+        );
+        if (applied === null) {
+          log('ai auto annotation has nothing to apply', {
+            scope: 'ai',
+            kind: 'annotate',
+            server: serverId,
+            source: 'auto',
+          });
+          return;
+        }
+        log('ai auto annotation applied', {
+          scope: 'ai',
+          kind: 'annotate',
+          server: serverId,
+          source: 'auto',
+          changed: applied.changed.join(',') || 'none',
+          warnings: applied.warnings.join('; ') || 'none',
+        });
+      } catch (error) {
+        recordAutoFailure({
+          serverId,
+          proposed: preview.proposed,
+          warnings: preview.warnings,
+          omittedTools: preview.omittedTools,
+          toolsHash: preview.toolsHash,
+          meta: preview.meta,
+          error,
+        });
+      }
     } catch (error) {
-      // Precheck failures leave no attempt behind; model failures are audited by
-      // `callModel`. Neither is retried automatically.
-      log('ai auto annotate failed', { level: 'warn', scope: 'ai', kind: 'annotate', server: serverId, code: errorCode(error) });
+      // Precheck failures leave no attempt behind, so they retry on the next
+      // tools/list. Failures after the attempt claim are queued instead: the
+      // attempt set would prevent an automatic retry anyway.
+      if (attemptClaimed) {
+        recordAutoFailure({
+          serverId,
+          proposed: emptyProposed(),
+          warnings: [],
+          omittedTools: 0,
+          toolsHash: hash,
+          meta: {
+            model: null,
+            durationMs: 0,
+            promptVersion: PROMPT_VERSION,
+            costUsd: null,
+          },
+          error,
+        });
+      } else {
+        log('ai auto annotate failed', {
+          level: 'warn',
+          scope: 'ai',
+          kind: 'annotate',
+          server: serverId,
+          code: errorCode(error),
+        });
+      }
     } finally {
       autoInFlight.delete(key);
     }

@@ -1,4 +1,4 @@
-/** AI annotation: preview, apply transaction semantics, summary_source and auto previews. */
+/** AI annotation: preview, apply transaction semantics, summary_source and automatic apply. */
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,9 +19,9 @@ import type { AiRunner } from '../src/ai/runner.ts';
 import { normalizeAnnotation, restrictAnnotationToDictionary } from '../src/ai/validate.ts';
 import { DbServerStore, DbSettingsStore, DbToolStore } from '../src/assembly-stores.ts';
 import { openStateDb } from '../src/db/migrate.ts';
-import { getRevision, listSettings, setSetting } from '../src/db/meta.ts';
+import { getRevision, listSettings, setSetting, bumpRevision } from '../src/db/meta.ts';
 import { createServer, getServer, updateServer } from '../src/db/servers.ts';
-import { deleteTool, getTool, upsertTool } from '../src/db/tools.ts';
+import { deleteTool, getTool, patchTool, upsertTool } from '../src/db/tools.ts';
 import type { Clock } from '../src/ports.ts';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-claude/fake-claude.mjs', import.meta.url));
@@ -44,6 +44,7 @@ class MutableClock implements Clock {
 
 interface Fixture {
   db: DatabaseSync;
+  servers: DbServerStore;
   settings: DbSettingsStore;
   service: AiService;
   rebuilds: string[][];
@@ -99,7 +100,7 @@ async function makeFixture(
     onAiRun: (event) => audits.push(event),
   });
 
-  return { db, settings, service, rebuilds, audits, clock };
+  return { db, servers, settings, service, rebuilds, audits, clock };
 }
 
 function seedServer(
@@ -125,8 +126,13 @@ function seedServer(
   });
 }
 
-function seedTool(db: DatabaseSync, name = 'query', description = 'Run a read-only SQL query.'): void {
-  upsertTool(db, 'pg', { name, description, inputSchema: { type: 'object' } });
+function seedTool(
+  db: DatabaseSync,
+  name = 'query',
+  description = 'Run a read-only SQL query.',
+  tags: string[] = [],
+): void {
+  upsertTool(db, 'pg', { name, description, inputSchema: { type: 'object' }, tags });
 }
 
 async function expectApiError(
@@ -149,11 +155,11 @@ async function expectApiError(
 const APPLY = {
   summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
   category: 'database',
-  tags: ['postgresql', 'query', 'write'],
+  tags: ['postgresql'],
   toolOverrides: [
     {
       name: 'query',
-      tags: ['read', 'query'],
+      tags: ['docs'],
     },
   ],
 };
@@ -179,7 +185,7 @@ test('preview returns proposed metadata without writing', async (t) => {
   assert.equal(preview.proposed.summary, APPLY.summary);
   assert.equal(preview.proposed.category, 'database');
   assert.equal(preview.proposed.categorySuggestion, null);
-  assert.deepEqual(preview.proposed.tags, ['postgresql', 'query', 'write']);
+  assert.deepEqual(preview.proposed.tags, ['postgresql']);
   assert.deepEqual(preview.proposed.tagSuggestions, []);
   assert.equal(preview.proposed.toolOverrides?.[0]?.name, 'query');
   assert.equal(preview.omittedTools, 0);
@@ -190,6 +196,52 @@ test('preview returns proposed metadata without writing', async (t) => {
   assert.equal(fixture.rebuilds.length, 0);
   assert.equal(fixture.audits.length, 1);
   assert.equal(fixture.audits[0]?.kind, 'annotate');
+});
+
+test('preview trims tool additions against the existing tool tags', async (t) => {
+  const runner: AiRunner = {
+    async run() {
+      return {
+        payload: {
+          summary: null,
+          category: null,
+          tags: [],
+          toolOverrides: [{ name: 'query', tags: ['memory', 'gitlab'] }],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  seedServer(fixture.db);
+  seedTool(fixture.db, 'query', 'Run a read-only SQL query.', ['docs', 'testing', 'security']);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.deepEqual(preview.proposed.toolOverrides, [{ name: 'query', tags: ['memory'] }]);
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('叠加现有标签后最多 4 个') && warning.includes('gitlab'),
+    ),
+  );
+
+  const before = getRevision(fixture.db);
+  const response = await fixture.service.annotateApply(
+    'pg',
+    { toolOverrides: preview.proposed.toolOverrides },
+    before,
+  );
+  assert.deepEqual(response.changed, ['tools.query.tags']);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, [
+    'docs',
+    'testing',
+    'security',
+    'memory',
+  ]);
 });
 
 test('annotate prompt hides literal args and keeps secret names', async (t) => {
@@ -419,7 +471,7 @@ test('apply writes metadata and tool overrides in one revision bump', async (t) 
   assert.equal(response.revision, before + 1);
   assert.equal(getRevision(fixture.db), before + 1);
   assert.equal(response.server.summarySource, 'ai');
-  assert.deepEqual(response.server.tags, ['postgresql', 'query', 'write']);
+  assert.deepEqual(response.server.tags, ['postgresql']);
   assert.equal(fixture.rebuilds.length, rebuildsBefore + 1);
   assert.deepEqual(fixture.rebuilds.at(-1), ['pg']);
 
@@ -435,18 +487,122 @@ test('apply writes metadata and tool overrides in one revision bump', async (t) 
   assert.ok(tool !== null);
   // Tool descriptions belong to the third party; annotation never writes an override.
   assert.equal(tool?.descriptionOverride, null);
-  assert.deepEqual(tool?.tags, ['read', 'query']);
+  assert.deepEqual(tool?.tags, ['docs']);
 
   const index = fixture.db
     .prepare('SELECT index_description, index_tags_json FROM tools WHERE server_id = ? AND name = ?')
     .get('pg', 'query');
   assert.ok(String(index?.['index_description']).includes('Run a read-only SQL query.'));
   const indexTags = JSON.parse(String(index?.['index_tags_json'])) as string[];
-  assert.deepEqual([...indexTags].sort(), ['postgresql', 'query', 'read', 'write']);
+  assert.deepEqual([...indexTags].sort(), ['docs', 'postgresql']);
   assert.equal(
     response.tools.find((entry) => entry.name === 'query')?.descriptionOverride,
     null,
   );
+});
+
+test('server tags above the limit are trimmed in preview and rejected on apply', async (t) => {
+  const runner: AiRunner = {
+    async run() {
+      return {
+        payload: {
+          summary: 'PostgreSQL 查询 (postgres sql)',
+          category: 'database',
+          tags: ['postgresql', 'docs', 'testing'],
+          toolOverrides: [],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.deepEqual(preview.proposed.tags, ['postgresql', 'docs']);
+  assert.ok(
+    preview.warnings.some((warning) => warning.includes('最多 2 个')),
+    preview.warnings.join('; '),
+  );
+
+  await expectApiError(
+    fixture.service.annotateApply(
+      'pg',
+      { tags: ['postgresql', 'docs', 'testing'] },
+      getRevision(fixture.db),
+    ),
+    'TAG_POLICY_VIOLATION',
+    422,
+  );
+});
+
+test('tool tags respect the effective limit in preview and apply', async (t) => {
+  const runner: AiRunner = {
+    async run() {
+      return {
+        payload: {
+          summary: 'PostgreSQL 查询 (postgres sql)',
+          category: 'database',
+          tags: ['postgresql', 'docs'],
+          toolOverrides: [{ name: 'query', tags: ['testing', 'security', 'memory'] }],
+          warnings: [],
+        },
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const fixture = await makeFixture(t, { runner });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+
+  const preview = await fixture.service.annotatePreview('pg');
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['testing', 'security']);
+  assert.ok(
+    preview.warnings.some((warning) => warning.includes('最多 4 个')),
+    preview.warnings.join('; '),
+  );
+
+  await expectApiError(
+    fixture.service.annotateApply(
+      'pg',
+      {
+        tags: ['postgresql', 'docs'],
+        toolOverrides: [{ name: 'query', tags: ['testing', 'security', 'memory'] }],
+      },
+      getRevision(fixture.db),
+    ),
+    'TAG_POLICY_VIOLATION',
+    422,
+  );
+});
+
+test('apply strips tool tags that repeat server tags and reports a warning', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db, { tags: ['postgresql'] });
+  seedTool(fixture.db);
+
+  const response = await fixture.service.annotateApply(
+    'pg',
+    { toolOverrides: [{ name: 'query', tags: ['postgresql', 'docs'] }] },
+    getRevision(fixture.db),
+  );
+
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['docs']);
+  assert.ok(
+    response.warnings.some((warning) => warning.includes('重复')),
+    response.warnings.join('; '),
+  );
+  assert.ok(response.changed.includes('tools.query.tags'));
 });
 
 test('a stray toolOverrides description is ignored, never written as an override', async (t) => {
@@ -456,12 +612,12 @@ test('a stray toolOverrides description is ignored, never written as an override
 
   const response = await fixture.service.annotateApply(
     'pg',
-    { toolOverrides: [{ name: 'query', description: 'AI rewrite', tags: ['read'] }] },
+    { toolOverrides: [{ name: 'query', description: 'AI rewrite', tags: ['docs'] }] },
     getRevision(fixture.db),
   );
   assert.deepEqual(response.changed, ['tools.query.tags']);
   assert.equal(getTool(fixture.db, 'pg', 'query')?.descriptionOverride, null);
-  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['read']);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['docs']);
 });
 
 test('apply with no actual change writes nothing and does not bump', async (t) => {
@@ -482,23 +638,17 @@ test('apply with no actual change writes nothing and does not bump', async (t) =
 
 test('apply merges server and tool tags; empty arrays never clear existing tags', async (t) => {
   const fixture = await makeFixture(t);
-  seedServer(fixture.db, { tags: ['env.prod', 'official'] });
+  seedServer(fixture.db, { tags: ['env.prod'] });
   upsertTool(fixture.db, 'pg', {
     name: 'query',
     description: 'Run a read-only SQL query.',
     inputSchema: { type: 'object' },
-    tags: ['read'],
+    tags: ['testing'],
   });
 
   await fixture.service.annotateApply('pg', APPLY, getRevision(fixture.db));
-  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, [
-    'env.prod',
-    'official',
-    'postgresql',
-    'query',
-    'write',
-  ]);
-  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['read', 'query']);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['env.prod', 'postgresql']);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['testing', 'docs']);
 
   const revision = getRevision(fixture.db);
   const response = await fixture.service.annotateApply(
@@ -508,14 +658,8 @@ test('apply merges server and tool tags; empty arrays never clear existing tags'
   );
   assert.deepEqual(response.changed, []);
   assert.equal(response.revision, revision);
-  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, [
-    'env.prod',
-    'official',
-    'postgresql',
-    'query',
-    'write',
-  ]);
-  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['read', 'query']);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['env.prod', 'postgresql']);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['testing', 'docs']);
 });
 
 test('accepted suggestions are written to both dictionaries in one revision bump', async (t) => {
@@ -541,11 +685,10 @@ test('accepted suggestions are written to both dictionaries in one revision bump
     'dictionary.categories',
     'dictionary.tags',
     'server.category',
-    'server.tags',
   ]);
   const stored = getServer(fixture.db, 'pg');
   assert.equal(stored?.category, 'vector-db');
-  assert.deepEqual(stored?.tags, ['vector', 'embedding']);
+  assert.deepEqual(stored?.tags, []);
 
   const settings = listSettings(fixture.db);
   assert.deepEqual(
@@ -568,22 +711,22 @@ test('suggestions for existing dictionary keys are treated as the existing item'
     'pg',
     {
       categorySuggestion: { key: 'database', zh: '换个标签', en: 'Different label' },
-      tagSuggestions: [{ key: 'read', zh: '换个标签', en: 'Different label' }],
+      tagSuggestions: [{ key: 'docs', zh: '换个标签', en: 'Different label' }],
     },
     before,
   );
 
-  assert.deepEqual(response.changed, ['server.category', 'server.tags']);
+  assert.deepEqual(response.changed, ['server.category']);
   assert.equal(getServer(fixture.db, 'pg')?.category, 'database');
-  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['read']);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, []);
   const settings = listSettings(fixture.db);
   assert.deepEqual(
     readCategoryDictionary(settings).find((entry) => entry.key === 'database'),
     { key: 'database', zh: '数据库', en: 'Database' },
   );
   assert.deepEqual(
-    readTagDictionary(settings).find((entry) => entry.key === 'read'),
-    { key: 'read', zh: '只读', en: 'Read-only' },
+    readTagDictionary(settings).find((entry) => entry.key === 'docs'),
+    { key: 'docs', zh: '文档', en: 'Docs' },
   );
 });
 
@@ -601,7 +744,7 @@ test('duplicate suggestions are added once', async (t) => {
 
   const tags = readTagDictionary(listSettings(fixture.db));
   assert.equal(tags.filter((entry) => entry.key === 'vector').length, 1);
-  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['vector']);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, []);
 });
 
 test('illegal suggestions are rejected before any write', async (t) => {
@@ -634,7 +777,7 @@ test('forbidden suggestions never re-enter a customised tag dictionary', async (
   seedServer(fixture.db);
   seedTool(fixture.db);
   await fixture.settings.replace(
-    { tagDictionary: [{ key: 'read', zh: '只读', en: 'Read-only' }] },
+    { tagDictionary: [{ key: 'docs', zh: '文档', en: 'Docs' }] },
     getRevision(fixture.db),
   );
   const before = getRevision(fixture.db);
@@ -653,7 +796,7 @@ test('forbidden suggestions never re-enter a customised tag dictionary', async (
   assert.equal(getRevision(fixture.db), before);
   assert.deepEqual(
     readTagDictionary(listSettings(fixture.db)).map((entry) => entry.key),
-    ['read'],
+    ['docs'],
   );
 });
 
@@ -750,9 +893,12 @@ test('preview splits existing values from suggestions and warns about dropped on
   assert.deepEqual(preview.proposed.tagSuggestions, [
     { key: 'vector', zh: '向量', en: 'Vector' },
   ]);
-  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['read', 'vector']);
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['vector']);
   assert.ok(preview.warnings.some((warning) => warning.includes('sql')));
   assert.ok(preview.warnings.some((warning) => warning.includes('env.prod')));
+  assert.ok(
+    preview.warnings.some((warning) => warning.includes('read') && warning.includes('动作键')),
+  );
 });
 
 test('categories and tags stay separate and provenance tags are rejected at both layers', async (t) => {
@@ -777,10 +923,15 @@ test('categories and tags stay separate and provenance tags are rejected at both
   assert.equal(preview.proposed.categorySuggestion, null);
   assert.deepEqual(preview.proposed.tags, ['postgresql']);
   assert.deepEqual(preview.proposed.tagSuggestions, []);
-  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, ['read']);
+  assert.deepEqual(preview.proposed.toolOverrides[0]?.tags, []);
   assert.ok(
     preview.warnings.some(
       (warning) => warning.includes('official') && warning.includes('由管理员维护'),
+    ),
+  );
+  assert.ok(
+    preview.warnings.some(
+      (warning) => warning.includes('read') && warning.includes('动作键'),
     ),
   );
   assert.ok(
@@ -801,6 +952,8 @@ test('categories and tags stay separate and provenance tags are rejected at both
   const rejected = [
     { tags: ['env.prod'] },
     { tags: ['database'] },
+    { tags: ['read'] },
+    { toolOverrides: [{ name: 'query', tags: ['read'] }] },
     { categorySuggestion: { key: 'official', zh: '官方', en: 'Official' } },
     { categorySuggestion: { key: 'browser', zh: '浏览器', en: 'Browser' } },
     { tagSuggestions: [{ key: 'database', zh: '数据库', en: 'Database' }] },
@@ -847,17 +1000,27 @@ test('categories and tags stay separate and provenance tags are rejected at both
     getRevision(fixture.db),
   );
   assert.ok(partial.warnings.some((warning) => warning.includes('重名')), partial.warnings.join('; '));
-  assert.deepEqual([...(getServer(fixture.db, 'pg')?.tags ?? [])].sort(), ['postgresql', 'vector']);
+  assert.deepEqual([...(getServer(fixture.db, 'pg')?.tags ?? [])].sort(), ['postgresql']);
 
-  const noop = await fixture.service.annotateApply(
+  const mixed = await fixture.service.annotateApply(
     'pg',
-    { toolOverrides: [{ name: 'query', tags: ['database', 'env.prod'] }] },
+    { toolOverrides: [{ name: 'query', tags: ['database', 'testing'] }] },
     getRevision(fixture.db),
   );
-  assert.deepEqual(noop.changed, []);
-  assert.ok(noop.warnings.some((warning) => warning.includes('database')), noop.warnings.join('; '));
-  assert.ok(noop.warnings.some((warning) => warning.includes('env.prod')));
-  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, []);
+  assert.deepEqual(mixed.changed, ['tools.query.tags']);
+  assert.ok(mixed.warnings.some((warning) => warning.includes('database')), mixed.warnings.join('; '));
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['testing']);
+
+  await expectApiError(
+    fixture.service.annotateApply(
+      'pg',
+      { toolOverrides: [{ name: 'query', tags: ['database', 'env.prod'] }] },
+      getRevision(fixture.db),
+    ),
+    'AI_ANNOTATION_INVALID',
+    422,
+  );
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, ['testing']);
 });
 
 test('apply drops tags deleted from the dictionary and writes the rest', async (t) => {
@@ -883,7 +1046,7 @@ test('apply drops tags deleted from the dictionary and writes the rest', async (
   );
 
   assert.ok(response.warnings.some((warning) => warning.includes('testing')), response.warnings.join('; '));
-  assert.deepEqual([...(getServer(fixture.db, 'pg')?.tags ?? [])].sort(), ['postgresql', 'vector']);
+  assert.deepEqual([...(getServer(fixture.db, 'pg')?.tags ?? [])].sort(), ['postgresql']);
   assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, []);
   assert.ok(response.changed.includes('server.tags'));
 });
@@ -1100,7 +1263,44 @@ test('blank summaries are stored as null with no source', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Auto preview
+// Server tag revalidation
+// ---------------------------------------------------------------------------
+
+test('server tag changes revalidate every enabled tool, not only overrides', async (t) => {
+  const fixture = await makeFixture(t);
+  seedServer(fixture.db, { tags: ['docs'] });
+  upsertTool(fixture.db, 'pg', {
+    name: 'query',
+    description: 'Run a read-only SQL query.',
+    inputSchema: { type: 'object' },
+    tags: ['memory', 'testing', 'security'],
+  });
+  const before = getRevision(fixture.db);
+
+  const error = await expectApiError(
+    fixture.service.annotateApply('pg', { tags: ['postgresql'] }, before),
+    'TAG_POLICY_VIOLATION',
+    422,
+  );
+  const details = error.details as { tools?: Array<{ name: string; errors: string[] }> };
+  assert.equal(details.tools?.[0]?.name, 'query');
+  assert.ok(details.tools?.[0]?.errors.join(' ').includes('TAG_TOOL_LIMIT'));
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['docs']);
+  assert.equal(getRevision(fixture.db), before);
+
+  // Disabled tools do not inherit server tags for the limit check.
+  assert.ok(patchTool(fixture.db, 'pg', 'query', { enabled: false }) !== null);
+  const response = await fixture.service.annotateApply(
+    'pg',
+    { tags: ['postgresql'] },
+    getRevision(fixture.db),
+  );
+  assert.deepEqual(response.changed, ['server.tags']);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['docs', 'postgresql']);
+});
+
+// ---------------------------------------------------------------------------
+// Auto annotation and failure queue
 // ---------------------------------------------------------------------------
 
 async function seedNewServer(fixture: Fixture): Promise<void> {
@@ -1108,77 +1308,329 @@ async function seedNewServer(fixture: Fixture): Promise<void> {
   seedTool(fixture.db);
 }
 
-test('auto preview is skipped when autoAnnotate is false', async (t) => {
+function payloadRunner(payload: Record<string, unknown>): AiRunner {
+  return {
+    async run() {
+      return {
+        payload,
+        resultText: '{}',
+        model: null,
+        durationMs: 1,
+        costUsd: null,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+}
+
+test('auto annotation is skipped when autoAnnotate is false', async (t) => {
   const fixture = await makeFixture(t, { settings: { autoAnnotate: false } });
   await seedNewServer(fixture);
+  const before = getRevision(fixture.db);
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
+
   assert.deepEqual(fixture.audits, []);
   assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+  assert.equal(getServer(fixture.db, 'pg')?.summary, null);
+  assert.equal(getRevision(fixture.db), before);
 });
 
-test('auto preview runs once for a new server and is listed as pending', async (t) => {
+test('auto annotation applies directly and leaves no pending entry', async (t) => {
   const fixture = await makeFixture(t);
   await seedNewServer(fixture);
+  const before = getRevision(fixture.db);
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
 
-  const pending = await fixture.service.pendingAnnotations();
-  assert.equal(pending.items.length, 1);
-  assert.equal(pending.items[0]?.serverId, 'pg');
-  assert.equal(pending.items[0]?.proposed.summary, APPLY.summary);
+  const stored = getServer(fixture.db, 'pg');
+  assert.equal(stored?.summary, APPLY.summary);
+  assert.equal(stored?.summarySource, 'ai');
+  assert.equal(stored?.category, 'database');
+  assert.deepEqual(stored?.tags, ['postgresql']);
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, []);
+  assert.equal(getRevision(fixture.db), before + 1);
+  assert.deepEqual(fixture.rebuilds.at(-1), ['pg']);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
   assert.equal(fixture.audits.length, 1);
   assert.equal(fixture.audits[0]?.trigger, 'auto');
   assert.equal(fixture.audits[0]?.kind, 'annotate');
 
-  // Attempt bookkeeping prevents a second paid run for the same tool set.
+  // The attempt budget prevents a second paid run for the same tool set.
   await fixture.service.onToolsIndexed('pg');
   assert.equal(fixture.audits.length, 1);
-  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
-
-  // Applying the suggestion clears the pending preview.
-  await fixture.service.annotateApply('pg', APPLY, getRevision(fixture.db));
   assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
 });
 
-test('auto preview runs for an existing incomplete server without a creation hook', async (t) => {
+test('auto annotation runs for an existing incomplete server without a creation hook', async (t) => {
   const fixture = await makeFixture(t);
   await seedNewServer(fixture);
   // Registration happened in an earlier process: no onServerCreated call here.
   await fixture.service.onToolsIndexed('pg');
-  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
+  assert.equal(getServer(fixture.db, 'pg')?.category, 'database');
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['postgresql']);
 });
 
-test('auto preview skips only servers that already have summary, category and tags', async (t) => {
+test('auto annotation skips when summary, category and every tool tag set are complete', async (t) => {
   const fixture = await makeFixture(t);
   seedServer(fixture.db, {
     summary: 'manual',
     summarySource: 'manual',
     category: 'database',
-    tags: ['postgresql'],
+    tags: [],
   });
-  seedTool(fixture.db);
+  // Server tags may be empty; one valid tool tag is enough for completeness.
+  seedTool(fixture.db, 'query', 'Run a read-only SQL query.', ['docs']);
+  const before = getRevision(fixture.db);
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
+
+  assert.deepEqual(fixture.audits, []);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+  assert.equal(getServer(fixture.db, 'pg')?.summary, 'manual');
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, []);
+  assert.equal(getRevision(fixture.db), before);
+});
+
+test('auto annotation fills only missing fields and leaves manual metadata alone', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: 'AI 摘要 (ai summary)',
+      category: 'observability',
+      tags: ['postgresql'],
+      toolOverrides: [],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db, {
+    summary: '人工摘要',
+    summarySource: 'manual',
+    category: 'database',
+  });
+  // Effective tags = 0, so the server is incomplete even though the tag list is empty.
+  seedTool(fixture.db, 'query', 'Run a read-only SQL query.', []);
+  const before = getRevision(fixture.db);
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  const stored = getServer(fixture.db, 'pg');
+  assert.equal(stored?.summary, '人工摘要');
+  assert.equal(stored?.summarySource, 'manual');
+  assert.equal(stored?.category, 'database');
+  assert.deepEqual(stored?.tags, ['postgresql']);
+  assert.equal(getRevision(fixture.db), before + 1);
+  assert.equal(fixture.audits.length, 1);
   assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
 });
 
-test('auto preview still runs when only summary exists', async (t) => {
+test('auto annotation still completes a server that only has a summary', async (t) => {
   const fixture = await makeFixture(t);
   seedServer(fixture.db, { summary: 'manual', summarySource: 'manual' });
   seedTool(fixture.db);
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
 
-  const pending = await fixture.service.pendingAnnotations();
-  assert.equal(pending.items.length, 1);
-  assert.equal(pending.items[0]?.proposed.category, 'database');
-  assert.deepEqual(pending.items[0]?.proposed.tags, ['postgresql', 'query', 'write']);
+  const stored = getServer(fixture.db, 'pg');
+  assert.equal(stored?.summary, 'manual');
+  assert.equal(stored?.summarySource, 'manual');
+  assert.equal(stored?.category, 'database');
+  assert.deepEqual(stored?.tags, ['postgresql']);
 });
 
-test('pending previews expire and are dropped on mutation', async (t) => {
+test('auto annotation failures keep the proposal and error in the queue', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
+      category: 'database',
+      tags: ['postgresql'],
+      toolOverrides: [],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db, { tags: ['docs'] });
+  upsertTool(fixture.db, 'pg', {
+    name: 'query',
+    description: 'Run a read-only SQL query.',
+    inputSchema: { type: 'object' },
+    tags: ['memory', 'testing', 'security', 'gitlab'],
+  });
+  const before = getRevision(fixture.db);
+
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  const pending = await fixture.service.pendingAnnotations();
+  assert.equal(pending.items.length, 1);
+  assert.equal(pending.items[0]?.serverId, 'pg');
+  assert.equal(pending.items[0]?.error.code, 'TAG_POLICY_VIOLATION');
+  assert.ok(pending.items[0]?.error.message.includes('TAG_TOOL_LIMIT'));
+  assert.deepEqual(pending.items[0]?.proposed.tags, ['postgresql']);
+  assert.equal(getServer(fixture.db, 'pg')?.summary, null);
+  assert.deepEqual(getServer(fixture.db, 'pg')?.tags, ['docs']);
+  assert.equal(getRevision(fixture.db), before);
+  assert.equal(fixture.audits[0]?.trigger, 'auto');
+
+  // The failed attempt is not retried automatically.
+  await fixture.service.onToolsIndexed('pg');
+  assert.equal(fixture.audits.length, 1);
+  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
+});
+
+test('queued auto failures drop dictionary suggestions so retries cannot add keys', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
+      category: null,
+      categorySuggestion: { key: 'vector-db', zh: '向量数据库', en: 'Vector database' },
+      tags: ['postgresql'],
+      tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+      toolOverrides: [{ name: 'query', tags: ['vector'] }],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db, { tags: ['docs'] });
+  upsertTool(fixture.db, 'pg', {
+    name: 'query',
+    description: 'Run a read-only SQL query.',
+    inputSchema: { type: 'object' },
+    tags: ['memory', 'testing', 'security'],
+  });
+  const categoriesBefore = readCategoryDictionary(listSettings(fixture.db));
+  const tagsBefore = readTagDictionary(listSettings(fixture.db));
+
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  const pending = await fixture.service.pendingAnnotations();
+  assert.equal(pending.items.length, 1);
+  const queued = pending.items[0];
+  assert.ok(queued !== undefined);
+  assert.equal(queued.error.code, 'TAG_POLICY_VIOLATION');
+  assert.equal(queued.proposed.categorySuggestion, null);
+  assert.deepEqual(queued.proposed.tagSuggestions, []);
+
+  // The UI retry sends the same fields as a manual apply; with the suggestions
+  // removed there is no way for it to write new dictionary keys.
+  const retry: Record<string, unknown> = {};
+  if (queued.proposed.summary !== null) retry['summary'] = queued.proposed.summary;
+  if (queued.proposed.category !== null) retry['category'] = queued.proposed.category;
+  if (queued.proposed.tags.length > 0) retry['tags'] = queued.proposed.tags;
+  const overrides = queued.proposed.toolOverrides
+    .filter((override) => (override.tags?.length ?? 0) > 0)
+    .map((override) => ({ name: override.name, tags: override.tags }));
+  if (overrides.length > 0) retry['toolOverrides'] = overrides;
+  assert.equal('categorySuggestion' in retry, false);
+  assert.equal('tagSuggestions' in retry, false);
+
+  await expectApiError(
+    fixture.service.annotateApply('pg', retry, getRevision(fixture.db)),
+    'TAG_POLICY_VIOLATION',
+    422,
+  );
+  assert.deepEqual(readCategoryDictionary(listSettings(fixture.db)), categoriesBefore);
+  assert.deepEqual(readTagDictionary(listSettings(fixture.db)), tagsBefore);
+});
+
+test('auto annotation never treats null or empty proposals as a clear', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: null,
+      category: null,
+      tags: [],
+      toolOverrides: [],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db, {
+    summary: '人工摘要',
+    summarySource: 'manual',
+    category: 'database',
+  });
+  seedTool(fixture.db);
+  const before = getRevision(fixture.db);
+
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  const stored = getServer(fixture.db, 'pg');
+  assert.equal(stored?.summary, '人工摘要');
+  assert.equal(stored?.summarySource, 'manual');
+  assert.equal(stored?.category, 'database');
+  assert.deepEqual(stored?.tags, []);
+  assert.equal(getRevision(fixture.db), before);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+  assert.equal(fixture.audits.length, 1);
+});
+
+test('auto annotation only writes dictionary tags and never new suggestions', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: '向量检索 (vector search)',
+      category: null,
+      tags: [],
+      tagSuggestions: [{ key: 'vector', zh: '向量', en: 'Vector' }],
+      toolOverrides: [{ name: 'query', tags: ['vector'] }],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db);
+  seedTool(fixture.db);
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  assert.equal(getServer(fixture.db, 'pg')?.summary, '向量检索 (vector search)');
+  assert.deepEqual(getTool(fixture.db, 'pg', 'query')?.tags, []);
+  assert.equal(
+    readTagDictionary(listSettings(fixture.db)).some((entry) => entry.key === 'vector'),
+    false,
+  );
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+});
+
+test('auto annotation retries a revision conflict once with a fresh revision', async (t) => {
   const fixture = await makeFixture(t);
   await seedNewServer(fixture);
+
+  const originalGet = fixture.servers.get.bind(fixture.servers);
+  let getCalls = 0;
+  let injected = false;
+  fixture.servers.get = async (serverId: string) => {
+    getCalls += 1;
+    const record = await originalGet(serverId);
+    // #1 is the skip check, #2 the preview, #3 the apply body read, #4 the
+    // first apply attempt. Bumping there makes its expected revision stale.
+    if (getCalls === 4 && !injected) {
+      injected = true;
+      bumpRevision(fixture.db);
+    }
+    return record;
+  };
+
+  fixture.service.onServerCreated('pg');
+  await fixture.service.onToolsIndexed('pg');
+
+  assert.equal(injected, true);
+  assert.equal(getServer(fixture.db, 'pg')?.summary, APPLY.summary);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+});
+
+test('failed auto annotations expire and are dropped on mutation', async (t) => {
+  const fixture = await makeFixture(t, {
+    runner: payloadRunner({
+      summary: 'PostgreSQL 查询与写入 (postgres sql database query write)',
+      category: 'database',
+      tags: ['postgresql'],
+      toolOverrides: [],
+      warnings: [],
+    }),
+  });
+  seedServer(fixture.db, { tags: ['docs'] });
+  upsertTool(fixture.db, 'pg', {
+    name: 'query',
+    description: 'Run a read-only SQL query.',
+    inputSchema: { type: 'object' },
+    tags: ['memory', 'testing', 'security', 'gitlab'],
+  });
   fixture.service.onServerCreated('pg');
   await fixture.service.onToolsIndexed('pg');
   assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
@@ -1242,10 +1694,11 @@ test('an oversized auto preview does not consume the attempt budget', async (t) 
   fixture.clock.advance(61_000);
   await fixture.service.onToolsIndexed('pg');
   assert.equal(calls, 1);
-  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
+  assert.equal(getServer(fixture.db, 'pg')?.summary, APPLY.summary);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
 });
 
-test('concurrent tools/list runs only one auto preview', async (t) => {
+test('concurrent tools/list runs only one auto annotation', async (t) => {
   let calls = 0;
   const runner: AiRunner = {
     async run() {
@@ -1276,5 +1729,6 @@ test('concurrent tools/list runs only one auto preview', async (t) => {
     fixture.service.onToolsIndexed('pg'),
   ]);
   assert.equal(calls, 1);
-  assert.equal((await fixture.service.pendingAnnotations()).items.length, 1);
+  assert.deepEqual(await fixture.service.pendingAnnotations(), { items: [] });
+  assert.equal(getServer(fixture.db, 'pg')?.summary, APPLY.summary);
 });

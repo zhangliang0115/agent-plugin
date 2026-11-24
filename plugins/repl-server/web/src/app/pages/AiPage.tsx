@@ -92,6 +92,7 @@ interface PendingAnnotationView {
   warnings: string[];
   omittedTools: number;
   createdAt: string;
+  error: { code: string; message: string };
 }
 
 interface ServerView {
@@ -113,6 +114,7 @@ interface AnnotationReview {
   proposed: AnnotationProposed;
   warnings: string[];
   omittedTools: number;
+  error: { code: string; message: string } | null;
 }
 
 export function AiPage(): React.ReactElement {
@@ -266,6 +268,7 @@ export function AiPage(): React.ReactElement {
         proposed: response.proposed,
         warnings: response.warnings,
         omittedTools: response.omittedTools,
+        error: null,
       });
     } catch (error) {
       message.error(aiErrorText(error));
@@ -275,19 +278,7 @@ export function AiPage(): React.ReactElement {
   }
 
   function reviewPending(pendingAnnotation: PendingAnnotationView): void {
-    const server = servers.find((entry) => entry.id === pendingAnnotation.serverId);
-    setReview({
-      serverId: pendingAnnotation.serverId,
-      current: {
-        summary: server?.summary ?? null,
-        summarySource: null,
-        category: server?.category ?? null,
-        tags: server?.tags ?? [],
-      },
-      proposed: pendingAnnotation.proposed,
-      warnings: pendingAnnotation.warnings,
-      omittedTools: pendingAnnotation.omittedTools,
-    });
+    setReview(reviewFromPending(pendingAnnotation, servers));
   }
 
   function editCategorySuggestion(field: keyof DictionarySuggestion, value: string): void {
@@ -400,8 +391,23 @@ export function AiPage(): React.ReactElement {
     {
       title: '服务端',
       dataIndex: 'serverId',
-      width: 160,
+      width: 140,
       render: (value: string) => <span className="mono">{value}</span>,
+    },
+    {
+      title: '失败原因',
+      dataIndex: 'error',
+      width: 320,
+      render: (value: PendingAnnotationView['error']) => (
+        <Space direction="vertical" size={2}>
+          <Tag color="red" bordered={false}>
+            {value.code}
+          </Tag>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {value.message}
+          </Typography.Text>
+        </Space>
+      ),
     },
     {
       title: '生成时间',
@@ -411,13 +417,13 @@ export function AiPage(): React.ReactElement {
     },
     {
       title: '摘要（summary）',
-      width: 280,
+      width: 240,
       ellipsis: true,
       render: (_value, record) => record.proposed.summary ?? '—',
     },
     {
       title: '标签（tags）',
-      width: 220,
+      width: 200,
       render: (_value, record) => {
         const suggestions = record.proposed.tagSuggestions ?? [];
         if (record.proposed.tags.length === 0 && suggestions.length === 0) return '—';
@@ -438,29 +444,27 @@ export function AiPage(): React.ReactElement {
       },
     },
     {
-      title: '提示',
-      dataIndex: 'warnings',
-      width: 70,
-      render: (value: string[]) => value.length,
-    },
-    {
       title: '操作',
       width: 160,
-      render: (_value, record) => (
-        <Space size={4}>
-          <Button size="small" onClick={() => reviewPending(record)}>
-            审阅
-          </Button>
-          <Button
-            size="small"
-            type="primary"
-            loading={applying}
-            onClick={() => void applyAnnotation(reviewFromPending(record, servers))}
-          >
-            直接应用
-          </Button>
-        </Space>
-      ),
+      render: (_value, record) => {
+        const retryable = Object.keys(buildApplyBody(record.proposed)).length > 0;
+        return (
+          <Space size={4}>
+            <Button size="small" onClick={() => reviewPending(record)}>
+              查看
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              loading={applying}
+              disabled={!retryable}
+              onClick={() => void applyAnnotation(reviewFromPending(record, servers))}
+            >
+              重试
+            </Button>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -468,7 +472,7 @@ export function AiPage(): React.ReactElement {
     <div className="page">
       <PageHeader
         title="AI 配置"
-        description="配置本地 Claude CLI，为 server 生成 summary/tags 标注建议并审阅待应用的建议。调用会把工具名与描述发送给模型；结果先预览，应用前人工核对。"
+        description="配置本地 Claude CLI，为新接入 server 自动生成并应用标注；手动预览与失败重试保留在下方。调用会把工具名与描述发送给模型；敏感服务端请关闭自动标注。"
         actions={
           <Button
             icon={<ReloadOutlined />}
@@ -505,12 +509,12 @@ export function AiPage(): React.ReactElement {
                   <Typography.Text type="secondary">启用后生成与标注会把工具名和描述发送给模型。</Typography.Text>
                 </Space>
               </Form.Item>
-              <Form.Item label="新接入 server 自动生成标注预览">
+              <Form.Item label="新接入 server 自动标注并应用">
                 <Space direction="vertical" size={2}>
                   <Switch checked={autoAnnotate} onChange={setAutoAnnotate} />
                   <Typography.Text type="secondary">
-                    启用且 AI 已启用时，工具索引完成后，标注不完整（summary/category/tags 未齐全）的 server
-                    会自动生成 summary/category/tags 建议，进入下方「待处理标注」；服务重启后首次连接也会补齐。不会自动写入，需审阅或点「直接应用」。失败不重试，可手动生成标注预览。
+                    启用且 AI 已启用时，工具索引完成后，summary/category 缺失或工具生效标签不完整（不足 1 个、超过 4 个等）的 server
+                    会自动生成并直接补全缺失的 summary/category 与工具标签；已有 summary/category 不覆盖；只使用字典已有 key，不会新增字典项。写入失败进入下方「自动应用失败」，不自动重试。服务重启后首次连接也会补齐。
                   </Typography.Text>
                 </Space>
               </Form.Item>
@@ -575,7 +579,7 @@ export function AiPage(): React.ReactElement {
         </Typography.Paragraph>
       </Card>
       <Card
-        title="待处理标注"
+        title="自动应用失败"
         size="small"
         extra={
           <Space>
@@ -597,7 +601,7 @@ export function AiPage(): React.ReactElement {
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="没有待处理标注。新接入 server 自动生成建议后会出现在这里。"
+                description="没有自动应用失败的标注。自动标注成功后直接写入，不在这里显示。"
               />
             ),
           }}
@@ -632,6 +636,14 @@ export function AiPage(): React.ReactElement {
                 </Tag>
               ) : null}
             </Space>
+            {review.error === null ? null : (
+              <Alert
+                type="error"
+                showIcon
+                message={`自动应用失败：${review.error.code}`}
+                description={review.error.message}
+              />
+            )}
             {review.warnings.length === 0 ? null : (
               <Alert
                 type="warning"
@@ -806,6 +818,7 @@ function reviewFromPending(
     proposed: pendingAnnotation.proposed,
     warnings: pendingAnnotation.warnings,
     omittedTools: pendingAnnotation.omittedTools,
+    error: pendingAnnotation.error,
   };
 }
 

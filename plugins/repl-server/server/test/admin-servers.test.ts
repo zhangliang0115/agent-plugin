@@ -1419,7 +1419,7 @@ test('PATCH /tools/:serverId/:name writes the description override with If-Match
         description: 'Read-only SQL.',
         enabled: false,
         concurrency: 'serial',
-        tags: ['read'],
+        tags: ['sql'],
         type: 'query',
         category: 'database',
         staleOverride: true,
@@ -1434,7 +1434,7 @@ test('PATCH /tools/:serverId/:name writes the description override with If-Match
   assert.equal(tool['description'], 'upstream');
   assert.equal(tool['descriptionOverride'], 'Read-only SQL.');
   assert.equal(tool['concurrency'], 'serial');
-  assert.deepEqual(tool['tags'], ['read']);
+  assert.deepEqual(tool['tags'], ['sql']);
 
   const unknownTool = await call(
     handler,
@@ -1466,7 +1466,7 @@ test('POST /tools/batch is one transaction and one revision', async () => {
       body: {
         updates: [
           { serverId: 'pg', name: 'query', patch: { enabled: false } },
-          { serverId: 'pg', name: 'insert', patch: { tags: ['write'] } },
+          { serverId: 'pg', name: 'insert', patch: { tags: ['sql'] } },
         ],
       },
       ifMatch: revision,
@@ -1480,7 +1480,7 @@ test('POST /tools/batch is one transaction and one revision', async () => {
   const query = await env.toolStore.get('pg', 'query');
   assert.equal(query?.enabled, false);
   const insert = await env.toolStore.get('pg', 'insert');
-  assert.deepEqual(insert?.tags, ['write']);
+  assert.deepEqual(insert?.tags, ['sql']);
 
   const duplicate = await call(
     handler,
@@ -2346,4 +2346,90 @@ test('sameCommandLine normalizes whitespace and matches placeholders only positi
     ),
     false,
   );
+});
+
+test('tag policy rejects server and tool tag violations', async () => {
+  const env = testEnv();
+  const servers = createServerHandler(env);
+  const tools = createAdminToolsHandler({
+    servers: env.serverStore,
+    tools: env.toolStore,
+    retrieval: { search: () => ({ results: [] }) },
+  });
+
+  const badCreate = await call(
+    servers,
+    makeRequest('POST', '/servers', {
+      body: { id: 'bad', command: 'npx', tags: ['a', 'b', 'c'] },
+    }),
+  );
+  assert.equal(badCreate.status, 422);
+  assert.equal(errorCode(badCreate), 'TAG_POLICY_VIOLATION');
+
+  await addServer(env.serverStore, { id: 'pg', tags: ['postgresql'] });
+  seedTool(env.db, {
+    serverId: 'pg',
+    name: 'query',
+    tags: ['docs', 'testing', 'security'],
+  });
+  const revision = await env.serverStore.revision();
+
+  const tooMany = await call(
+    tools,
+    makeRequest('PATCH', '/tools/pg/query', {
+      body: { tags: ['docs', 'testing', 'security', 'memory'] },
+      ifMatch: revision,
+    }),
+  );
+  assert.equal(tooMany.status, 422);
+  assert.equal(errorCode(tooMany), 'TAG_POLICY_VIOLATION');
+
+  const inherited = await call(
+    tools,
+    makeRequest('PATCH', '/tools/pg/query', {
+      body: { tags: ['postgresql'] },
+      ifMatch: revision,
+    }),
+  );
+  assert.equal(inherited.status, 422);
+  assert.equal(errorCode(inherited), 'TAG_POLICY_VIOLATION');
+
+  const actionKey = await call(
+    tools,
+    makeRequest('PATCH', '/tools/pg/query', {
+      body: { tags: ['write'] },
+      ifMatch: revision,
+    }),
+  );
+  assert.equal(actionKey.status, 422);
+  assert.equal(errorCode(actionKey), 'TAG_POLICY_VIOLATION');
+
+  await addServer(env.serverStore, { id: 'empty', tags: [] });
+  seedTool(env.db, { serverId: 'empty', name: 'noop' });
+  const emptyTool = await call(
+    tools,
+    makeRequest('PATCH', '/tools/empty/noop', {
+      body: { enabled: true },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(emptyTool.status, 422);
+  assert.equal(errorCode(emptyTool), 'TAG_POLICY_VIOLATION');
+
+  // Server tags are inherited: adding a second tag would push a tool with
+  // three own tags over the effective limit.
+  const crossCheck = createAdminServersHandler({
+    servers: env.serverStore,
+    pool: env.pool,
+    toolTags: (serverId) => env.toolStore.listByServer(serverId),
+  });
+  const serverPatch = await call(
+    crossCheck,
+    makeRequest('PATCH', '/servers/pg', {
+      body: { tags: ['postgresql', 'memory'] },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(serverPatch.status, 422);
+  assert.equal(errorCode(serverPatch), 'TAG_POLICY_VIOLATION');
 });

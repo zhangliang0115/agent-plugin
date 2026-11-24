@@ -18,6 +18,12 @@ import {
   readCategoryDictionary,
 } from '../admin/categories.ts';
 import { AdminApiError, assertRevision, nullIfBlank } from '../admin/servers.ts';
+import {
+  ACTION_TAG_KEYS,
+  evaluateServerTags,
+  evaluateTagPolicy,
+  formatTagPolicyIssues,
+} from '../catalog/tag-policy.ts';
 import type { StoredSettings } from '../admin/settings.ts';
 import { appendTagDictionary, readTagDictionary, TAG_SETTING_KEY } from '../admin/tags.ts';
 import { withTransaction } from '../db/migrate.ts';
@@ -65,6 +71,7 @@ export interface ApplyAnnotationInput {
 export interface ApplyAnnotationResult {
   changed: string[];
   revision: number;
+  warnings: string[];
 }
 
 /** Raised before any write when an override names a tool that no longer exists. */
@@ -85,6 +92,7 @@ interface DictionaryWrite {
 
 interface AnnotationPlan {
   changed: string[];
+  warnings: string[];
   summary?: string | null;
   summarySource?: string | null;
   category?: string | null;
@@ -130,13 +138,31 @@ function assertNotCategoryKey(
   );
 }
 
+function assertNotActionKey(
+  key: string,
+  kind: '标签' | '标签建议' | '工具标签',
+): void {
+  if (!ACTION_TAG_KEYS.has(key)) return;
+  throw new AdminApiError(
+    422,
+    'AI_ANNOTATION_INVALID',
+    `${kind} ${key} is an action key`,
+    { errors: [`${kind} ${key} 是动作键，动作不能作为标签`] },
+  );
+}
+
 function planAnnotationChanges(
   db: DatabaseSync,
   current: ServerRecord,
   patch: AnnotationPatch,
   settings: StoredSettings,
 ): AnnotationPlan {
-  const plan: AnnotationPlan = { changed: [], toolUpdates: [], dictionaryWrites: [] };
+  const plan: AnnotationPlan = {
+    changed: [],
+    warnings: [],
+    toolUpdates: [],
+    dictionaryWrites: [],
+  };
 
   const categorySuggestion = patch.categorySuggestion ?? null;
   const tagSuggestions = patch.tagSuggestions ?? [];
@@ -174,16 +200,19 @@ function planAnnotationChanges(
   }
   for (const tag of patch.tags ?? []) {
     assertAiTagAllowed(tag, '标签');
+    assertNotActionKey(tag, '标签');
     assertNotCategoryKey(tag, categoryKeys, '标签');
   }
   for (const override of patch.toolOverrides ?? []) {
     for (const tag of override.tags ?? []) {
       assertAiTagAllowed(tag, '工具标签');
+      assertNotActionKey(tag, '工具标签');
       assertNotCategoryKey(tag, categoryKeys, '工具标签');
     }
   }
   for (const suggestion of tagSuggestions) {
     assertAiTagAllowed(suggestion.key, '标签建议');
+    assertNotActionKey(suggestion.key, '标签建议');
     assertNotCategoryKey(suggestion.key, categoryKeys, '标签建议');
   }
 
@@ -217,18 +246,51 @@ function planAnnotationChanges(
     plan.changed.push('server.category');
     plan.category = nextCategory;
   }
-  const suggestedTagKeys = tagSuggestions.map((suggestion) => suggestion.key);
-  if (patch.tags !== undefined || suggestedTagKeys.length > 0) {
-    const proposed = mergeTags(patch.tags ?? [], suggestedTagKeys);
-    const merged = mergeTags(current.tags, proposed);
+  // Tag suggestions enter the dictionary only; they are not server tags. A
+  // server tag must already exist in the dictionary, so `patch.tags` is the
+  // only source here.
+  if (patch.tags !== undefined) {
+    const merged = mergeTags(current.tags, patch.tags);
+    const issues = evaluateServerTags(merged);
+    if (issues.length > 0) {
+      throw new AdminApiError(422, 'TAG_POLICY_VIOLATION', 'server tags violate the tag policy', {
+        serverId: current.id,
+        errors: formatTagPolicyIssues(issues),
+      });
+    }
     if (!sameStringArray(merged, current.tags)) {
       plan.changed.push('server.tags');
       plan.tags = merged;
     }
   }
 
+  // Server tags are inherited by every tool, so a change must be checked against
+  // each enabled tool, not only the overrides the model happened to list. This
+  // mirrors `PATCH /servers/:id` (admin/servers.ts) and rejects the whole patch
+  // before any write.
+  if (plan.tags !== undefined) {
+    const serverTags = plan.tags;
+    const violations = listTools(db, current.id)
+      .filter((tool) => tool.enabled)
+      .map((tool) => ({
+        name: tool.name,
+        issues: evaluateTagPolicy(serverTags, tool.tags).issues,
+      }))
+      .filter((entry) => entry.issues.length > 0);
+    if (violations.length > 0) {
+      throw new AdminApiError(422, 'TAG_POLICY_VIOLATION', 'server tags break tool tag limits', {
+        serverId: current.id,
+        tools: violations.map((entry) => ({
+          name: entry.name,
+          errors: formatTagPolicyIssues(entry.issues),
+        })),
+      });
+    }
+  }
+
   if (patch.toolOverrides !== undefined) {
     const byName = new Map(listTools(db, current.id).map((tool) => [tool.name, tool]));
+    const finalServerTags = plan.tags ?? current.tags;
     const unknown: string[] = [];
     for (const override of patch.toolOverrides) {
       const tool = byName.get(override.name);
@@ -241,8 +303,26 @@ function planAnnotationChanges(
       let touched = false;
       if (override.tags !== undefined) {
         const merged = mergeTags(tool.tags, override.tags);
-        if (!sameStringArray(merged, tool.tags)) {
-          toolPatch.tags = merged;
+        const policy = evaluateTagPolicy(finalServerTags, merged, { repairInherited: true });
+        if (policy.issues.length > 0) {
+          throw new AdminApiError(
+            422,
+            'TAG_POLICY_VIOLATION',
+            `tool ${override.name} violates the tag policy`,
+            {
+              serverId: current.id,
+              tool: override.name,
+              errors: formatTagPolicyIssues(policy.issues),
+            },
+          );
+        }
+        if (policy.inheritedDuplicates.length > 0) {
+          plan.warnings.push(
+            `工具 ${override.name} 的标签与 server 标签重复，已去重: ${policy.inheritedDuplicates.join(', ')}`,
+          );
+        }
+        if (!sameStringArray(policy.toolTags, tool.tags)) {
+          toolPatch.tags = policy.toolTags;
           plan.changed.push(`tools.${override.name}.tags`);
           touched = true;
         }
@@ -280,7 +360,7 @@ export function applyAnnotation(
 
     const plan = planAnnotationChanges(db, current, input.patch, listSettings(db));
     if (plan.changed.length === 0) {
-      return { changed: [], revision: getRevision(db) };
+      return { changed: [], revision: getRevision(db), warnings: plan.warnings };
     }
 
     const metadataChanged =
@@ -321,6 +401,6 @@ export function applyAnnotation(
     }
 
     const revision = bumpRevision(db);
-    return { changed: plan.changed, revision };
+    return { changed: plan.changed, revision, warnings: plan.warnings };
   });
 }

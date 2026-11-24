@@ -22,6 +22,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader, stateLabel } from '../components/common.tsx';
 import { FrameColumn, type FrameEvent } from '../components/FramePayload.tsx';
+import { PayloadViewer } from '../components/PayloadViewer.tsx';
 import { RequestProcess } from '../components/RequestProcess.tsx';
 import {
   ApiError,
@@ -30,14 +31,9 @@ import {
   type StreamState,
 } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
-import {
-  listOptions,
-  mergeBindings,
-  mergeValues,
-  optionLabel,
-  type LabeledOption,
-} from '../../lib/filter-options.ts';
+import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
+import { payloadView, type PayloadView } from '../../lib/payload-view.ts';
 import {
   eventWindow,
   isAsyncResponse,
@@ -419,10 +415,10 @@ export function RequestsPage(): React.ReactElement {
       ),
     },
     {
-      title: '客户端 / binding',
+      title: '客户端',
       key: 'client',
       ellipsis: true,
-      render: (_value, pair) => pairClientLabel(pair, options.bindings),
+      render: (_value, pair) => pairClientLabel(pair),
     },
     {
       title: '方法',
@@ -711,6 +707,10 @@ export function RequestsPage(): React.ReactElement {
                       dataSource={events ?? []}
                       pagination={false}
                       columns={eventColumns}
+                      expandable={{
+                        rowExpandable: (event) => eventHasPayload(event),
+                        expandedRowRender: (event) => <EventPayloadDetail event={event} />,
+                      }}
                       scroll={{ x: 760 }}
                       locale={{
                         emptyText: (
@@ -771,19 +771,6 @@ const eventColumns: TableProps<AuditEvent>['columns'] = [
     render: (_value, event) => <span className="mono">{eventSubject(event)}</span>,
   },
   {
-    title: 'eval',
-    key: 'eval',
-    width: 110,
-    render: (_value, event) =>
-      typeof event.evalId === 'number' ? (
-        <span className="mono">
-          {event.exec === undefined ? event.evalId : `${event.exec}/${event.evalId}`}
-        </span>
-      ) : (
-        <span className="muted">—</span>
-      ),
-  },
-  {
     title: '状态',
     key: 'status',
     width: 90,
@@ -801,6 +788,58 @@ const eventColumns: TableProps<AuditEvent>['columns'] = [
     ),
   },
 ];
+
+/** Payload sides an event can carry; only the directions that exist are populated. */
+function eventPayloadSides(event: AuditEvent): {
+  input: PayloadView | null;
+  output: PayloadView | null;
+} {
+  if (event.event === 'tool_call') {
+    return { input: payloadView(event, 'args', 'tool'), output: null };
+  }
+  if (event.event === 'tool_result') {
+    return { input: null, output: payloadView(event, 'result', 'tool') };
+  }
+  if (event.event === 'proto_in') {
+    return { input: payloadView(event, 'params', 'frame'), output: null };
+  }
+  if (event.event === 'proto_out') {
+    return { input: null, output: payloadView(event, 'result', 'frame') };
+  }
+  return { input: null, output: null };
+}
+
+/** True when a side carries anything the viewer can render. */
+function hasPayloadContent(view: PayloadView | null): boolean {
+  return (
+    view !== null &&
+    (view.inline !== undefined ||
+      view.ref !== null ||
+      view.preview !== null ||
+      view.dropped !== null ||
+      view.bytes !== null)
+  );
+}
+
+function eventHasPayload(event: AuditEvent): boolean {
+  const { input, output } = eventPayloadSides(event);
+  return hasPayloadContent(input) || hasPayloadContent(output);
+}
+
+function EventPayloadDetail({ event }: { event: AuditEvent }): React.ReactElement {
+  const { input, output } = eventPayloadSides(event);
+  const sides: Array<{ label: string; view: PayloadView }> = [];
+  if (input !== null && hasPayloadContent(input)) sides.push({ label: '输入', view: input });
+  if (output !== null && hasPayloadContent(output)) sides.push({ label: '输出', view: output });
+  if (sides.length === 0) return <Text type="secondary">该事件没有输入/输出载荷</Text>;
+  return (
+    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+      {sides.map((side) => (
+        <PayloadViewer key={side.label} label={side.label} view={side.view} maxHeight={220} />
+      ))}
+    </Space>
+  );
+}
 
 function eventStatusTag(event: AuditEvent): React.ReactElement {
   const status =
@@ -836,17 +875,13 @@ function timeOf(event: AuditEvent): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-function pairClientLabel(pair: ProtocolFramePair, bindings: readonly LabeledOption[]): string {
+/** Client name only; the legacy `client` label is `name/version`. */
+function pairClientLabel(pair: ProtocolFramePair): string {
   const event = pair.request ?? pair.response;
   if (event === null) return '—';
   const name = text(event, 'clientName');
-  const version = text(event, 'clientVersion');
-  const client =
-    name === null ? text(event, 'client') : version === null ? name : `${name}/${version}`;
-  const binding = text(event, 'binding');
-  const bindingLabel = binding === null ? null : optionLabel(binding, bindings);
-  if (client !== null && bindingLabel !== null) return `${client} · ${bindingLabel}`;
-  return client ?? bindingLabel ?? '—';
+  if (name !== null) return name;
+  return text(event, 'client')?.split('/')[0] || '—';
 }
 
 function text(event: FrameEvent, key: string): string | null {

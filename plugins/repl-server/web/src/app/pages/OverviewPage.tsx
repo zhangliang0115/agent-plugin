@@ -1444,9 +1444,9 @@ function evaluateAttention(input: {
     items.push({
       id: 'annotations-pending',
       tone: 'queue',
-      title: `${formatNumber(input.pendingAnnotations)} 条 AI 标注待处理`,
-      detail: '新接入服务端自动生成的摘要与标签建议等待审阅。',
-      actionLabel: '去审阅',
+      title: `${formatNumber(input.pendingAnnotations)} 条自动标注失败`,
+      detail: '新接入服务端的自动标注未能写入，查看失败原因后可重试。',
+      actionLabel: '去处理',
       target: { path: '/manage', tab: 'ai' },
     });
   }

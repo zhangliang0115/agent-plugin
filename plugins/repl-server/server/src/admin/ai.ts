@@ -5,7 +5,7 @@
  * - `GET/PUT /ai/config`
  * - `POST /ai/propose`, `POST /ai/propose/apply`
  * - `POST /ai/annotate/:serverId` (`mode=preview|apply`)
- * - `GET /ai/annotations/pending`
+ * - `GET /ai/annotations/pending` (failed automatic applies)
  *
  * Authentication and CSRF are handled by the admin HTTP shell before dispatch;
  * this module only validates shape and translates `If-Match`.

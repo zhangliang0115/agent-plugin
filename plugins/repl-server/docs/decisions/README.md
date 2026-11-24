@@ -6,3 +6,4 @@
 |---|---|---|
 | [0008](0008-native-ts-dom-admin-ui.md) | 管理端采用原生 TypeScript + DOM + esbuild | 已被 0009 取代 |
 | [0009](0009-react-antd-admin.md) | 管理端采用 React 19 + Ant Design 6 | 已接受 |
+| [0010](0010-tool-actions.md) | 把工具动作语义从 tags 拆成 actions | 已否决 |

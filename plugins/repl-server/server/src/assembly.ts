@@ -743,6 +743,12 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       pool: poolControl,
       operations,
       toolCounts: () => countToolsByServer(db),
+      toolTags: async (serverId) =>
+        (await toolStore.listByServer(serverId)).map((tool) => ({
+          name: tool.name,
+          enabled: tool.enabled,
+          tags: tool.tags,
+        })),
       official: officialSync,
       onToolsRefreshed: (id) => {
         ai.onServerMutated(id);

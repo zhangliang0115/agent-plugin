@@ -1,7 +1,8 @@
 /**
- * Pending auto-annotation previews (08 §4.7): one per server, 30 minute TTL,
+ * Failed auto-annotation applications (08 §4.7): one per server, 24 hour TTL,
  * at most 20 entries, plus the per-process `(serverId, toolsHash)` attempt set
- * that stops a refresh loop from paying for the same annotation twice.
+ * that stops a refresh loop from paying for the same annotation twice. A
+ * successful auto application never creates an entry.
  * @module
  */
 
@@ -18,6 +19,12 @@ export interface AnnotationProposed {
   toolOverrides: NormalizedToolOverride[];
 }
 
+/** Why the automatic apply failed; shown in the admin failure table. */
+export interface PendingAnnotationError {
+  code: string;
+  message: string;
+}
+
 export interface PendingAnnotationMeta {
   model: string | null;
   durationMs: number;
@@ -32,9 +39,10 @@ export interface PendingAnnotation {
   omittedTools: number;
   createdAt: string;
   expiresAt: number;
-  /** Internal: lets `onToolsIndexed` keep a pending draft for an unchanged tool set. */
+  /** Internal: lets `onToolsIndexed` treat a changed tool set as a new failure candidate. */
   toolsHash: string;
   meta: PendingAnnotationMeta;
+  error: PendingAnnotationError;
 }
 
 export interface PendingAnnotationView {
@@ -43,6 +51,7 @@ export interface PendingAnnotationView {
   warnings: string[];
   omittedTools: number;
   createdAt: string;
+  error: PendingAnnotationError;
 }
 
 export interface AnnotationStore {

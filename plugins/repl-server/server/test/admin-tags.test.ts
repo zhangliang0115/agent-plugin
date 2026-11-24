@@ -38,7 +38,7 @@ test('GET /tags returns the built-in dictionary until it is replaced', async () 
   assert.equal(response?.status, 200);
   const body = response?.body as { tags: Array<{ key: string; zh: string; en: string }>; revision: number };
   assert.equal(body.revision, 3);
-  assert.equal(body.tags.length, 26);
+  assert.equal(body.tags.length, 20);
   assert.deepEqual(
     body.tags.find((tag) => tag.key === 'official'),
     { key: 'official', zh: '官方', en: 'Official' },
@@ -50,12 +50,6 @@ test('GET /tags returns the built-in dictionary until it is replaced', async () 
     'env.pre',
     'env.prod',
     'cross-env',
-    'read',
-    'write',
-    'query',
-    'exec',
-    'deploy',
-    'destructive',
     'memory',
     'docs',
     'testing',
@@ -94,7 +88,7 @@ const LEGACY_TAG_DEFAULT = [
 
 test('the old 15-entry default is upgraded on read', () => {
   const upgraded = readTagDictionary({ tagDictionary: LEGACY_TAG_DEFAULT });
-  assert.equal(upgraded.length, 26);
+  assert.equal(upgraded.length, 20);
   assert.ok(upgraded.some((tag) => tag.key === 'env.prod'));
   assert.ok(!upgraded.some((tag) => tag.key === 'database'));
 });
@@ -128,19 +122,37 @@ test('a customised dictionary is kept as-is', () => {
 
 test('appendTagDictionary adds only unknown keys and keeps existing labels', () => {
   const settings: StoredSettings = {
-    tagDictionary: [{ key: 'read', zh: '只读', en: 'Read-only' }],
+    tagDictionary: [{ key: 'docs', zh: '文档', en: 'Docs' }],
   };
   const result = appendTagDictionary(settings, [
-    { key: 'read', zh: '重复', en: 'Duplicate' },
+    { key: 'docs', zh: '重复', en: 'Duplicate' },
     { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
   ]);
   assert.deepEqual(result.added, [
     { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
   ]);
   assert.deepEqual(result.tags, [
-    { key: 'read', zh: '只读', en: 'Read-only' },
+    { key: 'docs', zh: '文档', en: 'Docs' },
     { key: 'postgresql', zh: 'PostgreSQL', en: 'PostgreSQL' },
   ]);
+});
+
+test('action keys are rejected by the tag dictionary and dropped from stale settings', () => {
+  assert.throws(
+    () => parseTagDictionary([{ key: 'read', zh: '只读', en: 'Read-only' }]),
+    (error: unknown) => error instanceof AdminApiError && error.code === 'INVALID_TAGS',
+  );
+  assert.throws(
+    () => appendTagDictionary({}, [{ key: 'write', zh: '写入', en: 'Write' }]),
+    (error: unknown) => error instanceof AdminApiError && error.code === 'INVALID_TAGS',
+  );
+  const stale = readTagDictionary({
+    tagDictionary: [
+      { key: 'read', zh: '只读', en: 'Read-only' },
+      { key: 'docs', zh: '文档', en: 'Docs' },
+    ],
+  });
+  assert.deepEqual(stale, [{ key: 'docs', zh: '文档', en: 'Docs' }]);
 });
 
 test('every built-in tag key is locked, custom keys are not', () => {
@@ -187,7 +199,7 @@ test('PUT /tags refuses to drop or relabel system-managed tags', async () => {
     method: 'PUT',
     path: '/tags',
     headers: { 'if-match': '"1"' },
-    body: { tags: current.tags.filter((tag) => tag.key !== 'read') },
+    body: { tags: current.tags.filter((tag) => tag.key !== 'memory') },
   });
   assert.equal(droppedBuiltin?.status, 422);
 });
@@ -207,7 +219,7 @@ test('PUT /tags accepts the effective dictionary verbatim', async () => {
     body: { tags: current.tags },
   });
   assert.equal(put?.status, 200);
-  assert.equal((put?.body as { tags: unknown[] }).tags.length, 26);
+  assert.equal((put?.body as { tags: unknown[] }).tags.length, 20);
   assert.deepEqual(
     (await store.read()).settings['tagDictionary'],
     current.tags,

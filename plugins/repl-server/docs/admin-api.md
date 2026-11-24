@@ -45,7 +45,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | POST | `/servers/:id/tools/discover` | 扫描懒加载工具；`preview=true`（默认）只预览，`false` 应用 | 同步，最长 30s |
 | PATCH | `/tools/:serverId/:name` | 改描述/启停/并发/标签/类型 | 同步，下次 eval 生效 |
 | POST | `/tools/batch` | 批量修改 | 同步，事务 |
-| GET | `/tags` | 标签字典；未保存过返回内置默认（26 项），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
+| GET | `/tags` | 标签字典；未保存过返回内置默认（20 项，不含动作键），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
 | PUT | `/tags` | 全量替换；必须带 `If-Match`，缺失 400 `IF_MATCH_REQUIRED`，不匹配 409 `REVISION_CONFLICT` | 同步 |
 | GET | `/categories` | 分类字典；未保存过返回内置默认（10 项），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
 | PUT | `/categories` | 全量替换；`If-Match` 语义同 `/tags` | 同步 |
@@ -62,8 +62,8 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | PUT | `/ai/config` | 整体替换 AI 配置 | 同步，必须 `If-Match` |
 | POST | `/ai/propose` | 一句话/粘贴配置 → server 配置草稿 | 同步，受 `timeoutMs` 限制 |
 | POST | `/ai/propose/apply` | 确认草稿 → 创建 server | 同步 |
-| POST | `/ai/annotate/:serverId` | `mode=preview/apply` 生成标注草稿或写入标注 | 同步 |
-| GET | `/ai/annotations/pending` | 新接入自动生成的标注预览列表 | 同步 |
+| POST | `/ai/annotate/:serverId` | `mode=preview/apply` 生成标注草稿或写入标注；自动标注失败后也可用 `apply` 重试 | 同步 |
+| GET | `/ai/annotations/pending` | 自动标注应用失败列表（含 `error.code/message` 与 `proposed`） | 同步 |
 | GET | `/events` | SSE 事件流，支持 `Last-Event-ID` 回放 | 长连接 |
 | GET | `/config/export` | 导出声明式 JSON | 同步 |
 | POST | `/config/import` | 导入（可 dry-run） | 202 |
@@ -119,11 +119,25 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 ```jsonc
 // PATCH /admin/api/tools/pg/query
 { "description": "Run a read-only SQL query.", "enabled": true,
-  "concurrency": "parallel", "tags": ["db","read"], "type": "query" }
+  "concurrency": "parallel", "tags": ["query-planning"], "type": "query" }
 → 200 { "tool": {...}, "revision": 44 }
 ```
 
-管理端 UI 已不再编辑 `type`；`type` 保留为兼容字段与管理端检索过滤器，工具动作语义统一用 `tags`。
+管理端 UI 已不再编辑 `type`；`type` 保留为兼容字段与管理端检索过滤器。`type` 与 `tags` 都不承载动作语义：`read`、`write`、`query`、`exec`、`deploy`、`destructive` 是动作键，不能作为标签。
+
+**标签规则**（`server/src/catalog/tag-policy.ts`，server 与工具共用）：
+
+- server `tags` 0–2 个，只放对该 server 所有工具都成立的描述性标签。
+- 工具 `tags` 与 server 标签取并集后必须 1–4 个；工具自身不得重复 server 标签。
+- 违反时返回 422 `TAG_POLICY_VIOLATION`，`details.errors` 列出原因。创建或 PATCH server 时校验 server 标签；PATCH 改变 server 标签时复检该 server 下所有 enabled 工具，任一工具超限或重复则整体拒绝、不写库；写工具标签或把工具改为 `enabled: true` 时校验该工具。AI 标注 apply 走同一套规则：server 标签实际变化时同样复检全部 enabled 工具，不只 `toolOverrides` 里列出的工具（设计 08 §4.5）。
+
+**AI 标注的自动应用**（设计 08 §4.7）：
+
+- 工具索引完成（`tools/list` 写入、refresh、restart）后，`ai.enabled` 与 `ai.autoAnnotate` 都开启且 server 不是 builtin/seed、至少 1 个工具、summary/category 有空缺或某 enabled 工具的生效标签（`server tags ∪ tool tags`）不满足 1–4/不重复/禁动作键时，服务端生成标注并直接写库。`server tags` 允许为 0：摘要/分类齐全且所有 enabled 工具生效标签合法即跳过。导入配置与 AI 生成配置创建 server 后经首次 `tools/list` 汇入同一流程。
+- 提交体只补空字段：当前 `summary`/`category` 非空时不提交，为空时只提交非 null 非空值；空 `tags` 与空 `toolOverrides` 省略；`categorySuggestion`/`tagSuggestions` 不提交。因此已有的人工 summary/category 不会被覆盖，null 也不会清空已有值，自动路径只用字典已有 key，不新增字典项。
+- `expectedRevision` 取当前 `meta.revision`；409 `REVISION_CONFLICT` 重取 revision 重试一次，仍失败进入失败队列。
+- 成功不产生 pending，写一条结构化日志（`server`（serverId）、`changed`、`warnings`、`source=auto`）；失败（`TAG_POLICY_VIOLATION` / `AI_ANNOTATION_INVALID` / `AI_UNKNOWN_TOOL` / 模型调用失败等）把 `proposed`、`warnings`、`omittedTools` 与 `error` 写入 `GET /ai/annotations/pending`，不抛到工具索引路径，也不自动重试。入队前清空 `proposed.categorySuggestion` 与 `tagSuggestions`，保证 UI 重试走手动 apply 时也不写新字典项。预检失败（`AI_PROMPT_TOO_LARGE`）不消耗尝试额度、不入队。
+- server 被 PATCH、refresh 或删除后丢弃该 server 的失败项；手动 apply 成功也会清空。`autoAnnotate=false` 时不自动预览/应用，手动 `preview`/`apply` 不受影响。
 
 `concurrency` **只对第三方 MCP 工具生效**：执行它的是池侧 `ServerGates` / `PoolGates`，声明值就是真相。官方工具（`__official__`）那一列只是标注——`claude mcp serve` 不导出 `isConcurrencySafe`，网关按工具类型自己判定（同路径 `Edit` 串行、写模式 `Bash` 单道、其余并行），审计行的 `mode` 记的是这个实际档位。改官方工具的 `concurrency` 不会改变任何调度。
 
@@ -159,7 +173,8 @@ HTTP 映射：400 校验、404 不存在、409 revision 冲突或 SERVER_BUSY、
 | 改工具描述/标签/启停/并发 | DB 提交 | 下一次 `run_script` |
 | 扫描并应用懒加载工具（`preview=false`） | DB 提交 | 下一次 `run_script` 的 catalog 快照 |
 | 报告 / 告警配置 | DB 提交 | 立即；报告先落库，告警投递在后台串行 |
-| AI 配置（`PUT /ai/config`） | DB 提交 | 下一次 AI 调用；proposal 与标注预览不落库、不生效 |
+| AI 配置（`PUT /ai/config`） | DB 提交 | 下一次 AI 调用；proposal 与手动标注预览不落库、不生效 |
+| 自动标注（工具索引后） | DB 提交 | 下一次 `run_script` 的 catalog 快照；FTS 即时更新 |
 | 删除 server | DB 提交 + 停收新调用 | 立即；在飞按 `force` 决定 drain 或中止 |
 
 **catalog 在 eval 开始时快照，连接可用性是实时的。** 两者不一致时报"工具存在但暂时不可用"，不是"工具不存在"。
@@ -436,6 +451,8 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `ALERT_RETRY_CONFLICT` | 409 | 手动重发时 `alert_state` 不允许 |
 | `REVISION_CONFLICT` | 409 | PUT 告警配置 |
 | `INVALID_SEVERITY` / `UNKNOWN_EVENT` / `WEBHOOK_URL_INVALID` | 422 | PUT 告警配置 |
+| `INVALID_TAGS` | 422 | PUT `/tags`：条目格式、重复 key、动作键或系统托管项被改动 |
+| `TAG_POLICY_VIOLATION` | 422 | 创建/PATCH server、写工具标签、AI 标注 apply：违反 server 0–2 / 工具叠加 1–4 / 不重复 / 禁动作键 |
 | `WEBHOOK_NOT_CONFIGURED` | 422 | 测试端点 |
 | `ALERT_TEST_THROTTLED` | 429 | 测试端点 |
 

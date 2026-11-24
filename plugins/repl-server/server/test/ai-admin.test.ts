@@ -129,6 +129,7 @@ function makeHandler(
           warnings: [],
           omittedTools: 0,
           createdAt: 'x',
+          error: { code: 'TAG_POLICY_VIOLATION', message: 'server tags break tool tag limits' },
         },
       ],
     }),

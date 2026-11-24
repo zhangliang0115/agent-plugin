@@ -10,7 +10,7 @@ import {
 } from '../src/lib/tags.ts';
 
 test('isLockedTagKey locks every built-in tag and the env.* namespace', () => {
-  assert.equal(LOCKED_TAG_KEYS.size, 26);
+  assert.equal(LOCKED_TAG_KEYS.size, 20);
   for (const key of LOCKED_TAG_KEYS) assert.equal(isLockedTagKey(key), true, key);
   assert.equal(isLockedTagKey('env.qa'), true);
   assert.equal(isLockedTagKey('sentry'), false);

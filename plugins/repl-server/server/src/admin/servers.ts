@@ -20,6 +20,11 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
 import {
+  evaluateServerTags,
+  evaluateTagPolicy,
+  formatTagPolicyIssues,
+} from '../catalog/tag-policy.ts';
+import {
   parseToolDiscoveryConfig,
   type ParseDiscoveryOptions,
 } from '../discovery/config.ts';
@@ -352,6 +357,22 @@ export function expectStringArray(
   return result;
 }
 
+function sameTags(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const known = new Set(right);
+  return left.every((tag) => known.has(tag));
+}
+
+/** Rejects server tag lists that violate the shared descriptive-tag policy. */
+function assertServerTagPolicy(tags: readonly string[], field: string): void {
+  const issues = evaluateServerTags(tags);
+  if (issues.length === 0) return;
+  throw new AdminApiError(422, 'TAG_POLICY_VIOLATION', 'server tags violate the tag policy', {
+    field,
+    errors: formatTagPolicyIssues(issues),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Operation registry for 202 responses
 // ---------------------------------------------------------------------------
@@ -565,6 +586,12 @@ export interface AdminSecrets {
   missing(names: readonly string[]): Promise<string[]> | string[];
 }
 
+export interface ServerToolTags {
+  name: string;
+  enabled: boolean;
+  tags: string[];
+}
+
 export interface AdminServersDeps {
   servers: ServerStore;
   pool: ServerPoolControl;
@@ -573,6 +600,8 @@ export interface AdminServersDeps {
   clock?: Clock;
   /** Per-server stored tool counts for the list column (`{enabled}/{total}`). */
   toolCounts?: () => ReadonlyMap<string, ServerToolCounts>;
+  /** Tool tags used to revalidate inherited server tags on PATCH. */
+  toolTags?: (serverId: string) => Promise<readonly ServerToolTags[]> | readonly ServerToolTags[];
   /** `POST /servers/:id/test` budget; docs freeze 10s. */
   testTimeoutMs?: number;
   /**
@@ -583,8 +612,8 @@ export interface AdminServersDeps {
   official?: OfficialToolsSync;
   /**
    * Called after `POST /servers/:id/tools/refresh` and `/restart` complete, so
-   * assembly can discard the server's pending AI annotation and re-run the
-   * auto preview against the new tool set. Best-effort: a failing hook never
+   * assembly can discard the server's failed AI annotation and re-run the
+   * auto annotation against the new tool set. Best-effort: a failing hook never
    * turns a successful refresh into a failed operation.
    */
   onToolsRefreshed?: (serverId: string) => void | Promise<void>;
@@ -917,6 +946,7 @@ export function parseCreateServer(
   const category =
     body['category'] === undefined ? null : readNullableString(body['category'], 'category', 128);
   const tags = body['tags'] === undefined ? [] : expectStringArray(body['tags'], 'tags', { maxLength: 64 });
+  assertServerTagPolicy(tags, 'tags');
   const enabled =
     body['enabled'] === undefined ? true : expectBoolean(body['enabled'], 'enabled');
   const connectMode = readConnectMode(body['connectMode']);
@@ -1004,6 +1034,7 @@ function parseServerPatch(
   }
   if ('tags' in body) {
     patch.tags = expectStringArray(body['tags'], 'tags', { maxLength: 64 });
+    assertServerTagPolicy(patch.tags, 'tags');
   }
   if ('timeoutMs' in body) {
     patch.timeoutMs = expectInteger(body['timeoutMs'], 'timeoutMs', {
@@ -1245,6 +1276,27 @@ export function createAdminServersHandler(deps: AdminServersDeps): AdminHandler 
 
     // Validate the patch before the precondition so malformed bodies always get 400/422.
     const patch = parseServerPatch(current, requireObjectBody(request));
+    // Server tags are inherited by every tool: revalidate the enabled tools so a
+    // PATCH cannot push one over the effective limit or empty its only tag.
+    if (patch.tags !== undefined && !sameTags(patch.tags, current.tags)) {
+      const tools = deps.toolTags === undefined ? [] : await deps.toolTags(id);
+      const violations = tools
+        .filter((tool) => tool.enabled)
+        .map((tool) => ({
+          name: tool.name,
+          issues: evaluateTagPolicy(patch.tags ?? [], tool.tags).issues,
+        }))
+        .filter((entry) => entry.issues.length > 0);
+      if (violations.length > 0) {
+        throw new AdminApiError(422, 'TAG_POLICY_VIOLATION', 'server tags break tool tag limits', {
+          serverId: id,
+          tools: violations.map((entry) => ({
+            name: entry.name,
+            errors: formatTagPolicyIssues(entry.issues),
+          })),
+        });
+      }
+    }
     assertRevision(await deps.servers.revision(), expected);
     // A switch from search back to static demotes discovered rows inside the
     // server-store transaction; assembly refreshes the catalog snapshot after

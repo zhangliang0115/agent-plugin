@@ -35,6 +35,7 @@ import {
   type ServerRecord,
   type ServerStore,
 } from './servers.ts';
+import { evaluateTagPolicy, formatTagPolicyIssues } from '../catalog/tag-policy.ts';
 import type { OfficialToolsSync } from '../ports.ts';
 
 export type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
@@ -193,6 +194,26 @@ function effectiveTags(server: ServerRecord, tool: ToolRecord): string[] {
   return [...new Set([...server.tags, ...tool.tags])];
 }
 
+/** Rejects a tool patch that would break the descriptive-tag policy. */
+function assertToolTagPolicy(server: ServerRecord, tool: ToolRecord, patch: ToolPatch): void {
+  // A pure metadata edit cannot change the tag state; only tag writes and
+  // re-enabling a tool need the check.
+  if (patch.tags === undefined && patch.enabled !== true) return;
+  const tags = patch.tags ?? tool.tags;
+  const issues = evaluateTagPolicy(server.tags, tags).issues;
+  if (issues.length === 0) return;
+  throw new AdminApiError(
+    422,
+    'TAG_POLICY_VIOLATION',
+    `tool ${tool.name} violates the tag policy`,
+    {
+      serverId: server.id,
+      tool: tool.name,
+      errors: formatTagPolicyIssues(issues),
+    },
+  );
+}
+
 /** Raw row plus the values the executor actually sees. */
 function viewTool(tool: ToolRecord, server: ServerRecord): Record<string, unknown> {
   const description = tool.descriptionOverride ?? tool.description;
@@ -320,10 +341,11 @@ export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
   ): Promise<AdminResponse> {
     const expected = parseIfMatch(request);
     const server = assertServerExists(await deps.servers.get(serverId), serverId);
-    assertToolExists(await deps.tools.get(serverId, name), serverId, name);
+    const current = assertToolExists(await deps.tools.get(serverId, name), serverId, name);
 
     // Validate the patch before the precondition so malformed bodies always get 400/422.
     const patch = parseToolPatch(requireObjectBody(request));
+    assertToolTagPolicy(server, current, patch);
     assertRevision(await deps.tools.revision(), expected);
     const { tool, revision } = await deps.tools.update(serverId, name, patch, expected);
 
@@ -378,7 +400,20 @@ export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
       servers.set(serverId, assertServerExists(await deps.servers.get(serverId), serverId));
     }
     for (const update of updates) {
-      assertToolExists(await deps.tools.get(update.serverId, update.name), update.serverId, update.name);
+      const server = servers.get(update.serverId);
+      if (server === undefined) {
+        throw new AdminApiError(
+          500,
+          'INTERNAL_ERROR',
+          `batch update for unknown server ${update.serverId}`,
+        );
+      }
+      const current = assertToolExists(
+        await deps.tools.get(update.serverId, update.name),
+        update.serverId,
+        update.name,
+      );
+      assertToolTagPolicy(server, current, update.patch);
     }
 
     assertRevision(await deps.tools.revision(), expected);

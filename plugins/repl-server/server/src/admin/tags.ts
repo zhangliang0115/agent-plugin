@@ -19,6 +19,7 @@ import {
   type AdminRequest,
   type AdminResponse,
 } from './servers.ts';
+import { ACTION_TAG_KEYS } from '../catalog/tag-policy.ts';
 import type { SettingsStore, StoredSettings } from './settings.ts';
 
 export interface TagDefinition {
@@ -53,12 +54,6 @@ export const DEFAULT_TAG_DICTIONARY: readonly TagDefinition[] = Object.freeze([
   { key: 'env.pre', zh: '预发环境', en: 'Staging' },
   { key: 'env.prod', zh: '生产环境', en: 'Production' },
   { key: 'cross-env', zh: '跨环境', en: 'Cross-environment' },
-  { key: 'read', zh: '只读', en: 'Read-only' },
-  { key: 'write', zh: '写入', en: 'Write' },
-  { key: 'query', zh: '查询', en: 'Query' },
-  { key: 'exec', zh: '执行', en: 'Execute' },
-  { key: 'deploy', zh: '部署', en: 'Deploy' },
-  { key: 'destructive', zh: '破坏性', en: 'Destructive' },
   { key: 'memory', zh: '记忆', en: 'Memory' },
   { key: 'docs', zh: '文档', en: 'Docs' },
   { key: 'testing', zh: '测试', en: 'Testing' },
@@ -135,6 +130,9 @@ export function readTagDictionary(settings: StoredSettings): TagDefinition[] {
     const zh = typeof entry['zh'] === 'string' ? entry['zh'].trim() : '';
     const en = typeof entry['en'] === 'string' ? entry['en'].trim() : '';
     if (!TAG_KEY_PATTERN.test(key) || zh === '' || en === '' || seen.has(key)) continue;
+    // Action keys are never part of the tag vocabulary; drop stale rows left by
+    // an older dictionary before the UI or AI sees them.
+    if (ACTION_TAG_KEYS.has(key)) continue;
     seen.add(key);
     tags.push({ key, zh, en });
   }
@@ -174,6 +172,13 @@ export function parseTagDictionary(value: unknown): TagDefinition[] {
     if (zh.length > LABEL_MAX_LENGTH || en.length > LABEL_MAX_LENGTH) {
       throw new AdminApiError(422, 'INVALID_TAGS', `tag ${key} labels exceed ${LABEL_MAX_LENGTH} characters`);
     }
+    if (ACTION_TAG_KEYS.has(key)) {
+      throw new AdminApiError(
+        422,
+        'INVALID_TAGS',
+        `tag ${key} is an action key; actions are not tags`,
+      );
+    }
     if (seen.has(key)) {
       throw new AdminApiError(422, 'INVALID_TAGS', `duplicate tag key ${key}`);
     }
@@ -192,6 +197,13 @@ export function appendTagDictionary(
   const seen = new Set(tags.map((tag) => tag.key));
   const added: TagDefinition[] = [];
   for (const entry of additions) {
+    if (ACTION_TAG_KEYS.has(entry.key)) {
+      throw new AdminApiError(
+        422,
+        'INVALID_TAGS',
+        `tag ${entry.key} is an action key; actions are not tags`,
+      );
+    }
     if (seen.has(entry.key)) continue;
     if (tags.length >= MAX_TAGS) {
       throw new AdminApiError(

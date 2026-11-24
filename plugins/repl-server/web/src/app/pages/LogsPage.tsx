@@ -640,11 +640,18 @@ export function LogsPage(): React.ReactElement {
         ),
       },
       {
-        title: '客户端 / binding',
+        title: '事件类型',
+        key: 'event',
+        width: 130,
+        ellipsis: true,
+        render: (_value, event) => eventLabel(event.event),
+      },
+      {
+        title: '客户端',
         key: 'client',
         width: 170,
         ellipsis: true,
-        render: (_value, event) => eventClientLabel(event, filterOptions.bindings),
+        render: (_value, event) => eventClientLabel(event),
       },
       {
         title: '服务端（server）',
@@ -709,13 +716,6 @@ export function LogsPage(): React.ReactElement {
         key: 'status',
         width: 110,
         render: (_value, event) => <AuditStatusCell event={event} />,
-      },
-      {
-        title: '会话 / 执行',
-        key: 'eval',
-        width: 150,
-        ellipsis: true,
-        render: (_value, event) => <span className="mono">{evalLabel(event)}</span>,
       },
     ],
     [],
@@ -1554,17 +1554,11 @@ function splitClientFilter(label: string): { name: string; version: string } {
   return { name: label.slice(0, slash), version: label.slice(slash + 1) };
 }
 
-function eventClientLabel(event: AuditEvent, bindings: readonly LabeledOption[]): string {
-  if (event.event === 'ai_run') {
-    const client = eventText(event, 'client') ?? 'admin';
-    const serverId = eventText(event, 'serverId') ?? eventText(event, 'server');
-    return serverId === null ? client : `${client} · ${serverId}`;
-  }
-  const client = eventText(event, 'client');
-  const binding = eventText(event, 'binding');
-  const bindingLabel = binding === null ? null : optionLabel(binding, bindings);
-  if (client !== null && bindingLabel !== null) return `${client} · ${bindingLabel}`;
-  return client ?? bindingLabel ?? '—';
+/** Client name only; `ai_run` events without a client fall back to `admin`. */
+function eventClientLabel(event: AuditEvent): string {
+  const name = eventClientParts(event).name;
+  if (name !== '') return name;
+  return event.event === 'ai_run' ? 'admin' : '—';
 }
 
 function BindingLabel({
@@ -1597,15 +1591,6 @@ function eventDuration(event: AuditEvent): number | null {
     asNumber(event['elapsedMs']) ??
     asNumber(event['durMs'])
   );
-}
-
-function evalLabel(event: AuditEvent): string {
-  const exec = eventText(event, 'exec');
-  const evalId = asNumber(event['evalId']);
-  if (exec !== null && evalId !== null) return `${formatId(exec, 10)}#${evalId}`;
-  if (exec !== null) return formatId(exec, 14);
-  const taskId = eventText(event, 'evalTaskId') ?? eventText(event, 'taskId');
-  return taskId === null ? '—' : formatId(taskId, 14);
 }
 
 /** Mirrors the server-side mapping so live rows, trend and `?status=` agree. */

@@ -77,7 +77,7 @@ export function buildProposePrompt(
 5. 参数放在 args 数组里，不要拼成 shell 命令。args 中的凭据同样用 {"$secret":"KEY_NAME"}。
 6. url 只允许 http/https，且不得内嵌用户名或密码；非回环地址必须用 https。
 7. 无法确定时不要编造：把不确定项写进 warnings，并给出最保守的配置。
-8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 只能从下面的标签字典 key 中选，最多 8 个，不要编造新 key；没有合适的就留空。
+8. summary 用中文，末尾带英文关键词，总长不超过 160 字符；tags 只能从下面的标签字典 key 中选，0-2 个，只放对这个 server 所有工具都成立的描述性标签；不要使用 read、write、query、exec、deploy、destructive，动作不是标签；没有合适的就留空，不要编造新 key。
 9. category 必须从下面的分类字典 key 中选一个；都不合适时用 "other"，不要编造新 key。
 10. connectMode 默认 "eager"（启动即连接）；只有用户明确要求延迟连接、按需启动或节省资源时才用 "lazy"。
 
@@ -143,7 +143,7 @@ function renderAnnotatePrompt(
 4. 不输出密钥；输入里也不会包含密钥值，只有键名。
 5. summary 中文 + 英文关键词，≤160 字符。
 6. category 尽量从下面的分类字典 key 中选；如果都不合适，把 category 设为 null，并在 categorySuggestion 给出推荐的新分类 {key, zh, en}。
-7. tags 只从下面的标签字典 key 中选，最多 8 个，不要重复 server 已有标签；需要的新标签放进 tagSuggestions，每项 {key, zh, en}，最多 8 个。toolOverrides[].tags 可以引用标签字典的 key 或 tagSuggestions 里的 key，每个工具最多 8 个。
+7. tags 只从下面的标签字典 key 中选，0-2 个，只放对这个 server 所有工具都成立的描述性标签；不要使用 read、write、query、exec、deploy、destructive，动作不是标签。toolOverrides[].tags 不要重复 server 标签，叠加 server 标签后每个工具 1-4 个；server 标签已经够用时可省略某个工具。需要的新标签只在本字典确实缺项时放进 tagSuggestions，每项 {key, zh, en}，最多 8 个；toolOverrides[].tags 可以引用标签字典或 tagSuggestions 的 key。
 8. 建议的 key 以小写字母或数字开头，只含小写字母、数字、点、下划线与短横线，≤32 字符；zh 用中文名称，专有名词可保留原文（如 MySQL、JavaScript、Kubernetes），en 用英文，两者都必须非空且 ≤40 字符。
 9. 禁止生成 env.*、cross-env、official、builtin：这些是部署环境与来源事实，你看不到，必须由管理员维护，也不要放进 tagSuggestions。
 10. 不要生成工具描述：工具描述属于第三方原文，保持原样，toolOverrides 只给 name 与 tags。
@@ -163,10 +163,10 @@ ${tagKeys}
   "summary": "中文摘要 (english keywords)",
   "category": "database",
   "categorySuggestion": null,
-  "tags": ["postgresql", "query", "write"],
+  "tags": ["postgresql"],
   "tagSuggestions": [],
   "toolOverrides": [
-    {"name": "query", "tags": ["read", "query"]}
+    {"name": "query", "tags": ["index-management"]}
   ],
   "warnings": ["..."]
 }

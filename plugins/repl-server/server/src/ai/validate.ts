@@ -16,6 +16,7 @@ import {
   type SecretValue,
   type ServerConfig,
 } from '../admin/servers.ts';
+import { ACTION_TAG_KEYS } from '../catalog/tag-policy.ts';
 import { PROVIDER_TOKEN_RULES } from './redact.ts';
 
 export { PROVIDER_TOKEN_RULES } from './redact.ts';
@@ -32,7 +33,8 @@ const RESERVED_SERVER_IDS = new Set(['__official__', '__builtin__']);
 const MAX_ARGS = 256;
 const MAX_ARG_LENGTH = 8192;
 const MAX_KEYS = 256;
-const MAX_TAGS = 8;
+const MAX_SERVER_TAGS = 2;
+const MAX_TAG_SUGGESTIONS = 8;
 const MAX_TOOL_OVERRIDES = 80;
 const MAX_WARNINGS = 10;
 
@@ -121,8 +123,8 @@ function readText(
 
 function readTags(value: unknown, field: string, prefix: string): string[] {
   if (!Array.isArray(value)) throw proposalInvalid([`${field} must be an array`], [prefix]);
-  if (value.length > MAX_TAGS) {
-    throw proposalInvalid([`${field} must have at most ${MAX_TAGS} items`], [prefix]);
+  if (value.length > MAX_SERVER_TAGS) {
+    throw proposalInvalid([`${field} must have at most ${MAX_SERVER_TAGS} items`], [prefix]);
   }
   const tags: string[] = [];
   for (let index = 0; index < value.length; index += 1) {
@@ -130,6 +132,12 @@ function readTags(value: unknown, field: string, prefix: string): string[] {
     if (typeof entry !== 'string' || !TAG_PATTERN.test(entry)) {
       throw proposalInvalid(
         [`${field}[${index}] must match ${String(TAG_PATTERN)}`],
+        [`${prefix}[${index}]`],
+      );
+    }
+    if (ACTION_TAG_KEYS.has(entry)) {
+      throw proposalInvalid(
+        [`${field}[${index}] must not be an action key (${entry})`],
         [`${prefix}[${index}]`],
       );
     }
@@ -620,7 +628,6 @@ const ANNOTATION_FIELDS: ReadonlySet<string> = new Set([
 // it from older prompts, and tool descriptions are never written by AI.
 const TOOL_OVERRIDE_FIELDS: ReadonlySet<string> = new Set(['name', 'description', 'tags']);
 const SUGGESTION_LABEL_MAX = 40;
-const MAX_TAG_SUGGESTIONS = MAX_TAGS;
 
 /**
  * Validates a tag list, then applies the item cap. Model previews truncate the
@@ -698,12 +705,12 @@ function readToolOverrides(
         entry['tags'],
         `${field}.tags`,
         `${field}.tags`,
-        MAX_TAGS,
+        MAX_TAG_SUGGESTIONS,
         options.truncate,
       );
       if (read.dropped > 0) {
         options.notes.push(
-          `工具 ${name} 的标签超过 ${MAX_TAGS} 个，已保留前 ${MAX_TAGS} 个，其余 ${read.dropped} 个丢弃`,
+          `工具 ${name} 的标签超过 ${MAX_TAG_SUGGESTIONS} 个，已保留前 ${MAX_TAG_SUGGESTIONS} 个，其余 ${read.dropped} 个丢弃`,
         );
       }
       override.tags = read.tags;
@@ -755,6 +762,10 @@ function readTagSuggestions(
   const suggestions: DictionarySuggestion[] = [];
   for (let index = 0; index < value.length; index += 1) {
     const suggestion = readSuggestion(value[index], `tagSuggestions[${index}]`, TAG_PATTERN);
+    if (ACTION_TAG_KEYS.has(suggestion.key)) {
+      options.notes.push(`标签建议 ${suggestion.key} 是动作键，已丢弃`);
+      continue;
+    }
     if (!suggestions.some((entry) => entry.key === suggestion.key)) suggestions.push(suggestion);
   }
   if (suggestions.length <= MAX_TAG_SUGGESTIONS) return suggestions;
@@ -824,10 +835,13 @@ export function normalizeAnnotation(
   }
 
   if ('tags' in value) {
-    const read = readTagList(value['tags'], 'tags', 'tags', MAX_TAGS, truncate);
+    // Parse with the raw safety cap; the dictionary restriction and the final
+    // 2-tag limit run after invalid keys are dropped, so a valid tag after an
+    // invalid one is not lost to an early truncation.
+    const read = readTagList(value['tags'], 'tags', 'tags', MAX_TAG_SUGGESTIONS, truncate);
     if (read.dropped > 0) {
       notes.push(
-        `标签超过 ${MAX_TAGS} 个，已保留前 ${MAX_TAGS} 个，其余 ${read.dropped} 个丢弃`,
+        `标签超过 ${MAX_TAG_SUGGESTIONS} 个，已保留前 ${MAX_TAG_SUGGESTIONS} 个，其余 ${read.dropped} 个丢弃`,
       );
     }
     result.tags = read.tags;
@@ -879,7 +893,7 @@ export function annotationIsEmpty(annotation: NormalizedAnnotation): boolean {
     (annotation.categorySuggestion ?? null) === null &&
     (annotation.tags?.length ?? 0) === 0 &&
     (annotation.tagSuggestions?.length ?? 0) === 0 &&
-    (annotation.toolOverrides?.length ?? 0) === 0
+    (annotation.toolOverrides?.some((override) => (override.tags?.length ?? 0) > 0) ?? false) === false
   );
 }
 
@@ -957,6 +971,10 @@ export function restrictAnnotationToDictionary(
         dropped.push(`标签 ${tag} 是环境或来源标签，由管理员维护，AI 生成值已丢弃`);
         return false;
       }
+      if (ACTION_TAG_KEYS.has(tag)) {
+        dropped.push(`标签 ${tag} 是动作键，动作不能作为标签`);
+        return false;
+      }
       if (keys.categories.has(tag)) {
         dropped.push(`标签 ${tag} 是分类 key，分类 key 不能当标签，已丢弃`);
         return false;
@@ -976,13 +994,16 @@ export function restrictAnnotationToDictionary(
         dropped.push(`标签 ${suggestion.key} 由管理员维护，不能作为建议新增`);
         continue;
       }
+      if (ACTION_TAG_KEYS.has(suggestion.key)) {
+        dropped.push(`标签建议 ${suggestion.key} 是动作键，动作不能作为标签`);
+        continue;
+      }
       if (keys.categories.has(suggestion.key)) {
         dropped.push(`标签建议 ${suggestion.key} 是分类 key，分类 key 不能当标签`);
         continue;
       }
       if (keys.tags.has(suggestion.key)) {
-        restricted.tags ??= [];
-        if (!restricted.tags.includes(suggestion.key)) restricted.tags.push(suggestion.key);
+        // Already in the dictionary; a suggestion never becomes a server tag.
         continue;
       }
       if (!kept.some((entry) => entry.key === suggestion.key)) kept.push(suggestion);
@@ -1000,6 +1021,10 @@ export function restrictAnnotationToDictionary(
       const tags = override.tags.filter((tag) => {
         if (isAiForbiddenTag(tag)) {
           dropped.push(`工具标签 ${tag} 由管理员维护，AI 生成值已丢弃`);
+          return false;
+        }
+        if (ACTION_TAG_KEYS.has(tag)) {
+          dropped.push(`工具标签 ${tag} 是动作键，动作不能作为标签`);
           return false;
         }
         if (keys.categories.has(tag)) {
