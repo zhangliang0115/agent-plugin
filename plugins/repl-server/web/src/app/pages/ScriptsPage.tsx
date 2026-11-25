@@ -49,6 +49,7 @@ import {
 } from '../../lib/creator-name.ts';
 import { argsSummary } from '../../lib/script-info.ts';
 import { versionEditBody } from '../../lib/script-edit.ts';
+import { pickRunFrame } from '../../lib/script-run-match.ts';
 import { argsObjectFrom } from '../../lib/schema-args.ts';
 import {
   createdVersion,
@@ -197,6 +198,8 @@ export function ScriptsPage(): React.ReactElement {
   const detailTicketRef = useRef(0);
   const historyTicketRef = useRef(0);
   const diffTicketRef = useRef(0);
+  /** List 「测试」 opens the drawer first; the modal waits for the version detail. */
+  const pendingTestRef = useRef(false);
 
   const loadDetail = useCallback(
     async (scriptId: string, preferVersion: number | null, ticket: number): Promise<void> => {
@@ -255,6 +258,15 @@ export function ScriptsPage(): React.ReactElement {
       alive = false;
     };
   }, [api, selectedId, selectedVersion, versions]);
+
+  // Opens the list 「测试」 modal once the drawer has loaded the selected version.
+  useEffect(() => {
+    if (!pendingTestRef.current) return;
+    if (versionDetail === null || selectedVersion === null) return;
+    if (versionDetail.version !== selectedVersion) return;
+    pendingTestRef.current = false;
+    openTest();
+  }, [versionDetail, selectedVersion]);
 
   const versionSignature = `${selectedId ?? ''}:${versions.map((entry) => entry.version).join(',')}`;
   const diffVersionSignatureRef = useRef<string | null>(null);
@@ -355,6 +367,7 @@ export function ScriptsPage(): React.ReactElement {
   function openScript(scriptId: string): void {
     const ticket = ++detailTicketRef.current;
     diffTicketRef.current += 1;
+    pendingTestRef.current = false;
     setSelectedId(scriptId);
     setDetail(null);
     setVersions([]);
@@ -373,10 +386,17 @@ export function ScriptsPage(): React.ReactElement {
     void loadDetail(scriptId, null, ticket);
   }
 
+  /** List 「测试」: open the shared drawer, then let the version load pop the test modal. */
+  function openTestFor(scriptId: string): void {
+    openScript(scriptId);
+    pendingTestRef.current = true;
+  }
+
   function closeScript(): void {
     detailTicketRef.current += 1;
     historyTicketRef.current += 1;
     diffTicketRef.current += 1;
+    pendingTestRef.current = false;
     setSelectedId(null);
     setDetail(null);
     setVersions([]);
@@ -438,11 +458,7 @@ export function ScriptsPage(): React.ReactElement {
       setHistoryLoading(false);
       setHistoryPair(null);
       setHistoryEvents(null);
-      setHistoryError(
-        run.purpose === 'test'
-          ? '测试执行由管理端直接触发，不经过 MCP 请求，因此没有请求详情。'
-          : '这条执行没有关联的 MCP 请求记录。',
-      );
+      setHistoryError(requestDetailBlockedReason(run));
       return;
     }
     const ticket = ++historyTicketRef.current;
@@ -453,19 +469,21 @@ export function ScriptsPage(): React.ReactElement {
     const window =
       Number.isFinite(created)
         ? {
-            from: new Date(created - 2_000).toISOString(),
-            to: new Date(created + 2_000).toISOString(),
+            from: new Date(created - 24 * 60 * 60 * 1_000).toISOString(),
+            to: new Date(created + 10_000).toISOString(),
           }
         : {};
     setHistoryLoading(true);
     try {
       const response = await api.get<FramesResponse<RequestFramePair>>('/logs/frames', {
-        query: { detail: 'full', limit: 200, ...window },
+        query: { detail: 'full', limit: 200, id: run.requestId, ...window },
       });
       if (ticket !== historyTicketRef.current) return;
-      const pair = (response.frames ?? []).find((candidate) => sameRequest(candidate, run));
-      if (pair === undefined) {
-        setHistoryError('这条执行对应的请求记录已过期或已清理，无法打开请求详情。');
+      const pair = pickRunFrame(response.frames ?? [], run, run.createdAt);
+      if (pair === null) {
+        setHistoryError(
+          '找不到这条执行对应的请求记录（请求日志保留 90 天，可能已超出保留期）。',
+        );
         return;
       }
       setHistoryPair(pair);
@@ -711,6 +729,35 @@ export function ScriptsPage(): React.ReactElement {
         <span className="mono">{formatTimestamp(script.lastUsedAt)}</span>
       ),
     },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 120,
+      render: (_value, script) => (
+        <Space size={0}>
+          <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              openScript(script.scriptId);
+            }}
+          >
+            详情
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              openTestFor(script.scriptId);
+            }}
+          >
+            测试
+          </Button>
+        </Space>
+      ),
+    },
   ];
 
   const versionColumns: TableProps<ScriptVersionSummary>['columns'] = [
@@ -864,17 +911,37 @@ export function ScriptsPage(): React.ReactElement {
           '执行'
         ),
     },
+    {
+      title: '操作',
+      key: 'requestDetail',
+      width: 110,
+      render: (_value, run) =>
+        runHasRequestDetail(run) ? (
+          <Button
+            type="link"
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              void openRun(run);
+            }}
+          >
+            请求详情
+          </Button>
+        ) : (
+          <Tooltip title={requestDetailBlockedReason(run)}>
+            <span>
+              <Button type="link" size="small" disabled>
+                请求详情
+              </Button>
+            </span>
+          </Tooltip>
+        ),
+    },
   ];
-
-  const statsCard =
-    detail === null ? null : (
-      <StatsSummary detail={detail} fallback={scripts.find((entry) => entry.scriptId === detail.scriptId)} />
-    );
 
   const metadata = detail === null ? null : (
     <Card size="small" title="元数据">
       <Descriptions column={2} size="small">
-        <Descriptions.Item label="名称">{detail.name ?? '—'}</Descriptions.Item>
         <Descriptions.Item label="scriptId">
           <Text
             className="mono"
@@ -883,23 +950,9 @@ export function ScriptsPage(): React.ReactElement {
             {detail.scriptId}
           </Text>
         </Descriptions.Item>
-        <Descriptions.Item label="状态">
-          {detail.status === null ? '—' : <StateTag state={detail.status} />}
-        </Descriptions.Item>
-        <Descriptions.Item label="模式">
-          {modeLabel(detail.mode ?? versions[versions.length - 1]?.mode ?? null)}
-        </Descriptions.Item>
-        <Descriptions.Item label="激活版本">
-          {detail.activeVersion === null ? '—' : `v${detail.activeVersion}`}
-        </Descriptions.Item>
-        <Descriptions.Item label="使用次数">{formatNumber(detail.useCount)}</Descriptions.Item>
-        <Descriptions.Item label="最近使用">{formatTimestamp(detail.lastUsedAt)}</Descriptions.Item>
-        <Descriptions.Item label="更新时间">{formatTimestamp(detail.updatedAt)}</Descriptions.Item>
-        <Descriptions.Item label="创建人">
-          {creatorLabel(detail.createdBy, creatorNames) ?? '—'}
-        </Descriptions.Item>
         <Descriptions.Item label="创建时间">{formatTimestamp(detail.createdAt)}</Descriptions.Item>
-        <Descriptions.Item label="来源执行" span={2}>
+        <Descriptions.Item label="更新时间">{formatTimestamp(detail.updatedAt)}</Descriptions.Item>
+        <Descriptions.Item label="来源执行">
           <span className="mono">{detail.sourceRunId ?? '—'}</span>
         </Descriptions.Item>
         <Descriptions.Item label="描述" span={2}>
@@ -912,23 +965,8 @@ export function ScriptsPage(): React.ReactElement {
     </Card>
   );
 
-  const versionPanel = (
-    <Card
-      size="small"
-      title={selectedVersion === null ? '版本内容' : `v${selectedVersion} 内容`}
-      extra={
-        versionDetail === null ? null : (
-          <Space size={6}>
-            <Button size="small" onClick={openTest}>
-              测试
-            </Button>
-            <Button size="small" icon={<EditOutlined />} onClick={openEdit}>
-              编辑生成 draft
-            </Button>
-          </Space>
-        )
-      }
-    >
+  const versionContent = (
+    <div>
       {versionLoading ? <Spin size="small" /> : null}
       {versionError === null ? null : (
         <Alert type="error" showIcon message="版本读取失败" description={versionError} />
@@ -1017,7 +1055,7 @@ export function ScriptsPage(): React.ReactElement {
           </div>
         </Space>
       )}
-    </Card>
+    </div>
   );
 
   const editMode = versionDetail?.mode ?? detail?.mode ?? null;
@@ -1027,8 +1065,8 @@ export function ScriptsPage(): React.ReactElement {
     label: `v${version.version}（${version.status ?? '—'}）`,
   }));
 
-  const diffPanel = (
-    <Card size="small" title="版本 diff">
+  const diffContent = (
+    <div>
       {versions.length < 2 ? (
         <Empty description="至少两个版本才能对比。" />
       ) : (
@@ -1100,13 +1138,40 @@ export function ScriptsPage(): React.ReactElement {
           )}
         </Space>
       )}
-    </Card>
+    </div>
+  );
+
+  const versionTabs = (
+    <Tabs
+      size="small"
+      defaultActiveKey="content"
+      tabBarExtraContent={
+        versionDetail === null ? null : (
+          <Space size={6}>
+            <Button size="small" onClick={openTest}>
+              测试
+            </Button>
+            <Button size="small" icon={<EditOutlined />} onClick={openEdit}>
+              编辑生成 draft
+            </Button>
+          </Space>
+        )
+      }
+      items={[
+        {
+          key: 'content',
+          label: selectedVersion === null ? '内容' : `v${selectedVersion} 内容`,
+          children: versionContent,
+        },
+        { key: 'diff', label: '对比', children: diffContent },
+      ]}
+    />
   );
 
   const historyPanel = (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Text type="secondary" style={{ fontSize: 11.5 }}>
-        执行历史来自 script_runs（保留 90 天）；只有带 MCP 请求记录的执行可以点开请求详情，测试执行没有请求详情。
+        执行历史来自 script_runs（保留 90 天）；只有带 MCP 请求记录的执行可以打开请求详情。
       </Text>
       {runsError === null ? null : (
         <Alert type="warning" showIcon message="执行历史不可用" description={runsError} />
@@ -1203,9 +1268,10 @@ export function ScriptsPage(): React.ReactElement {
                     dataSource={scripts}
                     columns={columns}
                     pagination={{ pageSize: 20, showSizeChanger: false }}
-                    // Fixed column widths sum to 1 200; x reserves room for the flexible
-                    // description column. `max-content` let one long description stretch
-                    // the table past 4 500px, so keep the measured minimum width instead.
+                    // Fixed column widths sum to 1 320; x reserves 40px for the
+                    // flexible description column. `max-content` let one long
+                    // description stretch the table past 4 500px, so keep the
+                    // measured minimum width instead.
                     scroll={{ x: 1_360 }}
                     onRow={(script) => ({
                       className: 'row-clickable',
@@ -1272,7 +1338,6 @@ export function ScriptsPage(): React.ReactElement {
                 label: '概览',
                 children: (
                   <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                    {statsCard}
                     {metadata}
                     <Card size="small" title="版本列表">
                       <Table<ScriptVersionSummary>
@@ -1294,8 +1359,7 @@ export function ScriptsPage(): React.ReactElement {
                         locale={{ emptyText: '这个脚本没有版本记录。' }}
                       />
                     </Card>
-                    {versionPanel}
-                    {diffPanel}
+                    {versionTabs}
                   </Space>
                 ),
               },
@@ -1540,36 +1604,11 @@ function activationBlockedReason(version: ScriptVersionSummary): string | null {
   return null;
 }
 
-/** P2 aggregates: detail first, then the list row when an older detail omits them. */
-function StatsSummary({
-  detail,
-  fallback,
-}: {
-  detail: ScriptDetail;
-  fallback: ScriptSummary | undefined;
-}): React.ReactElement {
-  const runCount = detail.runCount ?? fallback?.runCount ?? null;
-  const successCount = detail.successCount ?? fallback?.successCount ?? null;
-  const rate = scriptSuccessRate({
-    successRate: detail.successRate ?? fallback?.successRate ?? null,
-    runCount,
-    successCount,
-  });
-  return (
-    <Card size="small" title="执行统计（近 90 天）">
-      <Descriptions column={4} size="small">
-        <Descriptions.Item label="执行次数">{formatNumber(runCount)}</Descriptions.Item>
-        <Descriptions.Item label="成功次数">{formatNumber(successCount)}</Descriptions.Item>
-        <Descriptions.Item label="失败次数">
-          {formatNumber(failedRunCount({ runCount, successCount }))}
-        </Descriptions.Item>
-        <Descriptions.Item label="成功率">{formatPercent(rate)}</Descriptions.Item>
-      </Descriptions>
-      <Text type="secondary" style={{ fontSize: 11.5 }}>
-        统计来自 script_runs（保留 90 天，含测试与失败）；「累计使用」只计成功且非测试的执行。逐次记录在「执行历史」。
-      </Text>
-    </Card>
-  );
+/** Why a run cannot open a request detail; only `requestId` decides clickability. */
+function requestDetailBlockedReason(run: Pick<ScriptRun, 'purpose'>): string {
+  return run.purpose === 'test'
+    ? '测试执行由管理端直接触发，不经过 MCP 请求，因此没有请求详情。'
+    : '这条执行没有关联的 MCP 请求记录。';
 }
 
 function jsonText(value: unknown, fallback: string): string {
@@ -1631,14 +1670,6 @@ function DiffLines({ diff }: { diff: ScriptVersionDiff }): React.ReactElement {
       </pre>
     </div>
   );
-}
-
-/** One frame pair belongs to a run when its JSON-RPC id and exec session match. */
-function sameRequest(pair: RequestFramePair, run: ScriptRun): boolean {
-  if (run.requestId === null || pair.id === null) return false;
-  if (String(pair.id) !== run.requestId) return false;
-  if (run.execId === null) return true;
-  return pair.request?.['exec'] === run.execId || pair.response?.['exec'] === run.execId;
 }
 
 function failureText(error: unknown): string {
