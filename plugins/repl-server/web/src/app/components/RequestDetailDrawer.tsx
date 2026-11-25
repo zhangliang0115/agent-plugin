@@ -9,6 +9,7 @@ import type { TableProps } from 'antd';
 import { stateLabel } from './common.tsx';
 import { FrameColumn, type FrameEvent } from './FramePayload.tsx';
 import { PayloadViewer } from './PayloadViewer.tsx';
+import { RequestMetaCard } from './RequestMetaCard.tsx';
 import { RequestProcess } from './RequestProcess.tsx';
 import { ScriptCodeCard } from './ScriptCodeCard.tsx';
 import { ScriptInfoCard } from './ScriptInfoCard.tsx';
@@ -168,12 +169,8 @@ export function RequestDetailDrawer({
     >
       {pair === null ? null : (
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <RequestMetaCard pair={pair} events={events} />
           <ScriptInfoCard info={scriptInfo} />
-          <ScriptCodeCard
-            key={`${pair.mcp}:${String(pair.id ?? '')}:${pair.request?.ts ?? ''}`}
-            request={pair.request}
-            method={pair.method}
-          />
           <Tabs
             items={[
               {
@@ -193,22 +190,29 @@ export function RequestDetailDrawer({
                 key: 'frames',
                 label: '协议帧',
                 children: (
-                  <Row gutter={12}>
-                    <Col span={12}>
-                      <FrameColumn
-                        label="请求报文"
-                        event={pair.request}
-                        maxHeight="calc(100vh - 210px)"
-                      />
-                    </Col>
-                    <Col span={12}>
-                      <FrameColumn
-                        label="响应报文"
-                        event={pair.response}
-                        maxHeight="calc(100vh - 210px)"
-                      />
-                    </Col>
-                  </Row>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <ScriptCodeCard
+                      key={`${pair.mcp}:${String(pair.id ?? '')}:${pair.request?.ts ?? ''}`}
+                      request={pair.request}
+                      method={pair.method}
+                    />
+                    <Row gutter={12}>
+                      <Col span={12}>
+                        <FrameColumn
+                          label="请求报文"
+                          event={pair.request}
+                          maxHeight="calc(100vh - 210px)"
+                        />
+                      </Col>
+                      <Col span={12}>
+                        <FrameColumn
+                          label="响应报文"
+                          event={pair.response}
+                          maxHeight="calc(100vh - 210px)"
+                        />
+                      </Col>
+                    </Row>
+                  </Space>
                 ),
               },
               {

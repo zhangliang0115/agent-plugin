@@ -83,7 +83,11 @@ export function scriptInfoFromEvent(
   };
 }
 
-/** Reads a `tools/call` frame's `params.arguments` (name `run_script`) before events load. */
+/** Reads a `tools/call` frame's `params.arguments` (name `run_script`) before events load.
+ *
+ * Newer clients address a saved script by `scriptName`; older ones still send
+ * `scriptId`, and both may arrive together. A call with neither is ad-hoc code.
+ */
 export function scriptInfoFromRequest(request: unknown): ScriptInfo | null {
   if (typeof request !== 'object' || request === null) return null;
   const params = (request as { params?: unknown }).params;
@@ -95,14 +99,45 @@ export function scriptInfoFromRequest(request: unknown): ScriptInfo | null {
       ? (call.arguments as Record<string, unknown>)
       : {};
   const scriptId = text(args['scriptId']);
+  const scriptName = text(args['scriptName']);
   return {
-    entryMode: scriptId === null ? 'code' : 'script',
+    entryMode: scriptId === null && scriptName === null ? 'code' : 'script',
     scriptId,
-    scriptName: null,
+    scriptName,
     scriptVersion: versionNumber(args['scriptVersion']),
     scriptMode: null,
     argsPreview: argsSummary(args['args']),
   };
+}
+
+/**
+ * Request-list script filter: exact match on either the script id or the name, so
+ * `run_script({scriptId})` and `run_script({scriptName})` both match. Non-`run_script`
+ * requests and ad-hoc `code` runs never match a non-empty filter.
+ */
+export function matchesScriptFilter(request: unknown, wanted: string): boolean {
+  const target = wanted.trim();
+  if (target === '') return true;
+  const info = scriptInfoFromRequest(request);
+  if (info === null) return false;
+  return info.scriptId === target || info.scriptName === target;
+}
+
+/**
+ * Saved-script identity for the request list: an explicit `scriptName` wins,
+ * otherwise the library name when `names` has the id, else `name: null` so the
+ * cell can show the id (a deleted script still reads as itself). Ad-hoc `code`
+ * runs and non-`run_script` calls return nulls.
+ */
+export function scriptNameForRequest(
+  request: unknown,
+  names: ReadonlyMap<string, string>,
+): { name: string | null; scriptId: string | null } {
+  const info = scriptInfoFromRequest(request);
+  if (info === null) return { name: null, scriptId: null };
+  if (info.scriptName !== null) return { name: info.scriptName, scriptId: info.scriptId };
+  if (info.scriptId === null) return { name: null, scriptId: null };
+  return { name: names.get(info.scriptId) ?? null, scriptId: info.scriptId };
 }
 
 /** Inline `code` of an ad-hoc `run_script` call; `null` when params is another shape. */

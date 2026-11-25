@@ -133,11 +133,11 @@
 
 ### MCP 协议双版本兼容（2025-11-25 legacy / 2026-07-28 modern）
 
-状态：待办，2026-11-24 记录，暂不实施。
+状态：已完成（2026-11-25）。
 
 - **现象**：请求记录出现 `Unsupported protocol version: 2025-11-25`。`server/src/mcp/discover.ts:9-10` 只允许 `2026-07-28`，`initialize` 与 `server/discover` 共用同一版本数组；未知版本返回 `-32600`（`discover.ts:121-125`）。
 - **背景**：2025-11-25 是 legacy 稳定版；2026-07-28 是破坏性 modern 版本（移除 initialize/会话等），不是超集。TS SDK 1.x 仍以 2025-11-25 为 LATEST；本服务出站连接池初始版本也是 2025-11-25（`server/src/pool/adapters/client.ts:34`），所以自环/连另一个 repl-server 会触发该错误。
-- **实施方向**：拆分 `DISCOVER_PROTOCOL_VERSION`（仅 2026-07-28）与 `INITIALIZE_PROTOCOL_VERSIONS`（2025-11-25 + 2026-07-28）；legacy initialize 按请求版本返回 legacy 形状，不声明现代 tasks 语义；未知版本按 2025-11-25 规范回退到服务端最新支持版本，而不是直接 -32600。
+- **实施**：`server/src/mcp/discover.ts` 拆分 `DISCOVER_PROTOCOL_VERSION`（`2026-07-28`，仅 `server/discover` 使用）、`LEGACY_PROTOCOL_VERSION`（`2025-11-25`）与 `INITIALIZE_PROTOCOL_VERSIONS`（`2025-11-25` + `2026-07-28`）。`initialize` 对两个版本回显请求值并返回 legacy 形状（无 `resultType`、无 tasks 扩展）；缺失/非字符串/空字符串仍 `-32602`，其他未知版本按 2025-11-25 规范回退到 `2025-11-25`。`server/discover` 的 `supportedVersions` 与 `_meta` 版本 pin 校验不变，仍只接受 `2026-07-28`。
 - **不在本次范围**：`MCP-Protocol-Version` 请求头校验（无效 400）、Streamable HTTP 无效 Origin 403，作为独立合规项记录。
-- **测试/文档**：discover/app/stdio-bridge/assembly/http-client 的版本断言；`docs/protocol.md` 支持版本说明。改完需 `node scripts/build.mjs` 并重启。
-- **验收**：2025-11-25 与 2026-07-28 的 initialize 各自被接受并回显请求版本；未知版本回退；`server/discover` 仍只报 2026-07-28；现有 2026-07-28 测试不回归。
+- **测试/文档**：`docs/protocol.md` §3.2 已同步支持版本与回退规则；`test/discover.test.ts` 覆盖两版本回显、未知版本回退、空/非字符串 `-32602`、discover 仅报 modern 且 2025 pin 仍拒绝；`test/app.test.ts` 的 HTTP 2025 pin 拒绝用例保持。改后需 `node scripts/build.mjs` 并重启。
+- **验收记录（2026-11-25）**：`node --test test/discover.test.ts test/app.test.ts test/stdio-bridge.test.ts test/assembly.test.ts test/pool-adapters.test.ts` 59/59 通过；server 全量 `node --test "test/*.test.ts"` 1064/1064 通过（首轮 `gateway-lifecycle` 的 `queueMs === 0` 时序断言偶发 1ms，聚焦重跑 3/3 与第二轮全量均通过，与本次改动无关）；`npm run typecheck`、`npm run build`、`npm run docs:check` 通过。

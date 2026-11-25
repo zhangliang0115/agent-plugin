@@ -26,7 +26,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader, StateTag } from '../components/common.tsx';
 import { JsonView } from '../components/JsonView.tsx';
+import { SchemaArgsForm } from '../components/SchemaArgsForm.tsx';
 import { ScriptCandidates } from '../components/ScriptCandidates.tsx';
+import { ScriptCodeBlock } from '../components/ScriptCodeCard.tsx';
 import {
   RequestDetailDrawer,
   loadRequestDetailEvents,
@@ -41,12 +43,14 @@ import {
   formatTimestamp,
 } from '../../lib/format.ts';
 import { argsSummary } from '../../lib/script-info.ts';
-import { testArgsFrom, versionEditBody } from '../../lib/script-edit.ts';
+import { versionEditBody } from '../../lib/script-edit.ts';
+import { argsObjectFrom } from '../../lib/schema-args.ts';
 import {
   createdVersion,
   diffFrom,
   failedRunCount,
   runsFrom,
+  runHasRequestDetail,
   scriptDetailFrom,
   scriptsFrom,
   secretWarningsFrom,
@@ -151,7 +155,8 @@ export function ScriptsPage(): React.ReactElement {
 
   const [testOpen, setTestOpen] = useState(false);
   const [testVersion, setTestVersion] = useState<number | null>(null);
-  const [testArgs, setTestArgs] = useState('{}');
+  const [testArgs, setTestArgs] = useState<Record<string, unknown>>({});
+  const [testArgsValid, setTestArgsValid] = useState(false);
   const [testActivate, setTestActivate] = useState(false);
   const [testRunning, setTestRunning] = useState(false);
   const [testResult, setTestResult] = useState<ScriptTestResult | null>(null);
@@ -383,6 +388,19 @@ export function ScriptsPage(): React.ReactElement {
 
   /** Opens the shared request drawer for one run via its `requestId` / `execId`. */
   async function openRun(run: ScriptRun): Promise<void> {
+    if (!runHasRequestDetail(run)) {
+      // Admin-triggered test runs bypass MCP `tools/call`, so there are no frames.
+      historyTicketRef.current += 1;
+      setHistoryLoading(false);
+      setHistoryPair(null);
+      setHistoryEvents(null);
+      setHistoryError(
+        run.purpose === 'test'
+          ? '测试执行由管理端直接触发，不经过 MCP 请求，因此没有请求详情。'
+          : '这条执行没有关联的 MCP 请求记录。',
+      );
+      return;
+    }
     const ticket = ++historyTicketRef.current;
     setHistoryError(null);
     setHistoryEvents(null);
@@ -469,7 +487,7 @@ export function ScriptsPage(): React.ReactElement {
   function openTest(): void {
     if (versionDetail === null || selectedVersion === null) return;
     setTestVersion(selectedVersion);
-    setTestArgs(versionDetail.mode === 'exact' ? '' : jsonText(versionDetail.exampleArgs, '{}'));
+    setTestArgs(versionDetail.mode === 'exact' ? {} : argsObjectFrom(versionDetail.exampleArgs));
     setTestActivate(false);
     setTestResult(null);
     setTestError(null);
@@ -478,9 +496,9 @@ export function ScriptsPage(): React.ReactElement {
 
   async function submitTest(): Promise<void> {
     if (selectedId === null || testVersion === null) return;
-    const args = testArgsFrom(testArgs);
-    if (!args.ok) {
-      setTestError(args.error);
+    const isExact = versionDetail?.mode === 'exact';
+    if (!isExact && !testArgsValid) {
+      setTestError('参数未通过校验：请修正必填项或 JSON。');
       return;
     }
     setTestRunning(true);
@@ -491,7 +509,7 @@ export function ScriptsPage(): React.ReactElement {
         `/scripts/${encodeURIComponent(selectedId)}/test`,
         {
           version: testVersion,
-          ...(args.body === undefined ? {} : { args: args.body }),
+          ...(isExact ? {} : { args: testArgs }),
           activateOnSuccess: testActivate,
         },
       );
@@ -517,12 +535,6 @@ export function ScriptsPage(): React.ReactElement {
   }
 
   const columns: TableProps<ScriptSummary>['columns'] = [
-    {
-      title: 'scriptId',
-      key: 'scriptId',
-      width: 190,
-      render: (_value, script) => <span className="mono">{script.scriptId}</span>,
-    },
     {
       title: '名称',
       key: 'name',
@@ -551,7 +563,7 @@ export function ScriptsPage(): React.ReactElement {
       render: (_value, script) => modeLabel(script.mode),
     },
     {
-      title: 'active 版本',
+      title: '激活版本',
       key: 'activeVersion',
       width: 105,
       render: (_value, script) =>
@@ -569,7 +581,7 @@ export function ScriptsPage(): React.ReactElement {
         script.status === null ? <span className="muted">—</span> : <StateTag state={script.status} />,
     },
     {
-      title: 'owner',
+      title: '创建人',
       key: 'createdBy',
       width: 110,
       ellipsis: true,
@@ -633,15 +645,6 @@ export function ScriptsPage(): React.ReactElement {
       key: 'mode',
       width: 130,
       render: (_value, version) => modeLabel(version.mode),
-    },
-    {
-      title: '来源执行',
-      key: 'sourceRunId',
-      width: 200,
-      ellipsis: true,
-      render: (_value, version) => (
-        <span className="mono">{version.sourceRunId ?? '—'}</span>
-      ),
     },
     {
       title: '测试',
@@ -716,13 +719,6 @@ export function ScriptsPage(): React.ReactElement {
       render: (_value, run) => <span className="mono">{formatTimestamp(run.createdAt)}</span>,
     },
     {
-      title: 'runId',
-      key: 'runId',
-      width: 200,
-      ellipsis: true,
-      render: (_value, run) => <span className="mono">{run.runId}</span>,
-    },
-    {
       title: '版本',
       key: 'scriptVersion',
       width: 80,
@@ -772,7 +768,14 @@ export function ScriptsPage(): React.ReactElement {
       title: '用途',
       key: 'purpose',
       width: 90,
-      render: (_value, run) => (run.purpose === 'test' ? '测试' : '执行'),
+      render: (_value, run) =>
+        run.purpose === 'test' ? (
+          <Tooltip title="测试执行没有 MCP 请求详情">
+            <span>测试</span>
+          </Tooltip>
+        ) : (
+          '执行'
+        ),
     },
   ];
 
@@ -786,7 +789,12 @@ export function ScriptsPage(): React.ReactElement {
       <Descriptions column={2} size="small">
         <Descriptions.Item label="名称">{detail.name ?? '—'}</Descriptions.Item>
         <Descriptions.Item label="scriptId">
-          <span className="mono">{detail.scriptId}</span>
+          <Text
+            className="mono"
+            copyable={{ text: detail.scriptId, tooltips: ['复制 scriptId', '已复制'] }}
+          >
+            {detail.scriptId}
+          </Text>
         </Descriptions.Item>
         <Descriptions.Item label="状态">
           {detail.status === null ? '—' : <StateTag state={detail.status} />}
@@ -794,7 +802,7 @@ export function ScriptsPage(): React.ReactElement {
         <Descriptions.Item label="模式">
           {modeLabel(detail.mode ?? versions[versions.length - 1]?.mode ?? null)}
         </Descriptions.Item>
-        <Descriptions.Item label="active 版本">
+        <Descriptions.Item label="激活版本">
           {detail.activeVersion === null ? '—' : `v${detail.activeVersion}`}
         </Descriptions.Item>
         <Descriptions.Item label="使用次数">{formatNumber(detail.useCount)}</Descriptions.Item>
@@ -847,10 +855,28 @@ export function ScriptsPage(): React.ReactElement {
             </Descriptions.Item>
             <Descriptions.Item label="模式">{modeLabel(versionDetail.mode)}</Descriptions.Item>
             <Descriptions.Item label="来源执行">
-              <span className="mono">{versionDetail.sourceRunId ?? '—'}</span>
+              <Text
+                className="mono"
+                copyable={
+                  versionDetail.sourceRunId === null
+                    ? undefined
+                    : { text: versionDetail.sourceRunId, tooltips: ['复制 runId', '已复制'] }
+                }
+              >
+                {versionDetail.sourceRunId ?? '—'}
+              </Text>
             </Descriptions.Item>
             <Descriptions.Item label="验证执行">
-              <span className="mono">{versionDetail.verifiedRunId ?? '—'}</span>
+              <Text
+                className="mono"
+                copyable={
+                  versionDetail.verifiedRunId === null
+                    ? undefined
+                    : { text: versionDetail.verifiedRunId, tooltips: ['复制 runId', '已复制'] }
+                }
+              >
+                {versionDetail.verifiedRunId ?? '—'}
+              </Text>
             </Descriptions.Item>
             <Descriptions.Item label="codeSha256">
               <span className="mono">{versionDetail.codeSha256 ?? '—'}</span>
@@ -880,12 +906,11 @@ export function ScriptsPage(): React.ReactElement {
           )}
           <div>
             <Text type="secondary">code</Text>
-            <pre
-              className="mono"
-              style={{ whiteSpace: 'pre-wrap', margin: '4px 0 0', maxHeight: 320, overflow: 'auto' }}
-            >
-              {versionDetail.code ?? '—'}
-            </pre>
+            {versionDetail.code === null ? (
+              <div className="muted">—</div>
+            ) : (
+              <ScriptCodeBlock code={versionDetail.code} />
+            )}
           </div>
           <div>
             <Text type="secondary">inputSchema</Text>
@@ -990,7 +1015,7 @@ export function ScriptsPage(): React.ReactElement {
   const historyPanel = (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Text type="secondary" style={{ fontSize: 11.5 }}>
-        执行历史来自 script_runs（保留 30 天）；点一行打开请求记录详情，不另做执行详情视图。
+        执行历史来自 script_runs（保留 30 天）；只有带 MCP 请求记录的执行可以点开请求详情，测试执行没有请求详情。
       </Text>
       {runsError === null ? null : (
         <Alert type="warning" showIcon message="执行历史不可用" description={runsError} />
@@ -1005,10 +1030,14 @@ export function ScriptsPage(): React.ReactElement {
         dataSource={runs}
         columns={runColumns}
         pagination={{ pageSize: 20, showSizeChanger: false }}
-        onRow={(run) => ({
-          className: 'row-clickable',
-          onClick: () => void openRun(run),
-        })}
+        onRow={(run) =>
+          runHasRequestDetail(run)
+            ? {
+                className: 'row-clickable',
+                onClick: () => void openRun(run),
+              }
+            : {}
+        }
         locale={{
           emptyText: (
             <Empty description={runsError === null ? '这个脚本还没有执行记录。' : '执行历史接口不可用'} />
@@ -1083,7 +1112,10 @@ export function ScriptsPage(): React.ReactElement {
                     dataSource={scripts}
                     columns={columns}
                     pagination={{ pageSize: 20, showSizeChanger: false }}
-                    scroll={{ x: 1_500 }}
+                    // Fixed column widths sum to 1 250; x reserves room for the flexible
+                    // description column. `max-content` let one long description stretch
+                    // the table past 4 500px, so keep the measured minimum width instead.
+                    scroll={{ x: 1_360 }}
                     onRow={(script) => ({
                       className: 'row-clickable',
                       onClick: () => openScript(script.scriptId),
@@ -1113,7 +1145,7 @@ export function ScriptsPage(): React.ReactElement {
       />
 
       <Drawer
-        placement="right"
+        placement="left"
         open={selectedId !== null}
         onClose={closeScript}
         width={1_000}
@@ -1158,7 +1190,9 @@ export function ScriptsPage(): React.ReactElement {
                         dataSource={versions}
                         columns={versionColumns}
                         pagination={false}
-                        scroll={{ x: 940 }}
+                        // Column widths sum to 690; a numeric minimum fills the drawer
+                        // and keeps long run ids from widening the table.
+                        scroll={{ x: 690 }}
                         onRow={(version) => ({
                           className:
                             selectedVersion === version.version
@@ -1281,13 +1315,18 @@ export function ScriptsPage(): React.ReactElement {
             />
           ) : (
             <div>
-              <Text type="secondary">args（JSON，默认 exampleArgs）</Text>
-              <Input.TextArea
-                value={testArgs}
-                onChange={(event) => setTestArgs(event.target.value)}
-                autoSize={{ minRows: 6, maxRows: 14 }}
-                className="mono"
-              />
+              <Text type="secondary">
+                参数（由 inputSchema 生成，初始值为 exampleArgs；复杂 schema 或手写参数可切换 JSON 模式）
+              </Text>
+              <div style={{ marginTop: 6 }}>
+                <SchemaArgsForm
+                  schema={versionDetail?.inputSchema}
+                  value={testArgs}
+                  onChange={setTestArgs}
+                  onValidityChange={setTestArgsValid}
+                  disabled={testRunning}
+                />
+              </div>
             </div>
           )}
           <Checkbox

@@ -127,6 +127,11 @@ test('run_script description appends the visible servers and fixed guidance', ()
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers);
 
   assert.ok(description.startsWith(RUN_SCRIPT_DESCRIPTION));
+  assert.ok(description.includes('Promise.all'), 'parallel guidance survives assembly');
+  assert.ok(
+    Buffer.byteLength(description, 'utf8') <= DESCRIPTION_MAX_BYTES,
+    `description is ${Buffer.byteLength(description, 'utf8')} bytes`,
+  );
   assert.match(description, /## MCP servers \(server id, category, visible tool count\)/);
   assert.match(description, /pg {2}\[database\] {2}1 tools/);
   assert.ok(!description.includes('Postgres'), 'the summary is not part of the description');
@@ -195,6 +200,10 @@ test('over-budget server lists are truncated from the tail and guidance survives
 
 test('instructions stay short and point at run_script for the server list', () => {
   assert.ok([...INSTRUCTIONS].length <= 1_200, `instructions are ${[...INSTRUCTIONS].length} chars`);
+  const bytes = Buffer.byteLength(INSTRUCTIONS, 'utf8');
+  assert.ok(bytes <= 1_200, `instructions are ${bytes} bytes`);
+  assert.ok(INSTRUCTIONS.includes('Promise.all'), 'independent calls point at Promise.all');
+  assert.ok(INSTRUCTIONS.includes('Independent tool calls can overlap'));
   assert.ok(INSTRUCTIONS.includes("Visible built-in tools and MCP servers are listed in run_script's description."));
   assert.ok(INSTRUCTIONS.includes('Do not guess tool names. Unknown names fail.'));
   assert.ok(INSTRUCTIONS.includes('MCP results are { text, images?, documents? } with raw text'));

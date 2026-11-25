@@ -1,7 +1,7 @@
 # repl-server MCP 协议
 
 - 状态：已冻结（2026-11-18），实现以本文为准；工具面 7 个已实现并有测试
-- 协议版本：MCP `2026-07-28`（modern）；legacy `initialize` 只做兼容
+- 协议版本：MCP `2026-07-28`（modern）；legacy `initialize` 兼容 `2025-11-25` 与 `2026-07-28`
 - 设计依据：learn-ai `claude-code/自建设计/` 01 §4.2、02 §4.2–4.4、03 §2、06 §3.1
 - 传输：Streamable HTTP（stateful），`/mcp`；stdio 通过独立 bridge 转 HTTP
 
@@ -96,15 +96,17 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 ### 3.2 legacy `initialize`
 
-只给不实现 discover 的客户端。响应用 `protocolVersion` + 顶层 `serverInfo`，没有 `supportedVersions`；`capabilities.tools` 为空对象，`instructions` 同样返回。
+只给不实现 discover 的客户端。接受 `2025-11-25`（legacy 稳定版）与 `2026-07-28`（modern，兼容入口）两个版本，响应回显请求的 `protocolVersion`。无论请求哪个版本，响应都是 legacy 形状：`protocolVersion` + 顶层 `serverInfo`，没有 `supportedVersions`、`resultType`；`capabilities.tools` 为空对象，不声明 modern 的 tasks 扩展，`instructions` 同样返回。
 
-**会话建立规则**：任何不带 `Mcp-Session-Id` 的请求都隐式建立传输会话（`initialize` → legacy，其余 → modern），响应头返回 `Mcp-Session-Id`；会话在首个请求后固定为 modern 或 legacy，不能混用。带了未知/过期 `Mcp-Session-Id` 返回 404，让客户端重新建连。**实测依据**：Claude Code 2.1.327 的 `claude -p` 只带会话头发首个 `server/discover`，后续 `tools/list`、`tools/call` 不带会话头；严格按"首个请求必须是 discover"校验会让工具永远注册不上。请求了不支持的版本返回 JSON-RPC `-32600`，`data.supportedVersions` 带支持列表。`GET /mcp` 保持 SSE 通道；不需要时返回 405。
+**未知版本回退**：`protocolVersion` 缺失、非字符串或空字符串返回 `-32602`；其余不支持的版本按 2025-11-25 规范回退到服务端支持的最新 legacy 版本 `2025-11-25`，结果里的 `protocolVersion` 用回退值，不再返回 `-32600`。回退只适用于 `initialize`，`server/discover` 的 `_meta` 版本 pin 仍只接受 `2026-07-28`。
+
+**会话建立规则**：任何不带 `Mcp-Session-Id` 的请求都隐式建立传输会话（`initialize` → legacy，其余 → modern），响应头返回 `Mcp-Session-Id`；会话在首个请求后固定为 modern 或 legacy，不能混用。带了未知/过期 `Mcp-Session-Id` 返回 404，让客户端重新建连。**实测依据**：Claude Code 2.1.327 的 `claude -p` 只带会话头发首个 `server/discover`，后续 `tools/list`、`tools/call` 不带会话头；严格按"首个请求必须是 discover"校验会让工具永远注册不上。`server/discover` 的 `_meta` 版本 pin 不是 `2026-07-28` 时返回 JSON-RPC `-32600`，`data.supportedVersions` 带支持列表。`GET /mcp` 保持 SSE 通道；不需要时返回 405。
 
 ### 3.3 `tools/list`
 
 返回 7 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`、`save_script`、`search_scripts`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
 
-- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。固定核心提示独立工具调用可用 `Promise.all` 并行。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script`、`report_problem` 与 `save_script` 不设；`search_tools`、`describe_tools`、`search_scripts` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks` 只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
@@ -168,7 +170,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
   "type": "object",
   "properties": {
     "code": { "type": "string" },
-    "scriptId": { "type": "string" },
+    "scriptName": { "type": "string" },
     "scriptVersion": { "type": "integer", "minimum": 1 },
     "args": { "type": "object" },
     "activateOnSuccess": { "type": "boolean" },
@@ -182,8 +184,10 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-- `code` 与 `scriptId` 二选一；都不给或都给返回 `INVALID_ARGUMENT`。`args`、`scriptVersion`、`activateOnSuccess` 只在 `scriptId` 模式合法。
-- `scriptId` 模式：省略 `scriptVersion` 用 active 版本，没有 active 返回 `SCRIPT_NOT_ACTIVE`；`exact` 版本不接受参数，`parameterized` 版本按 `inputSchema` 校验 `args`；draft 只能显式带 `scriptVersion` 执行，且只允许 owner（`createdBy` 等于调用方 `binding ?? mcp`）或 admin 测试，其他调用方返回 `SCRIPT_FORBIDDEN`；active 版本对全局开放。脚本库是全局命名空间，`workspace` 只决定执行会话，不参与脚本可见性。
+- `code`、`scriptName` 二者恰好给一个；都不给、给多个（含 `code` 与 `scriptName` 同给）或 `scriptName` 为空字符串返回 `INVALID_ARGUMENT`。`args`、`scriptVersion`、`activateOnSuccess` 只在脚本模式（`scriptName` 或 legacy `scriptId`）合法。
+- `scriptId` 是系统生成的内部编号，不出现在 schema。旧客户端仍可传 `scriptId`（仅未被模型看到的隐藏兼容）：服务端在参数校验前把它剥离，只按 ID 执行；`scriptId` 与 `scriptName` 同传、或与 `code` 同传返回 `INVALID_ARGUMENT`。
+- `scriptName` 按全局唯一名称解析为内部 `scriptId` 后继续执行：名称只用于定位，不做 ID/名称互相回退；名称不存在返回 `SCRIPT_NOT_FOUND`（消息带名称），解析后仍走与 ID 相同的状态、版本、权限与参数校验，审计与运行历史记录解析出的真实 `scriptId`，但工具 schema 与结果只出现名称。
+- 脚本模式（`scriptName` 或 legacy `scriptId` 解析出的 id）：省略 `scriptVersion` 用 active 版本，没有 active 返回 `SCRIPT_NOT_ACTIVE`；`exact` 版本不接受参数，`parameterized` 版本按 `inputSchema` 校验 `args`；draft 只能显式带 `scriptVersion` 执行，且只允许 owner（`createdBy` 等于调用方 `binding ?? mcp`）或 admin 测试，其他调用方返回 `SCRIPT_FORBIDDEN`；active 版本对全局开放。脚本库是全局命名空间，`workspace` 只决定执行会话，不参与脚本可见性。
 - `activateOnSuccess` 目标版本必须是 draft；同步和异步都支持：成功 settle 时在写入 `script_runs` 的同一事务里激活，失败保持 draft；settle 时版本已非 draft（被并发激活/归档）则不改状态、执行结果仍正常返回并记录实际状态；settle 时调用方不是 owner/admin 时同样只跳过激活（`activationSkipped: "forbidden"`），执行结果不变。成功后该版本变为 active、旧 active 变为 superseded。
 - `run_script` 每次执行都会归档到 `script_runs`（保留 30 天）：成功的 code 模式保存源码，脚本模式保存 `scriptId` / `scriptVersion` / `scriptMode` / `args`，并把 `args` 的 JSON 摘要写入 `args_preview`（上限 512 字符）；摘要先脱敏再截断，完整 `args` 仍按原文存 `args_json`（已知风险）。`eval_start` / `eval_end` / `async_dispatch` 的 `argsPreview` 同样是脱敏值；扫描到疑似密钥时另带 `secretWarnings`（按 `field` / `kind` / `severity` / `count` 聚合，不含原文），只作提示，不阻断执行。归档写失败只记日志，不回滚执行结果。
 - `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值。显式值超过 L2 上限时**钳到上限**而不是报错：同步 600000，`async: true` 7200000。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。0、负数或非有限值返回 `INVALID_ARGUMENT`。
@@ -296,7 +300,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
   "type": "object",
   "properties": {
     "runId": { "type": "string" },
-    "scriptId": { "type": "string" },
+    "scriptName": { "type": "string" },
     "baseVersion": { "type": "integer", "minimum": 1 },
     "mode": { "type": "string", "enum": ["exact", "parameterized"] },
     "name": { "type": "string", "minLength": 1, "maxLength": 120 },
@@ -311,13 +315,13 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-- 创建：`mode`、`name`、`description` 必填。`exact` 必须有 `runId`，来源执行必须成功、未过期且 `entry_mode='code'`；保存其原始代码为 active v1，零参数。`parameterized` 必须有 `code` 与 `inputSchema`，`runId` 可选（只作来源）；保存为 draft v1，不进入 `search_scripts`。
-- 脚本名全局唯一，冲突返回 `SCRIPT_NAME_CONFLICT`；`workspace` 不再是脚本属性，所有 agent 都可创建全局脚本。脚本归创建者所有（`created_by` 为调用方 `binding ?? mcp`）；带 `scriptId` 更新只允许 owner 或 admin，其他调用方返回 `SCRIPT_FORBIDDEN`。
-- 有 `scriptId` 即更新：只传 `name` / `description` / `tags` 时直接改元数据、不产生版本；改 `code` / `inputSchema` 时必须带 `baseVersion`，新增 draft 版本，旧 active 不变；`baseVersion` 与最新版本不一致返回 `SCRIPT_VERSION_CONFLICT`。每个脚本的 `mode` 固定（以 `scripts.mode` 为准），切换 mode 返回 `SCRIPT_MODE_CONFLICT`，需要新脚本。`exact` 的创建与更新都必须给 `runId`（来源执行须成功、未过期且 `entry_mode='code'`），代码取自来源 run，提交 `code` 返回 `INVALID_ARGUMENT`，`inputSchema` / `exampleArgs` 只能为空对象或省略；该来源 `runId` 写入新版本的 `verified_run_id`。`parameterized` 的 `runId` 可选，只记来源。
+- 创建（不带 `scriptName`）：`mode`、`name`、`description` 必填。`exact` 必须有 `runId`，来源执行必须成功、未过期且 `entry_mode='code'`；保存其原始代码为 active v1，零参数。`parameterized` 必须有 `code` 与 `inputSchema`，`runId` 可选（只作来源）；保存为 draft v1，不进入 `search_scripts`。
+- 脚本名全局唯一，冲突返回 `SCRIPT_NAME_CONFLICT`；`workspace` 不再是脚本属性，所有 agent 都可创建全局脚本。脚本归创建者所有（`created_by` 为调用方 `binding ?? mcp`）；带 `scriptName` 更新只允许 owner 或 admin，其他调用方返回 `SCRIPT_FORBIDDEN`。
+- 有 `scriptName` 即更新该脚本：`name` 是本次写入后的脚本名（可重命名），`scriptName` 只是目标脚本，二者可同时出现；`scriptName` 不存在返回 `SCRIPT_NOT_FOUND`，不执行。`scriptId` 是系统生成的内部编号，不出现在 schema；旧客户端传 `scriptId` 时服务端在校验前剥离并按 ID 更新，`scriptId` 与 `scriptName` 同传返回 `INVALID_ARGUMENT`。只传 `name` / `description` / `tags` 时直接改元数据、不产生版本；改 `code` / `inputSchema` 时必须带 `baseVersion`，新增 draft 版本，旧 active 不变；`baseVersion` 与最新版本不一致返回 `SCRIPT_VERSION_CONFLICT`。每个脚本的 `mode` 固定（以 `scripts.mode` 为准），切换 mode 返回 `SCRIPT_MODE_CONFLICT`，需要新脚本。`exact` 的创建与更新都必须给 `runId`（来源执行须成功、未过期且 `entry_mode='code'`），代码取自来源 run，提交 `code` 返回 `INVALID_ARGUMENT`，`inputSchema` / `exampleArgs` 只能为空对象或省略；该来源 `runId` 写入新版本的 `verified_run_id`。`parameterized` 的 `runId` 可选，只记来源。
 - `inputSchema` 只支持 P1 子集：根 `type: "object"`，属性类型 `string` / `integer` / `boolean` / `object` / `array`，关键字 `enum` / `minLength` / `maxLength` / `minimum` / `maximum` / `minItems` / `maxItems` / `items`，根 `required` 与 `additionalProperties: false`；超出返回 `SCRIPT_INPUT_SCHEMA_INVALID`。未声明的参数一律拒绝。
 - `parameterized` 保存时编译一次代码；语法错误或超过 1 MiB 返回 `SCRIPT_CODE_INVALID`。1 MiB 与 `/mcp` 请求体上限一致。
 - 保存时对 `code` 与 `exampleArgs` 做密钥扫描；有发现时在返回值 `warnings` 中给出聚合结果（`field` / `kind` / `severity` / `count`，不含原文）。只告警：不拒绝保存、不改写代码、不阻断后续执行。
-- 返回 `{ "scriptId", "version", "status", "activeVersion", "mode", "warnings" }`。成功与失败都会写一条 `script_saved` 审计事件（`ok`、`scriptId`、`version`、`mode`、`name`、`sourceRunId`、`error`；成功事件另带 `warnings`）。
+- 返回 `{ "scriptName", "version", "status", "activeVersion", "mode", "warnings" }`；`scriptId` 不出现在工具结果，内部与管理端接口仍使用它。成功与失败都会写一条 `script_saved` 审计事件（`ok`、`scriptId`、`version`、`mode`、`name`、`sourceRunId`、`error`；成功事件另带 `warnings`）。
 
 ### `search_scripts`
 
@@ -333,11 +337,11 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-返回 `{ "scripts": [{ "scriptId", "name", "description", "tags", "mode", "activeVersion", "inputSchema", "exampleArgs", "useCount", "lastUsedAt", "updatedAt" }] }`。`mode` 来自 `scripts.mode`，同一脚本所有版本相同。只返回 active 脚本；draft / disabled / archived 不返回。非空 `query` 先走 `scripts_fts` 的 FTS5 MATCH（每个词加引号并做前缀匹配，按 `bm25` 排序，名称权重最高）；MATCH 无命中、非法或纯空白查询回退 LIKE，以保证中文中间子串仍能命中。空 `query` 按 `updated_at DESC` 列表。脚本库是全局命名空间，没有 workspace 过滤。
+返回 `{ "scripts": [{ "scriptName", "description", "tags", "mode", "activeVersion", "inputSchema", "exampleArgs", "useCount", "lastUsedAt", "updatedAt" }] }`；工具结果不含 `scriptId`（管理端搜索接口仍返回内部 `scriptId` 与 `name`）。`mode` 来自 `scripts.mode`，同一脚本所有版本相同。只返回 active 脚本；draft / disabled / archived 不返回。非空 `query` 先走 `scripts_fts` 的 FTS5 MATCH（每个词加引号并做前缀匹配，按 `bm25` 排序，名称权重最高）；MATCH 无命中、非法或纯空白查询回退 LIKE，以保证中文中间子串仍能命中。空 `query` 按 `updated_at DESC` 列表。脚本库是全局命名空间，没有 workspace 过滤。
 
 ## 5. `instructions`
 
-`instructions` 是静态短提示（≤1200 字符）：执行模型、工作流、错误约定，以及“不要猜工具名”；末尾只留指针“可见 MCP server 列表在 `run_script` 的 description 里”。具体 server 列表只在 `run_script.description`（≤2KB，见 §3.3），两者不重复。分类/标签过滤值见 `search_tools` 的 schema。
+`instructions` 是静态短提示（≤1200 字符）：执行模型、工作流、错误约定，以及“不要猜工具名”；执行模型与 `run_script` 描述同样提示独立工具调用可用 `Promise.all` 并行。末尾只留指针“可见 MCP server 列表在 `run_script` 的 description 里”。具体 server 列表只在 `run_script.description`（≤2KB，见 §3.3），两者不重复。分类/标签过滤值见 `search_tools` 的 schema。
 
 ## 6. 任务方法
 
@@ -408,7 +412,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | `SCRIPT_RUN_NOT_FOUND` | `runId` 不存在或归档未写入 |
 | `SCRIPT_RUN_NOT_SUCCESSFUL` | 来源执行失败或没有可复用代码 |
 | `SCRIPT_RUN_EXPIRED` | 来源归档超过 30 天 |
-| `SCRIPT_NOT_FOUND` | `scriptId` 不存在 |
+| `SCRIPT_NOT_FOUND` | `scriptName` 没有对应脚本（legacy `scriptId` 不存在时同样返回） |
 | `SCRIPT_VERSION_NOT_FOUND` | 版本不存在 |
 | `SCRIPT_VERSION_NOT_DRAFT` | `activateOnSuccess` 目标不是 draft |
 | `SCRIPT_VERSION_CONFLICT` | `baseVersion` 与最新版本不一致 |

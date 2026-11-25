@@ -29,6 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
+import { ACTIVE_SESSION_WINDOW_MS, isActiveSession } from '../../lib/active-sessions.ts';
 import { ApiError } from '../../lib/api.ts';
 import { formatId, formatNumber, formatRelativeTime, formatTimestamp } from '../../lib/format.ts';
 import {
@@ -71,6 +72,8 @@ interface McpSessionRecord {
 interface ClientsResponse {
   clients: ClientBinding[];
   sessions: McpSessionRecord[];
+  /** Server-side active window; falls back to {@link ACTIVE_SESSION_WINDOW_MS}. */
+  activeWindowMs?: number;
 }
 
 interface ClientFormValues {
@@ -123,6 +126,7 @@ export function ClientsPage(): React.ReactElement {
   const dictionary = useTagDictionary();
   const [clients, setClients] = useState<ClientBinding[]>([]);
   const [sessions, setSessions] = useState<McpSessionRecord[]>([]);
+  const [activeWindowMs, setActiveWindowMs] = useState(ACTIVE_SESSION_WINDOW_MS);
   const [sessionQuery, setSessionQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -148,6 +152,10 @@ export function ClientsPage(): React.ReactElement {
       if (!alive.current) return;
       setClients(Array.isArray(response.clients) ? response.clients : []);
       setSessions(Array.isArray(response.sessions) ? response.sessions : []);
+      const windowMs = response.activeWindowMs;
+      if (typeof windowMs === 'number' && Number.isFinite(windowMs) && windowMs > 0) {
+        setActiveWindowMs(windowMs);
+      }
     } catch (error) {
       if (alive.current) message.error(failureText(error));
     } finally {
@@ -263,10 +271,15 @@ export function ClientsPage(): React.ReactElement {
     [clients, tagDefinitions],
   );
 
+  const activeSessions = useMemo(() => {
+    const now = Date.now();
+    return sessions.filter((session) => isActiveSession(session, now, activeWindowMs));
+  }, [activeWindowMs, sessions]);
+
   const filteredSessions = useMemo(() => {
     const query = sessionQuery.trim().toLowerCase();
-    if (query === '') return sessions;
-    return sessions.filter((session) => {
+    if (query === '') return activeSessions;
+    return activeSessions.filter((session) => {
       const bindingLabel =
         session.bindingId === null
           ? ''
@@ -280,7 +293,7 @@ export function ClientsPage(): React.ReactElement {
         bindingLabel,
       ].some((value) => value.toLowerCase().includes(query));
     });
-  }, [clients, sessionQuery, sessions]);
+  }, [activeSessions, clients, sessionQuery]);
 
   async function showMcpConfig(client: ClientBinding): Promise<void> {
     const base = { clientId: client.id, label: client.label };
@@ -469,7 +482,7 @@ export function ClientsPage(): React.ReactElement {
         title="客户端绑定"
         extra={
           <span className="muted">
-            {formatNumber(clients.length)} 个绑定 · {formatNumber(sessions.length)} 个活跃 MCP 会话
+            {formatNumber(clients.length)} 个绑定 · {formatNumber(activeSessions.length)} 个活跃 MCP 会话
           </span>
         }
       >
@@ -504,14 +517,15 @@ export function ClientsPage(): React.ReactElement {
               style={{ width: 260 }}
             />
             <span className="muted">
-              {formatNumber(filteredSessions.length)} / {formatNumber(sessions.length)} 个传输会话
+              活跃 {formatNumber(activeSessions.length)} / 传输会话 {formatNumber(sessions.length)}
             </span>
           </Space>
         }
       >
         <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-          “活跃”按 Mcp-Session-Id 统计：最近 60 分钟内有请求即算活跃；客户端直接断开不会立即删除，60
-          分钟无请求后由后台清理。它不是 TCP 在线状态。
+          “活跃”按 Mcp-Session-Id 统计：最近 {Math.round(activeWindowMs / 60_000)} 分钟内有请求即算活跃；
+          传输会话仍保留 60 分钟 TTL，客户端直接断开不会立即删除，60 分钟无请求后由后台清理。它不是 TCP
+          在线状态。
         </Typography.Text>
         <Table
           size="small"
@@ -523,7 +537,15 @@ export function ClientsPage(): React.ReactElement {
             {
               title: 'Mcp-Session-Id',
               dataIndex: 'mcpSessionId',
-              render: (value: string) => <span className="mono">{formatId(value, 22)}</span>,
+              render: (value: string) => (
+                <Typography.Text
+                  className="mono"
+                  title={value}
+                  copyable={{ text: value, tooltips: ['复制 Mcp-Session-Id', '已复制'] }}
+                >
+                  {formatId(value, 22)}
+                </Typography.Text>
+              ),
             },
             {
               title: '客户端名称',

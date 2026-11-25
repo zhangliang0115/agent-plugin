@@ -21,6 +21,12 @@
 
 只发布宿主 adapter 与独立 server 包，core 保持 `private` 并被打包进 adapter/server 的 `dist`。决策见 [ADR 0005](decisions/0005-npm-scope-and-package-names.md)，server/web 包类型见 [ADR 0007](decisions/0007-server-and-web-package-types.md)。
 
+## 界面文案
+
+- 表头、字段标签、按钮、提示等界面文案用中文，不要把英文普通词和中文拼在一个标签里：`active 版本` 写「激活版本」，`owner` 写「创建人」。
+- 产品名、协议名、通用缩写（如 MCP、JSON-RPC、Token、webhook）和代码标识符可以保留原文；它们与中文组合时，按中文语序写，不把英文词夹在中文短语中间。
+- 同一概念在列表、详情和提示里用同一个词；列表表头和详情字段名保持一致。
+
 ## 版本
 
 每个插件一个 semver 版本，`plugin.meta.json`、各宿主 manifest 和包的 `package.json` 保持一致。

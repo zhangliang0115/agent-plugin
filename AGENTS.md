@@ -10,7 +10,7 @@
 | `packages/portable/` | 跨插件共享的中立契约（按需增长） |
 | `scripts/` | 仓库脚本（validate、matrix） |
 | `docs/architecture.md` | 分层、目录、契约规则、测试分层 |
-| `docs/conventions.md` | 工具链、命名、版本、提交、依赖安全、文档职责 |
+| `docs/conventions.md` | 工具链、命名、界面文案、版本、提交、依赖安全、文档职责 |
 | `docs/hosts/` | 每个宿主的扩展机制事实和本地验证命令 |
 | `docs/decisions/` | 决策记录（ADR） |
 | `docs/issues.md` | 用 GitHub Issues 管理需求、调研、问题反馈的规则 |

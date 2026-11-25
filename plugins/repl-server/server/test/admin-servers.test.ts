@@ -1794,7 +1794,7 @@ test('PATCH /settings applies committed capacity through onSettingsChanged', asy
 // Discover
 // ---------------------------------------------------------------------------
 
-test('POST /discover returns the fixed list, marks existing commands and never leaks values', async () => {
+test('POST /discover returns the fixed list, marks existing servers and never leaks values', async () => {
   const home = await mkdtemp(join(tmpdir(), 'repl-discover-'));
   const workspace = join(home, 'workspace');
   try {
@@ -1835,24 +1835,28 @@ test('POST /discover returns the fixed list, marks existing commands and never l
       list: () => [
         {
           id: 'github',
+          label: 'GitHub',
           transport: 'stdio',
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-github'],
         },
         {
           id: 'fs',
+          label: 'fs',
           transport: 'stdio',
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp/project'],
         },
         {
           id: 'other',
+          label: 'Other',
           transport: 'stdio',
           command: 'docker',
           args: [],
         },
         {
           id: 'remote',
+          label: 'claude_http',
           transport: 'http',
           command: null,
           args: [],
@@ -1900,10 +1904,12 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     assert.deepEqual(kiro['envKeys'], ['API_KEY']);
 
     // The id `fs` is already used by a different registered command, so the slug avoids it.
+    // The entry name matches the registered label, so it counts as registered even though
+    // the command line differs.
     const cursor = byId.get('fs-2')!;
     assert.match(String(cursor['reason']), /\.cursor/);
     assert.deepEqual(cursor['envKeys'], ['TOKEN']);
-    assert.equal(cursor['alreadyExists'], false);
+    assert.equal(cursor['alreadyExists'], true);
 
     assert.equal(byId.get('github')!['alreadyExists'], true);
     assert.deepEqual(byId.get('github')!['envKeys'], ['GITHUB_TOKEN']);
@@ -1928,6 +1934,101 @@ test('POST /discover returns the fixed list, marks existing commands and never l
     assert.equal(serialized.includes('secret-env'), false);
     assert.equal(serialized.includes('secret-header'), false);
     assert.equal(serialized.includes('password'), false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('POST /discover keeps every config entry and matches config entries by name only', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'repl-discover-entries-'));
+  try {
+    await mkdir(join(home, '.kiro', 'settings'), { recursive: true });
+    await mkdir(join(home, '.cursor'), { recursive: true });
+    const command = 'npx';
+    const args = ['-y', 'mcp-elasticsearch'];
+    await writeFile(
+      join(home, '.kiro', 'settings', 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          'app-log': { command, args, env: { ELASTICSEARCH_HOSTS: 'http://app-log:9200' } },
+          'slow-log': { command, args, env: { ELASTICSEARCH_HOSTS: 'http://slow-log:9200' } },
+          uat: { command, args, env: { ELASTICSEARCH_HOSTS: 'http://uat:9200' } },
+        },
+      }),
+    );
+    await writeFile(
+      join(home, '.cursor', 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          'cursor-es': { command, args, env: { ELASTICSEARCH_HOSTS: 'http://cursor:9200' } },
+          'cursor-remote': { type: 'http', url: 'https://example.test/mcp' },
+        },
+      }),
+    );
+
+    const handler = createAdminDiscoverHandler({
+      servers: {
+        list: () => [
+          // Same name and same command line as `app-log`.
+          { id: 'app-log', label: 'app-log', transport: 'stdio', command, args },
+          // Same name as `uat` but a different command line: the name alone decides.
+          { id: 'uat', label: 'uat', transport: 'stdio', command: 'docker', args: [] },
+          // Same URL as `cursor-remote` but a different name: not registered by name.
+          {
+            id: 'legacy-remote',
+            label: 'legacy-remote',
+            transport: 'http',
+            command: null,
+            args: [],
+            url: 'https://example.test/mcp',
+          },
+          // Endpoint match for the built-in GitHub suggestion only.
+          {
+            id: 'github',
+            label: 'GitHub',
+            transport: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        ],
+      },
+      homeDir: home,
+      env: { PATH: '/usr/bin' },
+      commandProbe: () => false,
+    });
+
+    const response = await call(handler, makeRequest('POST', '/admin/api/discover'));
+    assert.equal(response.status, 200);
+    const suggestions = bodyOf(response)['suggestions'] as Record<string, unknown>[];
+    const entries = suggestions.filter((item) => item['serverName'] !== null);
+
+    // Three entries with identical command lines in one file, plus two more from another
+    // file, all remain separate suggestions: no automatic merging.
+    assert.deepEqual(
+      entries.map((item) => item['serverName']),
+      ['app-log', 'slow-log', 'uat', 'cursor-es', 'cursor-remote'],
+    );
+    assert.deepEqual(
+      entries.map((item) => item['alreadyExists']),
+      [true, false, true, false, false],
+    );
+    assert.deepEqual(
+      entries.map((item) => item['envKeys']),
+      [
+        ['ELASTICSEARCH_HOSTS'],
+        ['ELASTICSEARCH_HOSTS'],
+        ['ELASTICSEARCH_HOSTS'],
+        ['ELASTICSEARCH_HOSTS'],
+        [],
+      ],
+    );
+    assert.equal(new Set(entries.map((item) => item['id'])).size, entries.length);
+
+    // Built-in suggestions still match by URL / command line, not by name.
+    const byId = new Map(suggestions.map((item) => [String(item['id']), item]));
+    assert.equal(byId.get('github')!['serverName'], null);
+    assert.equal(byId.get('github')!['alreadyExists'], true);
+    assert.equal(byId.get('postgres')!['alreadyExists'], false);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

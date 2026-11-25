@@ -5,9 +5,11 @@ import { VERSION } from '@zhangliang0115/repl-server-core';
 
 import {
   DISCOVER_CACHE_SCOPE,
+  DISCOVER_PROTOCOL_VERSION,
   DISCOVER_TTL_MS,
+  INITIALIZE_PROTOCOL_VERSIONS,
   INSTRUCTIONS,
-  PROTOCOL_VERSION,
+  LEGACY_PROTOCOL_VERSION,
   SERVER_NAME,
   SERVER_VERSION,
   discoverResult,
@@ -17,7 +19,6 @@ import {
   JSON_RPC_INVALID_PARAMS,
   JSON_RPC_INVALID_REQUEST,
   JSON_RPC_INTERNAL_ERROR,
-  JsonRpcError,
 } from '../src/mcp/errors.ts';
 import {
   type JsonRpcErrorResponse,
@@ -50,7 +51,7 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
       method: 'server/discover',
       params: {
         _meta: {
-          'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION,
+          'io.modelcontextprotocol/protocolVersion': DISCOVER_PROTOCOL_VERSION,
           'io.modelcontextprotocol/clientInfo': { name: 'claude-code', version: '2.1.327' },
           'io.modelcontextprotocol/clientCapabilities': {},
         },
@@ -73,7 +74,8 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
     cacheScope: 'public',
   });
 
-  assert.equal(PROTOCOL_VERSION, '2026-07-28');
+  assert.equal(DISCOVER_PROTOCOL_VERSION, '2026-07-28');
+  assert.deepEqual(INITIALIZE_PROTOCOL_VERSIONS, ['2025-11-25', '2026-07-28']);
   assert.equal(DISCOVER_TTL_MS, 3_600_000);
   assert.equal(DISCOVER_CACHE_SCOPE, 'public');
   assert.equal(SERVER_NAME, 'repl-server');
@@ -81,29 +83,32 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
   assert.ok(INSTRUCTIONS.includes('persistent sandbox'));
   assert.ok(INSTRUCTIONS.includes('tools.mcp.<server>.<tool>'));
   assert.ok(INSTRUCTIONS.includes('search_tools'));
+  assert.ok(INSTRUCTIONS.includes('Promise.all'));
 });
 
-test('legacy initialize returns protocolVersion and a top-level serverInfo', async () => {
+test('legacy initialize echoes each accepted protocol version', async () => {
   const rpc = createMethodTable();
-  const response = expectResult(
-    await rpc.handle({
-      jsonrpc: '2.0',
-      id: 2,
-      method: 'initialize',
-      params: {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: 'probe', version: '1.0.0' },
-      },
-    }),
-  );
+  for (const [id, version] of INITIALIZE_PROTOCOL_VERSIONS.entries()) {
+    const response = expectResult(
+      await rpc.handle({
+        jsonrpc: '2.0',
+        id: id + 2,
+        method: 'initialize',
+        params: {
+          protocolVersion: version,
+          capabilities: {},
+          clientInfo: { name: 'probe', version: '1.0.0' },
+        },
+      }),
+    );
 
-  assert.deepEqual(response.result, {
-    protocolVersion: '2026-07-28',
-    capabilities: { tools: {} },
-    serverInfo: { name: 'repl-server', version: SERVER_VERSION },
-    instructions: INSTRUCTIONS,
-  });
+    assert.deepEqual(response.result, {
+      protocolVersion: version,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'repl-server', version: SERVER_VERSION },
+      instructions: INSTRUCTIONS,
+    });
+  }
 });
 
 test('server/discover rejects an unsupported pinned version with data.supportedVersions', async () => {
@@ -123,7 +128,7 @@ test('server/discover rejects an unsupported pinned version with data.supportedV
   }
 
   // A missing pin and a supported pin both succeed.
-  for (const params of [{}, { _meta: { 'io.modelcontextprotocol/protocolVersion': PROTOCOL_VERSION } }]) {
+  for (const params of [{}, { _meta: { 'io.modelcontextprotocol/protocolVersion': DISCOVER_PROTOCOL_VERSION } }]) {
     const response = expectResult(
       await rpc.handle({ jsonrpc: '2.0', id: 11, method: 'server/discover', params }),
     );
@@ -133,26 +138,32 @@ test('server/discover rejects an unsupported pinned version with data.supportedV
   }
 });
 
-test('initialize with an unsupported version is -32600 with data.supportedVersions', async () => {
+test('initialize falls back to the latest legacy version for an unknown version', async () => {
   const rpc = createMethodTable();
-  const response = expectError(
-    await rpc.handle({
-      jsonrpc: '2.0',
-      id: 3,
-      method: 'initialize',
-      params: { protocolVersion: '2025-11-25' },
-    }),
-  );
 
-  assert.equal(response.id, 3);
-  assert.equal(response.error.code, JSON_RPC_INVALID_REQUEST);
-  assert.deepEqual(response.error.data, { supportedVersions: ['2026-07-28'] });
+  for (const requested of ['2024-11-05', '1999-01-01']) {
+    const response = expectResult(
+      await rpc.handle({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'initialize',
+        params: { protocolVersion: requested },
+      }),
+    );
+
+    assert.deepEqual(response.result, {
+      protocolVersion: LEGACY_PROTOCOL_VERSION,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'repl-server', version: SERVER_VERSION },
+      instructions: INSTRUCTIONS,
+    });
+  }
 });
 
 test('initialize without a protocolVersion string is -32602', async () => {
   const rpc = createMethodTable();
 
-  for (const params of [{}, { protocolVersion: 20260728 }]) {
+  for (const params of [{}, { protocolVersion: 20260728 }, { protocolVersion: '' }]) {
     const response = expectError(
       await rpc.handle({ jsonrpc: '2.0', id: 4, method: 'initialize', params }),
     );
@@ -160,19 +171,18 @@ test('initialize without a protocolVersion string is -32602', async () => {
   }
 });
 
-test('initialize ignores the requested version once it is supported', () => {
-  assert.deepEqual(initializeResult({ protocolVersion: PROTOCOL_VERSION }), {
-    protocolVersion: '2026-07-28',
-    capabilities: { tools: {} },
-    serverInfo: { name: 'repl-server', version: SERVER_VERSION },
-    instructions: INSTRUCTIONS,
-  });
-  assert.throws(
-    () => initializeResult({ protocolVersion: '2024-11-05' }),
-    (error: unknown) =>
-      error instanceof JsonRpcError &&
-      error.code === JSON_RPC_INVALID_REQUEST &&
-      Array.isArray((error.data as { supportedVersions?: unknown }).supportedVersions),
+test('initializeResult echoes accepted versions and falls back for unknown ones', () => {
+  for (const version of INITIALIZE_PROTOCOL_VERSIONS) {
+    assert.deepEqual(initializeResult({ protocolVersion: version }), {
+      protocolVersion: version,
+      capabilities: { tools: {} },
+      serverInfo: { name: 'repl-server', version: SERVER_VERSION },
+      instructions: INSTRUCTIONS,
+    });
+  }
+  assert.equal(
+    initializeResult({ protocolVersion: '2024-11-05' }).protocolVersion,
+    LEGACY_PROTOCOL_VERSION,
   );
 });
 
@@ -204,7 +214,7 @@ test('discover and initialize use the instructions override', async () => {
       jsonrpc: '2.0',
       id: 7,
       method: 'initialize',
-      params: { protocolVersion: PROTOCOL_VERSION },
+      params: { protocolVersion: DISCOVER_PROTOCOL_VERSION },
     }),
   );
 

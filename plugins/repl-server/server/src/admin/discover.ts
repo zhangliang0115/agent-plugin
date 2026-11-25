@@ -11,9 +11,13 @@
  * placeholders are resolved from the server's own environment first, and values never
  * leave the store.
  *
- * `alreadyExists` compares the candidate `command + args` against registered servers
- * after whitespace normalization; `<workspace>` / `<url>` / `<path>` placeholders match
- * any single corresponding argument. Labels and ids are never used for the comparison.
+ * Every `mcpServers` entry becomes its own suggestion; entries are never merged by URL
+ * or command line, even across config files or clients. For config entries
+ * (`serverName !== null`) `alreadyExists` is true only when a registered server's
+ * `label` equals the entry name. Built-in suggestions (`serverName === null`) compare
+ * their URL, or their `command + args` after whitespace normalization;
+ * `<workspace>` / `<url>` / `<path>` placeholders match any single corresponding
+ * argument. Ids are never used for the comparison.
  * @module
  */
 
@@ -60,6 +64,8 @@ export interface DiscoverSuggestion {
 /** The subset of a registered server that `alreadyExists` needs. */
 export interface DiscoverServerConfig {
   id: string;
+  /** Display name; config entries are matched against it by name. */
+  label?: string;
   transport: string;
   command: string | null;
   args: readonly unknown[];
@@ -423,16 +429,8 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
       'fetch',
       ...existingServers.map((server) => server.id),
     ]);
-    const seen = new Set<string>();
-
     for (const config of configs) {
       for (const entry of config.entries) {
-        const key =
-          entry.url !== null
-            ? `url:${entry.url}`
-            : `cmd:${entry.command ?? ''}\u0000${entry.args.join('\u0000')}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
         suggestions.push(
           suggestion(
             slugServerId(entry.name, usedIds),
@@ -533,12 +531,14 @@ export function createAdminDiscoverHandler(deps: AdminDiscoverDeps): AdminHandle
 
     for (const item of suggestions) {
       item.alreadyExists = existingServers.some((server) =>
-        item.url !== null
-          ? server.url === item.url
-          : sameCommandLine(
-              { command: item.command, args: item.args },
-              { command: server.command, args: server.args },
-            ),
+        item.serverName !== null
+          ? server.label === item.serverName
+          : item.url !== null
+            ? server.url === item.url
+            : sameCommandLine(
+                { command: item.command, args: item.args },
+                { command: server.command, args: server.args },
+              ),
       );
     }
 

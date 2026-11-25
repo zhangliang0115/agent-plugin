@@ -5,9 +5,17 @@ import { VERSION } from '@zhangliang0115/repl-server-core';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST } from './errors.ts';
 import type { JsonRpcHandler } from './jsonrpc.ts';
 
-/** MCP protocol version served by this build. */
-export const PROTOCOL_VERSION = '2026-07-28';
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [PROTOCOL_VERSION];
+/** Modern MCP protocol version served by `server/discover`. */
+export const DISCOVER_PROTOCOL_VERSION = '2026-07-28';
+/** Latest legacy revision; `initialize` falls back to it for unknown requests. */
+export const LEGACY_PROTOCOL_VERSION = '2025-11-25';
+/** Versions `server/discover` reports and accepts as its `_meta` pin. */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [DISCOVER_PROTOCOL_VERSION];
+/** Revisions the legacy `initialize` handler accepts, legacy first. */
+export const INITIALIZE_PROTOCOL_VERSIONS: readonly string[] = [
+  LEGACY_PROTOCOL_VERSION,
+  DISCOVER_PROTOCOL_VERSION,
+];
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 export const SERVER_NAME = 'repl-server';
 export const SERVER_VERSION = VERSION;
@@ -26,6 +34,7 @@ export const INSTRUCTIONS = [
   '- Top-level await works. Declarations persist across calls in the same workspace.',
   '- Changing workspace starts a new session. reset="1" means the context was rebuilt; keep cross-rebuild data in state.',
   '- Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).',
+  '- Independent tool calls can overlap: const [a, b] = await Promise.all([tools.mcp.<server>.<tool>(x), tools.mcp.<server>.<tool>(y)]).',
   '',
   'Workflow:',
   '- Outside the script: search_tools finds canonical names, describe_tools returns schemas. Inside: only tools.* and tools.mcp.*.',
@@ -107,8 +116,9 @@ export function discoverResult(options: StaticInstructionsOptions = {}): Discove
 }
 
 /**
- * Builds the legacy `initialize` result. Only versions this build serves are
- * accepted; anything else is `-32600` with the supported list in `data`.
+ * Builds the legacy `initialize` result. Both accepted revisions echo back;
+ * any other string falls back to the latest legacy revision, as the
+ * 2025-11-25 spec requires, instead of failing the handshake.
  */
 export function initializeResult(
   params: Record<string, unknown>,
@@ -118,13 +128,11 @@ export function initializeResult(
   if (typeof requested !== 'string' || requested.length === 0) {
     throw new JsonRpcError(JSON_RPC_INVALID_PARAMS, 'initialize requires a protocolVersion string');
   }
-  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) {
-    throw new JsonRpcError(JSON_RPC_INVALID_REQUEST, `Unsupported protocol version: ${requested}`, {
-      supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
-    });
-  }
+  const protocolVersion = INITIALIZE_PROTOCOL_VERSIONS.includes(requested)
+    ? requested
+    : LEGACY_PROTOCOL_VERSION;
   return {
-    protocolVersion: requested,
+    protocolVersion,
     capabilities: { tools: {} },
     serverInfo: serverInfo(),
     instructions: options.instructions ?? INSTRUCTIONS,

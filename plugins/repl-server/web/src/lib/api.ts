@@ -2,8 +2,10 @@
  *
  * The admin token lives in `sessionStorage` (never `localStorage`) and is sent as
  * `Authorization: Bearer <token>`. Cookie-session writes additionally need `X-CSRF-Token`;
- * {@link ApiClient.setCsrfToken} is the placeholder for the `GET /admin/api/csrf` exchange
- * that the HTTP shell will expose later. Bearer writes do not need that header.
+ * {@link ApiClient.setCsrfToken} holds the `GET /admin/api/csrf` exchange in memory, and a
+ * `403 CSRF_FAILED` triggers one silent re-exchange plus one retry (the server rejects
+ * before dispatch, so the retry cannot duplicate a side effect). Bearer writes do not need
+ * that header.
  *
  * Every response is parsed once: JSON bodies are returned as-is, non-JSON bodies (for
  * example the JSONL audit export) are returned as text, and failures become
@@ -238,7 +240,47 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     csrfToken = normalizeToken(next);
   }
 
-  async function request<T>(path: string, requestOptions: ApiRequestOptions = {}): Promise<T> {
+  let csrfRefresh: Promise<boolean> | null = null;
+
+  /**
+   * Fetches a fresh CSRF token without going through `request` (no recursion). Resolves
+   * `false` on any failure; concurrent callers share one in-flight exchange.
+   */
+  async function fetchCsrfToken(): Promise<boolean> {
+    try {
+      const response = await fetchImpl(buildUrl(baseUrl, '/csrf'), {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (response.status === 401) {
+        options.onUnauthorized?.();
+        return false;
+      }
+      if (!response.ok) return false;
+      const payload: unknown = await response.json().catch(() => null);
+      const value = isRecord(payload) ? payload['csrfToken'] : undefined;
+      if (typeof value !== 'string' || value.trim() === '') return false;
+      setCsrfToken(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function refreshCsrfToken(): Promise<boolean> {
+    csrfRefresh ??= fetchCsrfToken().finally(() => {
+      csrfRefresh = null;
+    });
+    return csrfRefresh;
+  }
+
+  async function request<T>(
+    path: string,
+    requestOptions: ApiRequestOptions = {},
+    csrfRetried = false,
+  ): Promise<T> {
     const method = (requestOptions.method ?? 'GET').toUpperCase();
     const headers = new Headers({ accept: 'application/json' });
 
@@ -277,6 +319,17 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     if (!response.ok) {
       const parsed = parseErrorPayload(response.status, response.statusText, text);
       if (response.status === 401) options.onUnauthorized?.();
+      // A cookie session can outlive its in-memory CSRF token when the server restarted.
+      // Re-exchange once and retry; the gate rejects before dispatch, so retrying is safe.
+      if (
+        response.status === 403 &&
+        parsed.code === 'CSRF_FAILED' &&
+        !csrfRetried &&
+        token === null &&
+        (await refreshCsrfToken())
+      ) {
+        return request<T>(path, requestOptions, true);
+      }
       throw new ApiError(response.status, parsed.code, parsed.message, parsed.details);
     }
 

@@ -59,10 +59,10 @@ import {
 } from './assembly-stores.ts';
 import { openStateDb, migrate } from './db/migrate.ts';
 import { findBindingByToken, getClientBinding } from './db/clients.ts';
-import { OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
+import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
 import { countToolsByServer, markAbsentToolsStale, recordToolUsage, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
-import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalsOf, type IdleSweepResult } from './exec/gateway.ts';
+import { ExecGateway, STUCK_EVAL_WARN_MS, stuckEvalsOf, type CallToolTransport, type IdleSweepResult } from './exec/gateway.ts';
 import { resolveCapacityLimitsFromSettings, type CapacityLimits } from './exec/capacity.ts';
 import { PoolGates } from './pool/gates.ts';
 import { createPoolRuntime } from './pool/runtime.ts';
@@ -82,7 +82,7 @@ import {
   type McpServerOverview,
 } from './mcp/overview.ts';
 import { JSON_RPC_INVALID_PARAMS, JsonRpcError } from './mcp/errors.ts';
-import type { AuditEvent, RequestIdentity, ToolCallObservation } from './ports.ts';
+import type { AuditEvent, RequestIdentity } from './ports.ts';
 import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
@@ -629,6 +629,33 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     eventsHub.publish('eval', frame);
   };
 
+  /**
+   * One call through the real transport: third-party tools go to the pool, bare
+   * tools (official) go to `claude mcp serve`. Shared by the eval gateway and
+   * the admin tool test so the routing exists once.
+   */
+  const executeToolCall: CallToolTransport =
+    options.callTool ??
+    (async (call, workspace, binding, signal, deadline, execSessionId, observation) => {
+      if (call.server !== undefined) {
+        return await poolRuntime.callTool(call, {
+          bindingId: binding ?? null,
+          ...(signal === undefined ? {} : { signal }),
+          ...(deadline === undefined ? {} : { deadline }),
+          ...(observation === undefined ? {} : { observation }),
+        });
+      }
+      const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
+      const client = await serveRuntime.acquire(
+        key,
+        execSessionId === undefined ? undefined : { execSessionId },
+      );
+      return await createServeCallTool(client)(call, {
+        ...(signal === undefined ? {} : { signal }),
+        ...(deadline === undefined ? {} : { deadline }),
+      });
+    });
+
   const gateway = new ExecGateway({
     catalog,
     log,
@@ -640,35 +667,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         await serveRuntime.restart({ execSessionId });
       },
     },
-    callTool:
-      options.callTool ??
-      (async (
-        call: ToolCallRequest,
-        workspace?: string,
-        binding?: string | null,
-        signal?: AbortSignal,
-        deadline?: number,
-        execSessionId?: string,
-        observation?: ToolCallObservation,
-      ) => {
-        if (call.server !== undefined) {
-          return await poolRuntime.callTool(call, {
-            bindingId: binding ?? null,
-            ...(signal === undefined ? {} : { signal }),
-            ...(deadline === undefined ? {} : { deadline }),
-            ...(observation === undefined ? {} : { observation }),
-          });
-        }
-        const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
-        const client = await serveRuntime.acquire(
-          key,
-          execSessionId === undefined ? undefined : { execSessionId },
-        );
-        return await createServeCallTool(client)(call, {
-          ...(signal === undefined ? {} : { signal }),
-          ...(deadline === undefined ? {} : { deadline }),
-        });
-      }),
+    callTool: executeToolCall,
     onAudit: (event) => {
       const at = new Date().toISOString();
       const record = { ...event, ts: at };
@@ -836,6 +835,21 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       tools: toolStore,
       retrieval: createSearchPreview({ db }),
       official: officialSync,
+      // Same transport as the gateway, but outside its eval/audit path: no
+      // `tool_result` is emitted, so `tool_usage` stays model/script-only.
+      testTool: async ({ serverId, name, args, signal, deadline }) => {
+        const call: ToolCallRequest = {
+          evalId: 0,
+          epoch: 0,
+          callSeq: 0,
+          tool: name,
+          args,
+          // Official tools live behind `serve`; third-party tools carry `server`.
+          ...(serverId === OFFICIAL_SERVER_ID ? {} : { server: serverId }),
+        };
+        return await executeToolCall(call, undefined, null, signal, deadline);
+      },
+      audit: (event) => audit.recordTask({ ...event, ts: new Date().toISOString() }),
     }),
     createAdminClientsHandler({
       bindings: bindingStore,
@@ -967,6 +981,22 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         visibility: surface.visibility,
         searchToolsDefinition: surface.searchToolsDefinition,
         toolTextSearch,
+        // Top-level builtins never emit `tool_result`; this is their only usage counter.
+        onUsage: (toolName, ok) => {
+          try {
+            recordToolUsage(db, {
+              serverId: BUILTIN_SERVER_ID,
+              name: toolName,
+              ok,
+              at: new Date().toISOString(),
+            });
+          } catch (error) {
+            log(
+              `tool usage write failed for ${BUILTIN_SERVER_ID}.${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+              { level: 'warn', scope: 'db' },
+            );
+          }
+        },
       });
     },
     tasksGet: async (params, context) => {

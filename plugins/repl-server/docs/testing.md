@@ -51,7 +51,7 @@ interactive TUI 冒烟：用 Terminal（或 kimi-cu）运行同一 `claude --mcp
 | automated（管理端分类字典） | `GET/PUT /admin/api/categories`：未保存返回 10 条闭集默认（与标签 key 不重叠）、旧 15 条完整默认（key/zh/en 全等且顺序一致）在读取时升级、同 15 个 key 但任一标签被改过或重排或自定义子集则原样保留、PUT 提交旧默认可与 GET 返回一致、显式空保持空、PUT 全量替换且保留其它 settings、`appendCategoryDictionary` 超 100 条抛 422、422 `INVALID_CATEGORIES`（含超 100 项）、缺 If-Match 400 / 过期 409 `REVISION_CONFLICT`、`readCategoryDictionary` 跳过坏条目、`appendCategoryDictionary` 只追加未知 key | `node --test test/admin-categories.test.ts` |
 | automated（07 发现） | 解析 P-*、应用 D-*、端点 A-*、预热 R-*、fixture E2E | `node --test test/discovery-*.test.ts` |
 | automated（08 AI） | runner argv/env/超时、proposal/annotation 校验（含建议字典项）、prompt v9 注入分类/标签字典与 env.* 禁止规则、标注提示词排除字面 args 与 URL query/fragment、64 KiB 预检、自动标注尝试额度、自动标注直接应用与失败队列、完整性按 enabled 工具生效标签判断（server tags 允许 0）、自动应用只补空字段、自动应用空值过滤与只写字典已有 key、失败队列清空字典建议、自动应用 409 重试、server 标签变化全量复检 enabled 工具、server/工具标签与现有值取并集并去重、动作键丢弃、server 0–2 / 工具叠加 1–4（预览裁剪、apply 拒绝）、tagSuggestions 只进字典、建议分类/标签与标注同事务落库、AI 路由与 limiter | `node --test test/ai-*.test.ts` |
-| automated（10 脚本沉淀） | v8 迁移（`script_runs` / `scripts` / `script_versions` / `script_candidates` / `scripts_fts`，重复迁移幂等）、同步与异步归档（成功存 code、失败只留状态、脚本模式存 id/version/mode/args）、`runId` 信封与 `wait_tasks` / `tasks/get`、exact/parameterized 保存、`baseVersion` 冲突、固定 mode、`scriptId` 执行与 `activateOnSuccess`、参数子集校验、search、`script_saved` 审计、admin 脚本端点与执行历史 | `node --test test/scripts-*.test.ts test/admin-scripts.test.ts` |
+| automated（10 脚本沉淀） | v8 迁移（`script_runs` / `scripts` / `script_versions` / `script_candidates` / `scripts_fts`，重复迁移幂等）、同步与异步归档（成功存 code、失败只留状态、脚本模式存 id/version/mode/args）、`runId` 信封与 `wait_tasks` / `tasks/get`、exact/parameterized 保存、`baseVersion` 冲突、固定 mode、`scriptName` 执行（legacy `scriptId` 兼容）与 `activateOnSuccess`、参数子集校验、search、`script_saved` 审计、admin 脚本端点与执行历史 | `node --test test/scripts-*.test.ts test/admin-scripts.test.ts` |
 | automated（客户端身份） | `clientInfo` 从 `_meta` 与 legacy `initialize` 两处读取；名称 128 码点、版本 64 码点、控制字符剔除、trim、缺 name 时两段为空；旧 `name/version` 标签按第一个 `/` 拆分 | `node --test test/client-info.test.ts` |
 | automated（内置与官方工具目录） | `__builtin__` 5 个协议工具幂等种子、保留管理员字段、只补空字段、从 catalog 快照排除；`__official__` 懒同步（无 `claude` → notice、写库保留覆盖、按进程缓存、`force` 重跑、GET 200、POST refresh 202、`__builtin__` 拒绝刷新） | `node --test test/builtin-seed.test.ts test/official-sync.test.ts` |
 | automated（会话概览） | 可见 server 过滤（enabled、非 builtin、binding 的 server/tag 白名单）、行格式与文本裁剪、无可见 server 文案、2KB 预算下从尾部截断且固定指引保留、`instructions` 保持短且只留 `run_script` 指针 | `node --test test/mcp-overview.test.ts` |
@@ -137,7 +137,7 @@ node --test test/scripts-*.test.ts test/admin-scripts.test.ts
 cd plugins/repl-server/server && node --test test/scripts-*.test.ts test/admin-scripts.test.ts
 ```
 
-拆分：`db-v2` 的 v8 用例覆盖建表/索引/名称全局唯一/重复迁移幂等；`scripts-tools` 覆盖保存、更新、参数、搜索、计数与 `run_script` 的 scriptId 路径（内存 DB + 假 gateway）；`scripts-gateway` 用真实 `ExecGateway` 与 worker 覆盖同步/异步归档、`runId` 信封、`wait_tasks` / `tasks/get` 字段、归档失败不影响执行；`admin-scripts` 覆盖 admin 路由、409/422 映射、版本激活与执行历史游标。`script_runs` 是 `run_script` 自身的执行归档，不是第二条执行链路。
+拆分：`db-v2` 的 v8 用例覆盖建表/索引/名称全局唯一/重复迁移幂等；`scripts-tools` 覆盖保存、更新、参数、搜索、计数与 `run_script` 的 scriptName 路径（legacy `scriptId` 兼容；内存 DB + 假 gateway）；`scripts-gateway` 用真实 `ExecGateway` 与 worker 覆盖同步/异步归档、`runId` 信封、`wait_tasks` / `tasks/get` 字段、归档失败不影响执行；`admin-scripts` 覆盖 admin 路由、409/422 映射、版本激活与执行历史游标。`script_runs` 是 `run_script` 自身的执行归档，不是第二条执行链路。
 
 ### Web 页面
 

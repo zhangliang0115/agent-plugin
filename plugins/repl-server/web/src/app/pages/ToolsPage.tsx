@@ -21,6 +21,8 @@ import {
   BookOutlined,
   CloudDownloadOutlined,
   EditOutlined,
+  ExperimentOutlined,
+  PlayCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
@@ -29,13 +31,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader } from '../components/common.tsx';
 import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
+import { JsonView } from '../components/JsonView.tsx';
 import { CategoryPillEditor, TagPillEditor } from '../components/PillEditors.tsx';
+import { SchemaArgsForm } from '../components/SchemaArgsForm.tsx';
 import { ToolSchemaDoc } from '../components/ToolSchemaDoc.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError, isTimeoutError, timeoutSignal } from '../../lib/api.ts';
-import { formatBytes, formatDuration, formatJson, formatNumber, formatTimestamp } from '../../lib/format.ts';
+import { formatBytes, formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
 import { toolStatsFrom, toolUsageText, type ToolStats } from '../../lib/tool-stats.ts';
+import { toolTestResultFrom, type ToolTestResult } from '../../lib/tool-test.ts';
 import { navigate } from '../router.ts';
 
 type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
@@ -202,6 +207,12 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingTool, setEditingTool] = useState<ToolRecord | null>(null);
   const [docTool, setDocTool] = useState<ToolRecord | null>(null);
+  const [testTool, setTestTool] = useState<ToolRecord | null>(null);
+  const [testArgs, setTestArgs] = useState<Record<string, unknown>>({});
+  const [testArgsValid, setTestArgsValid] = useState(false);
+  const [testRunning, setTestRunning] = useState(false);
+  const [testResult, setTestResult] = useState<ToolTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [preview, setPreview] = useState<DiscoveryPreview | null>(null);
@@ -327,28 +338,33 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '工具',
         dataIndex: 'name',
-        width: 200,
+        width: 210,
         render: (value: string, tool: ToolRecord) => (
           <div>
             {tool.displayName !== null && tool.displayName !== value ? <div>{tool.displayName}</div> : null}
-            <span className="mono">{value}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <span
+                className="mono"
+                title={value}
+                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >
+                {value}
+              </span>
+              <Tag
+                bordered={false}
+                color={tool.discoveredVia === 'search' ? 'blue' : 'default'}
+                style={{ flexShrink: 0, marginInlineEnd: 0 }}
+              >
+                {tool.discoveredVia === 'search' ? 'search' : 'static'}
+              </Tag>
+            </div>
           </div>
-        ),
-      },
-      {
-        title: '来源',
-        dataIndex: 'discoveredVia',
-        width: 72,
-        render: (value: 'static' | 'search' | undefined) => (
-          <Tag bordered={false} color={value === 'search' ? 'blue' : 'default'}>
-            {value === 'search' ? 'search' : 'static'}
-          </Tag>
         ),
       },
       {
         title: '启用',
         dataIndex: 'enabled',
-        width: 76,
+        width: 72,
         render: (value: boolean, tool: ToolRecord) => {
           const pending = (inlinePending[inlineKey(tool, 'enabled')] ?? 0) > 0;
           return (
@@ -368,7 +384,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '并发',
         dataIndex: 'concurrency',
-        width: 100,
+        width: 90,
         render: (value: ToolConcurrency, tool: ToolRecord) => (
           <div onClick={(event) => event.stopPropagation()}>
             <CategoryPillEditor
@@ -387,7 +403,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '标签（含继承）',
         dataIndex: 'tags',
-        width: 260,
+        width: 200,
         render: (value: string[], tool: ToolRecord) => (
           <TagPillEditor
             dictionary={tagDefinitions}
@@ -401,7 +417,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '暴露',
-        width: 84,
+        width: 70,
         render: (_value: unknown, tool: ToolRecord) => {
           if (tool.effective === undefined) {
             return tool.stale ? <Tag color="gold">stale</Tag> : <span className="muted">—</span>;
@@ -426,24 +442,19 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         },
       },
       {
-        title: '使用次数',
-        key: 'callCount',
-        width: 90,
-        align: 'right' as const,
-        render: (_value: unknown, tool: ToolRecord) => formatNumber(tool.callCount),
-      },
-      {
-        title: '执行统计',
+        title: '使用情况',
         key: 'usage',
         width: 190,
         render: (_value: unknown, tool: ToolRecord) => (
-          <span className="mono">{toolUsageText(tool)}</span>
+          <span className="mono" title={toolUsageText(tool)}>
+            {toolUsageText(tool)}
+          </span>
         ),
       },
       {
         title: '最近使用',
         key: 'lastCalledAt',
-        width: 170,
+        width: 150,
         render: (_value: unknown, tool: ToolRecord) => (
           <span className="mono">{formatTimestamp(tool.lastCalledAt)}</span>
         ),
@@ -451,7 +462,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '模型字节',
         key: 'modelBytes',
-        width: 110,
+        width: 84,
         render: (_value: unknown, tool: ToolRecord) => (
           <Tooltip
             title={
@@ -469,7 +480,9 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '操作',
-        width: 140,
+        // 162px of buttons (说明/编辑/测试) plus cell padding; anything narrower
+        // makes the fixed table overflow at full width.
+        width: 164,
         render: (_value: unknown, tool: ToolRecord) => (
           <Space size={0}>
             <Button size="small" type="link" icon={<BookOutlined />} onClick={() => setDocTool(tool)}>
@@ -478,6 +491,17 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openToolEditor(tool)}>
               编辑
             </Button>
+            {tool.serverId === '__builtin__' ? null : (
+              <Tooltip title="测试工具（会真实调用）">
+                <Button
+                  size="small"
+                  type="link"
+                  aria-label="测试工具"
+                  icon={<ExperimentOutlined />}
+                  onClick={() => openToolTest(tool)}
+                />
+              </Tooltip>
+            )}
           </Space>
         ),
       },
@@ -498,6 +522,44 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       category: tool.category ?? '',
       staleOverride: tool.staleOverride,
     });
+  }
+
+  function openToolTest(tool: ToolRecord): void {
+    setTestTool(tool);
+    setTestArgs({});
+    setTestResult(null);
+    setTestError(null);
+  }
+
+  async function runToolTest(): Promise<void> {
+    const tool = testTool;
+    if (tool === null || testRunning) return;
+    if (!testArgsValid) {
+      setTestError('参数未通过校验：请修正必填项或 JSON。');
+      return;
+    }
+    setTestRunning(true);
+    setTestError(null);
+    setTestResult(null);
+    try {
+      const response = await api.post<unknown>(
+        `/tools/${encodeURIComponent(tool.serverId)}/${encodeURIComponent(tool.name)}/test`,
+        { args: testArgs },
+      );
+      if (!alive.current) return;
+      const result = toolTestResultFrom(response);
+      if (result === null) {
+        setTestError('测试接口返回无法识别。');
+        return;
+      }
+      setTestResult(result);
+      if (result.ok) message.success(`测试完成（${formatDuration(result.durationMs)}）`);
+      else message.error(`测试失败：${result.error?.message ?? '未知错误'}`);
+    } catch (error) {
+      if (alive.current) setTestError(toolTestErrorText(error));
+    } finally {
+      if (alive.current) setTestRunning(false);
+    }
   }
 
   async function saveTool(values: ToolFormValues): Promise<void> {
@@ -673,6 +735,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
     setQuery('');
     setEditingTool(null);
     setDocTool(null);
+    setTestTool(null);
     setEditorOpen(false);
     setDiscoverOpen(false);
     setPreview(null);
@@ -947,7 +1010,9 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             columns={columns}
             pagination={false}
             tableLayout="fixed"
-            scroll={{ x: 1700 }}
+            // Fixed columns sum to 1 230px; the description takes the rest. The 1 360px
+            // minimum keeps 1 725px viewports scroll-free while narrower ones scroll.
+            scroll={{ x: 1_360 }}
             locale={{
               emptyText: (
                 <Empty
@@ -1022,6 +1087,58 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         width={960}
       >
         {docTool === null ? null : <ToolSchemaDoc tool={docTool} />}
+      </Drawer>
+
+      <Drawer
+        placement="left"
+        open={testTool !== null}
+        onClose={() => setTestTool(null)}
+        destroyOnHidden
+        title={testTool === null ? '测试工具' : `测试工具 · ${testTool.serverId}/${testTool.name}`}
+        width={720}
+        extra={
+          <Space>
+            <Button onClick={() => setTestTool(null)}>关闭</Button>
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={testRunning}
+              disabled={testTool === null || !testArgsValid}
+              onClick={() => void runToolTest()}
+            >
+              运行测试
+            </Button>
+          </Space>
+        }
+      >
+        {testTool === null ? null : (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              type="warning"
+              showIcon
+              message="会真实调用外部工具，可能产生副作用"
+              description="不要用生产环境的写操作测试；服务端默认超时 10 秒。"
+            />
+            <div>
+              <Typography.Text type="secondary">工具说明</Typography.Text>
+              <Typography.Paragraph style={{ marginTop: 4, marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                {testTool.effective?.description ?? testTool.description ?? '—'}
+              </Typography.Paragraph>
+            </div>
+            <SchemaArgsForm
+              key={`${testTool.serverId}/${testTool.name}`}
+              schema={testTool.schema}
+              value={testArgs}
+              onChange={setTestArgs}
+              onValidityChange={setTestArgsValid}
+              disabled={testRunning}
+            />
+            {testError === null ? null : (
+              <Alert type="error" showIcon message="测试请求失败" description={testError} />
+            )}
+            {testResult === null ? null : <ToolTestResultView result={testResult} />}
+          </Space>
+        )}
       </Drawer>
 
       <Drawer
@@ -1295,6 +1412,67 @@ function isConflictError(error: unknown): boolean {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function toolTestErrorText(error: unknown): string {
+  if (!(error instanceof ApiError)) return failureText(error);
+  if (error.code === 'TOOL_TEST_UNSUPPORTED') return '内置工具不支持测试调用。';
+  if (error.status === 404) {
+    return `工具不存在或测试接口未提供：${error.message}（${error.code}）`;
+  }
+  if (error.status === 400) return `请求被拒绝：${error.message}（${error.code}）`;
+  return failureText(error);
+}
+
+/** Tool test outcome: the call itself succeeded; `ok` is the tool's result. */
+function ToolTestResultView({ result }: { result: ToolTestResult }): React.ReactElement {
+  return (
+    <Card size="small" title="测试结果">
+      <Space size={6} wrap>
+        <Tag bordered={false} color={result.ok ? 'green' : 'red'}>
+          {result.ok ? '执行成功' : '执行失败'}
+        </Tag>
+        <Tag bordered={false}>耗时 {formatDuration(result.durationMs)}</Tag>
+        {result.resultBytes === null ? null : (
+          <Tag bordered={false}>结果 {formatBytes(result.resultBytes)}</Tag>
+        )}
+        <span className="muted">{formatTimestamp(result.testedAt)}</span>
+      </Space>
+      {result.truncated ? (
+        <Alert
+          style={{ marginTop: 8 }}
+          type="warning"
+          showIcon
+          message="结果超过服务端上限，已截断。"
+        />
+      ) : null}
+      {result.error === null ? null : (
+        <Alert
+          style={{ marginTop: 8 }}
+          type="error"
+          showIcon
+          message={`${result.error.message}（${result.error.code}）`}
+        />
+      )}
+      {result.resultPreview === null ? null : (
+        <div style={{ marginTop: 8 }}>
+          <Typography.Text type="secondary">结果预览（已截断）</Typography.Text>
+          <Input.TextArea
+            readOnly
+            value={result.resultPreview}
+            autoSize={{ minRows: 3, maxRows: 12 }}
+            className="mono"
+          />
+        </div>
+      )}
+      {result.result === undefined ? null : (
+        <div style={{ marginTop: 8 }}>
+          <Typography.Text type="secondary">返回结果</Typography.Text>
+          <JsonView value={result.result} maxHeight={360} />
+        </div>
+      )}
+    </Card>
+  );
 }
 
 function failureText(error: unknown): string {

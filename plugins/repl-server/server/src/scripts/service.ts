@@ -144,7 +144,10 @@ export interface SaveScriptInput {
 }
 
 export interface SaveScriptResult {
+  /** Internal system id; the model-facing tool returns the script name instead. */
   scriptId: string;
+  /** Current name after this save, including a rename. */
+  name: string;
   version: number;
   status: ScriptStatus;
   activeVersion: number | null;
@@ -753,6 +756,7 @@ export class ScriptService {
       );
       return {
         scriptId: created.script.scriptId,
+        name,
         version: created.version.version,
         status: created.script.status,
         activeVersion: created.script.activeVersion,
@@ -818,6 +822,7 @@ export class ScriptService {
       const current = getScript(this.db, scriptId);
       return {
         scriptId,
+        name: current?.name ?? script.name,
         version: latest.version,
         status: current?.status ?? script.status,
         activeVersion: current?.activeVersion ?? script.activeVersion,
@@ -924,6 +929,7 @@ export class ScriptService {
       const current = getScript(this.db, scriptId);
       return {
         scriptId,
+        name: current?.name ?? script.name,
         version: created.version,
         status: current?.status ?? script.status,
         activeVersion: current?.activeVersion ?? script.activeVersion,
@@ -1009,6 +1015,15 @@ export class ScriptService {
       `)
       .all(...params)
       .map((row) => toSearchItem(row as Record<string, unknown>));
+  }
+
+  /**
+   * Maps a globally unique script name to its id for `run_script`; null when no
+   * script has that name. Lifecycle, version and permission checks stay in
+   * `resolveExecution`, so a resolved name cannot bypass them.
+   */
+  resolveIdByName(name: string): string | null {
+    return findScriptByName(this.db, name)?.scriptId ?? null;
   }
 
   /**

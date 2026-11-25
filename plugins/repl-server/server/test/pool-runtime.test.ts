@@ -635,3 +635,71 @@ test('normalized MCP media reaches the gateway media collector', async (t) => {
   assert.deepEqual(outcome.images, [{ base64: imageBase64, mediaType: 'image/png' }]);
   assert.deepEqual(outcome.documents, [{ base64: pdfBase64 }]);
 });
+
+test('independent MCP calls overlap under Promise.all', async (t) => {
+  const harness = makeHarness();
+  t.after(() => harness.runtime.dispose());
+  const delayMs = 200;
+  const calls: Array<{ name: string; startedAt: number; endedAt?: number }> = [];
+  harness.clients.configure = (client) => {
+    client.callImpl = async (name) => {
+      const record: { name: string; startedAt: number; endedAt?: number } = {
+        name,
+        startedAt: Date.now(),
+      };
+      calls.push(record);
+      await tick(delayMs);
+      record.endedAt = Date.now();
+      return { content: [{ type: 'text', text: name }] };
+    };
+  };
+
+  const gateway = new ExecGateway({
+    callTool: (poolCall, _workspace, binding, signal, deadline) =>
+      harness.runtime.callTool(poolCall, {
+        bindingId: binding ?? null,
+        ...(signal === undefined ? {} : { signal }),
+        ...(deadline === undefined ? {} : { deadline }),
+      }),
+  });
+  t.after(async () => {
+    await gateway.disposeAll();
+  });
+
+  const identity: RequestIdentity = {
+    identity: 'unbound',
+    binding: null,
+    client: 'test-client/1.0',
+    mcp: 'mcp_pool_parallel',
+  };
+  const request: ScriptRequest = {
+    code: `
+      const [first, second] = await Promise.all([
+        tools.mcp.pg.echo({ n: 1 }),
+        tools.mcp.pg.write_row({ n: 2 }),
+      ]);
+      return first.text + '/' + second.text;
+    `,
+    timeoutMs: 10_000,
+    async: false,
+    identity,
+  };
+
+  const outcome = await gateway.runScript(request);
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.match(outcome.content, /<result>echo\/write_row<\/result>/);
+
+  assert.equal(calls.length, 2);
+  const first = calls[0];
+  const second = calls[1];
+  assert.ok(first !== undefined && second !== undefined);
+  const firstEnd = first.endedAt;
+  const secondEnd = second.endedAt;
+  assert.ok(firstEnd !== undefined && secondEnd !== undefined);
+  assert.ok(
+    second.startedAt < firstEnd,
+    `the second call must start before the first ends: ${JSON.stringify(calls)}`,
+  );
+  const span = Math.max(firstEnd, secondEnd) - first.startedAt;
+  assert.ok(span < delayMs * 2, `overlapping calls spanned ${span}ms, serial would be ~${delayMs * 2}ms`);
+});

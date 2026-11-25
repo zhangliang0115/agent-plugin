@@ -5,6 +5,7 @@
  * - `PATCH /tools/:serverId/:name` — description/enabled/concurrency/tags/type/category
  * - `POST /tools/batch` — one transaction, one revision bump
  * - `GET /search` — same retriever as `search_tools`, optionally filtered by a binding
+ * - `POST /tools/:serverId/:name/test` — real one-off call, audited but never counted as usage
  *
  * Catalog writes require `If-Match: <meta.revision>`; a mismatch is a 409
  * `REVISION_CONFLICT`. The `description` field writes `description_override`, never the
@@ -19,6 +20,7 @@ import {
   assertRevision,
   BUILTIN_SERVER_ID,
   expectBoolean,
+  expectInteger,
   expectString,
   expectStringArray,
   invalidField,
@@ -28,6 +30,7 @@ import {
   queryValue,
   rejectUnknownFields,
   requestSegments,
+  readJsonBody,
   requireObjectBody,
   type AdminHandler,
   type AdminRequest,
@@ -136,6 +139,35 @@ export interface SearchPreview {
   search(input: SearchPreviewInput): Promise<SearchPreviewResult> | SearchPreviewResult;
 }
 
+/** One real tool call requested from the admin surface; no eval or binding owns it. */
+export interface ToolTestCall {
+  serverId: string;
+  name: string;
+  args: Record<string, unknown>;
+  /** Aborted when the admin request's budget runs out. */
+  signal: AbortSignal;
+  /** Absolute epoch-ms deadline matching `signal`; the executor shortens to it. */
+  deadline: number;
+}
+
+/** Response body of `POST /tools/:serverId/:name/test`. Failures stay HTTP 200. */
+export interface ToolTestResult {
+  ok: boolean;
+  /** Raw tool value; omitted when the serialized result exceeded the preview budget. */
+  result?: unknown;
+  /** Unified failure code: `TOOL_TEST_TIMEOUT` or `TOOL_CALL_FAILED`. */
+  error?: { code: string; message: string };
+  durationMs: number;
+  /** ISO 8601 start time of the call. */
+  testedAt: string;
+  /** UTF-8 bytes of `JSON.stringify(result)`, present on success only. */
+  resultBytes?: number;
+  /** `true` when `result` was replaced by `resultPreview`. */
+  truncated?: boolean;
+  /** First {@link TOOL_TEST_RESULT_LIMIT_BYTES} UTF-8 bytes of the serialized result. */
+  resultPreview?: string;
+}
+
 export interface AdminToolsDeps {
   servers: ServerStore;
   tools: ToolStore;
@@ -145,6 +177,14 @@ export interface AdminToolsDeps {
    * `ensure()` before listing; without it the route only reads stored rows.
    */
   official?: OfficialToolsSync;
+  /**
+   * Runs a real tool call for the admin test route. Wired to the same transport
+   * the gateway uses, but outside the gateway: no `tool_result` is emitted, so
+   * `tool_usage` keeps counting model/script calls only. Absent means 503.
+   */
+  testTool?: (call: ToolTestCall) => Promise<unknown>;
+  /** Audit sink; the handler emits one `tool_test` event per executed call. */
+  audit?: (event: Record<string, unknown> & { event: string }) => void;
 }
 
 const TOOL_PATCH_FIELDS: ReadonlySet<string> = new Set([
@@ -158,6 +198,123 @@ const TOOL_PATCH_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 const CONCURRENCY_VALUES: ReadonlySet<string> = new Set(['parallel', 'serial', 'exclusive']);
+
+/** Admin test defaults and hard ceiling; the request must never hang past the latter. */
+const TOOL_TEST_DEFAULT_TIMEOUT_MS = 10_000;
+const TOOL_TEST_MAX_TIMEOUT_MS = 60_000;
+/** Larger results are previewed instead of returned: base64 media would blow up the page. */
+const TOOL_TEST_RESULT_LIMIT_BYTES = 1024 * 1024;
+
+const TOOL_TEST_FIELDS: ReadonlySet<string> = new Set(['args', 'timeoutMs']);
+
+/** Raised by our own deadline; the pool's `MCP_CALL_TIMEOUT` means the same thing. */
+class ToolTestTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`tool test timed out after ${timeoutMs}ms`);
+    this.name = 'ToolTestTimeoutError';
+  }
+}
+
+function parseToolTestBody(request: AdminRequest): {
+  args: Record<string, unknown>;
+  timeoutMs: number;
+} {
+  const raw = readJsonBody(request);
+  const body = raw === undefined || raw === null ? {} : raw;
+  if (!isPlainObject(body)) {
+    throw new AdminApiError(400, 'INVALID_BODY', 'request body must be a JSON object');
+  }
+  rejectUnknownFields(body, TOOL_TEST_FIELDS);
+
+  let args: Record<string, unknown> = {};
+  if (body['args'] !== undefined) {
+    if (!isPlainObject(body['args'])) {
+      throw invalidField('args', 'must be a JSON object');
+    }
+    args = body['args'];
+  }
+  const timeoutMs =
+    body['timeoutMs'] === undefined
+      ? TOOL_TEST_DEFAULT_TIMEOUT_MS
+      : expectInteger(body['timeoutMs'], 'timeoutMs', {
+          min: 1,
+          max: TOOL_TEST_MAX_TIMEOUT_MS,
+        });
+  return { args, timeoutMs };
+}
+
+/**
+ * Bounds the whole call, not just the transport: a runtime that ignores the
+ * signal still cannot hold the admin request open.
+ */
+function runWithDeadline<T>(
+  run: (signal: AbortSignal, deadline: number) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const deadline = Date.now() + timeoutMs;
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new ToolTestTimeoutError(timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([run(controller.signal, deadline), expired]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+function errorMessageOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (isPlainObject(error) && typeof error['message'] === 'string') return error['message'];
+  return String(error);
+}
+
+function isTimeoutFailure(error: unknown): boolean {
+  if (error instanceof ToolTestTimeoutError) return true;
+  if (error instanceof Error && error.name === 'TimeoutError') return true;
+  if (
+    (error instanceof Error || isPlainObject(error)) &&
+    (error as { code?: unknown }).code === 'MCP_CALL_TIMEOUT'
+  ) {
+    return true;
+  }
+  return error instanceof Error && error.message.startsWith('serve request timed out:');
+}
+
+function toToolTestError(error: unknown): { code: string; message: string } {
+  return {
+    code: isTimeoutFailure(error) ? 'TOOL_TEST_TIMEOUT' : 'TOOL_CALL_FAILED',
+    message: errorMessageOf(error),
+  };
+}
+
+/** `result` can be `undefined`; serializing it as `null` keeps the byte count honest. */
+function serializeToolResult(value: unknown): { text: string; bytes: number } {
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? 'null';
+  } catch {
+    // Circular or BigInt values never come from JSON-RPC, but must not fail the response.
+    text = JSON.stringify(String(value));
+  }
+  return { text, bytes: Buffer.byteLength(text, 'utf8') };
+}
+
+/** Cuts to at most `limit` UTF-8 bytes without leaving a split code point behind. */
+function previewOf(text: string, limit: number): string {
+  const buffer = Buffer.from(text, 'utf8');
+  let end = limit;
+  let preview = buffer.toString('utf8', 0, end);
+  while (end > 0 && Buffer.byteLength(preview, 'utf8') > limit) {
+    end -= 1;
+    preview = buffer.toString('utf8', 0, end);
+  }
+  return preview;
+}
 
 function readConcurrency(value: unknown): ToolConcurrency {
   if (typeof value !== 'string' || !CONCURRENCY_VALUES.has(value)) {
@@ -505,12 +662,102 @@ export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
     return adminJson(200, body);
   }
 
+  /**
+   * One real call, deliberately outside the eval gateway: no `tool_result`, so
+   * lifetime `tool_usage` counts only model/script traffic (the `tool_test`
+   * audit event carries the admin-call history instead).
+   */
+  async function testTool(
+    serverId: string,
+    name: string,
+    request: AdminRequest,
+  ): Promise<AdminResponse> {
+    const input = parseToolTestBody(request);
+    const server = assertServerExists(await deps.servers.get(serverId), serverId);
+    assertToolExists(await deps.tools.get(serverId, name), serverId, name);
+    if (server.id === BUILTIN_SERVER_ID) {
+      throw new AdminApiError(
+        400,
+        'TOOL_TEST_UNSUPPORTED',
+        `built-in tool ${name} has no reusable pool/serve execution path`,
+        { serverId, tool: name },
+      );
+    }
+    const execute = deps.testTool;
+    if (execute === undefined) {
+      throw new AdminApiError(
+        503,
+        'TOOL_TEST_UNAVAILABLE',
+        'tool testing is not wired on this server',
+      );
+    }
+
+    const startedAt = Date.now();
+    const testedAt = new Date(startedAt).toISOString();
+    let ok = false;
+    let result: unknown;
+    let failure: { code: string; message: string } | undefined;
+    try {
+      result = await runWithDeadline(
+        (signal, deadline) =>
+          execute({ serverId, name, args: input.args, signal, deadline }),
+        input.timeoutMs,
+      );
+      ok = true;
+    } catch (error) {
+      failure = toToolTestError(error);
+    }
+    const durationMs = Date.now() - startedAt;
+
+    const body: ToolTestResult = { ok, durationMs, testedAt };
+    let resultBytes: number | undefined;
+    if (ok) {
+      const serialized = serializeToolResult(result);
+      resultBytes = serialized.bytes;
+      body.resultBytes = resultBytes;
+      if (resultBytes > TOOL_TEST_RESULT_LIMIT_BYTES) {
+        body.truncated = true;
+        body.resultPreview = previewOf(serialized.text, TOOL_TEST_RESULT_LIMIT_BYTES);
+      } else {
+        body.result = result === undefined ? null : result;
+      }
+    } else {
+      body.error = failure ?? { code: 'TOOL_CALL_FAILED', message: 'tool call failed' };
+    }
+
+    // Never raw args or results: they routinely carry secrets. Audit failures
+    // must not cost the caller its test result either.
+    try {
+      deps.audit?.({
+        event: 'tool_test',
+        server: serverId,
+        tool: name,
+        ok,
+        durationMs,
+        argsBytes: Buffer.byteLength(JSON.stringify(input.args), 'utf8'),
+        ...(resultBytes === undefined ? {} : { resultBytes }),
+        ...(failure === undefined ? {} : { error: failure }),
+      });
+    } catch {
+      // The audit runtime itself never throws; a custom sink still must not break the route.
+    }
+
+    return adminJson(200, body);
+  }
+
   return adminHandler(async (request): Promise<AdminResponse | null> => {
     const segments = requestSegments(request);
     const method = request.method.toUpperCase();
 
     if (segments.length === 2 && segments[0] === 'tools' && segments[1] === 'batch') {
       return method === 'POST' ? batchTools(request) : null;
+    }
+
+    if (segments.length === 4 && segments[0] === 'tools' && segments[3] === 'test') {
+      const serverId = segments[1];
+      const name = segments[2];
+      if (method !== 'POST' || serverId === undefined || name === undefined) return null;
+      return testTool(serverId, name, request);
     }
 
     if (segments.length === 3 && segments[0] === 'tools') {

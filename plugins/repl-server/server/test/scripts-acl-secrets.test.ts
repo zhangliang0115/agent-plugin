@@ -216,6 +216,14 @@ test('run_script returns SCRIPT_FORBIDDEN when another agent tests a draft', asy
   assert.equal(result.isError, true);
   assert.match(resultText(result), /SCRIPT_FORBIDDEN/);
 
+  const byName = (await callTool(
+    'run_script',
+    { scriptName: 'tool-acl', scriptVersion: saved.version, args: { x: 1 } },
+    outsiderFixture.ctx,
+  )) as CallToolResult;
+  assert.equal(byName.isError, true);
+  assert.match(resultText(byName), /SCRIPT_FORBIDDEN/, 'resolving by name does not bypass the draft ACL');
+
   const ownerResult = (await callTool(
     'run_script',
     { scriptId: saved.scriptId, scriptVersion: saved.version, args: { x: 1 } },

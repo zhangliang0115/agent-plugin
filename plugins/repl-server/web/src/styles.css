@@ -11,6 +11,14 @@
   --accent: #6366f1;
   --accent-soft: rgba(99, 102, 241, 0.14);
   --ok: #34d399;
+  --code-keyword: #c792ea;
+  --code-string: #9ece6a;
+  --code-number: #f78c6c;
+  --code-comment: #7f8a9e;
+  --code-title: #82aaff;
+  --code-builtin: #ffcb6b;
+  --code-attr: #89ddff;
+  --code-meta: #f07178;
 }
 
 :root[data-theme='light'] {
@@ -24,6 +32,14 @@
   --accent: #4f46e5;
   --accent-soft: rgba(99, 102, 241, 0.1);
   --ok: #059669;
+  --code-keyword: #7c3aed;
+  --code-string: #047857;
+  --code-number: #c2410c;
+  --code-comment: #6b7280;
+  --code-title: #1d4ed8;
+  --code-builtin: #b45309;
+  --code-attr: #0e7490;
+  --code-meta: #be123c;
 }
 
 * {
@@ -953,4 +969,52 @@ body {
   color: var(--text);
   white-space: pre;
   word-break: normal;
+  tab-size: 2;
+}
+
+/* highlight.js tokens: colors only; .hljs itself keeps the block's own palette. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal {
+  color: var(--code-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: var(--code-string);
+}
+
+.hljs-number {
+  color: var(--code-number);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--code-title);
+}
+
+.hljs-built_in,
+.hljs-type {
+  color: var(--code-builtin);
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--code-attr);
+}
+
+.hljs-meta,
+.hljs-deletion {
+  color: var(--code-meta);
 }

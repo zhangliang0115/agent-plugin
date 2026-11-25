@@ -4,12 +4,14 @@ import test from 'node:test';
 import {
   argsSummary,
   isRunScriptParamsPreview,
+  matchesScriptFilter,
   mergeScriptInfo,
   scriptCodeFromParams,
   scriptCodeFromRequest,
   scriptInfoFromEvent,
   scriptInfoFromEvents,
   scriptInfoFromRequest,
+  scriptNameForRequest,
 } from '../src/lib/script-info.ts';
 
 const toolCall = (name: string, args: Record<string, unknown>) => ({
@@ -41,6 +43,133 @@ test('scriptInfoFromRequest tells code runs from script runs', () => {
   );
   assert.equal(scriptInfoFromRequest(toolCall('search_tools', {})), null);
   assert.equal(scriptInfoFromRequest({ event: 'proto_in' }), null);
+});
+
+test('scriptInfoFromRequest reads scriptName and keeps a coexisting scriptId', () => {
+  // New clients address the saved script by name only.
+  assert.deepEqual(scriptInfoFromRequest(toolCall('run_script', { scriptName: '加法脚本' })), {
+    entryMode: 'script',
+    scriptId: null,
+    scriptName: '加法脚本',
+    scriptVersion: null,
+    scriptMode: null,
+    argsPreview: null,
+  });
+  // Both fields present: keep both; the name is not a replacement for the id.
+  assert.deepEqual(
+    scriptInfoFromRequest(
+      toolCall('run_script', {
+        scriptName: '加法脚本',
+        scriptId: 's_1',
+        scriptVersion: 2,
+        args: { x: 1 },
+      }),
+    ),
+    {
+      entryMode: 'script',
+      scriptId: 's_1',
+      scriptName: '加法脚本',
+      scriptVersion: 2,
+      scriptMode: null,
+      argsPreview: '{"x":1}',
+    },
+  );
+  // Legacy scriptId-only, ad-hoc code and non-run_script keep their behaviour.
+  assert.deepEqual(scriptInfoFromRequest(toolCall('run_script', { scriptId: 's_1' })), {
+    entryMode: 'script',
+    scriptId: 's_1',
+    scriptName: null,
+    scriptVersion: null,
+    scriptMode: null,
+    argsPreview: null,
+  });
+  assert.deepEqual(scriptInfoFromRequest(toolCall('run_script', { code: 'return 1' })), {
+    entryMode: 'code',
+    scriptId: null,
+    scriptName: null,
+    scriptVersion: null,
+    scriptMode: null,
+    argsPreview: null,
+  });
+  assert.equal(scriptInfoFromRequest(toolCall('search_tools', { scriptName: '加法脚本' })), null);
+});
+
+test('matchesScriptFilter matches a saved script by exact id or exact name', () => {
+  const byName = toolCall('run_script', { scriptName: '加法脚本' });
+  const byId = toolCall('run_script', { scriptId: 's_1' });
+  const both = toolCall('run_script', { scriptName: '加法脚本', scriptId: 's_1' });
+
+  assert.equal(matchesScriptFilter(byName, '加法脚本'), true);
+  assert.equal(matchesScriptFilter(byName, 's_1'), false);
+  assert.equal(matchesScriptFilter(byId, 's_1'), true);
+  assert.equal(matchesScriptFilter(byId, '加法脚本'), false);
+  assert.equal(matchesScriptFilter(both, '加法脚本'), true);
+  assert.equal(matchesScriptFilter(both, 's_1'), true);
+  assert.equal(matchesScriptFilter(both, ' 加法脚本 '), true, 'the filter is trimmed');
+  assert.equal(matchesScriptFilter(byName, '加法'), false, 'matching is exact, not a substring');
+  assert.equal(matchesScriptFilter(toolCall('run_script', { code: 'return 1' }), '加法脚本'), false);
+  assert.equal(matchesScriptFilter(toolCall('search_tools', { scriptName: '加法脚本' }), '加法脚本'), false);
+  assert.equal(matchesScriptFilter(null, '加法脚本'), false);
+  assert.equal(matchesScriptFilter(byName, ''), true, 'an empty filter keeps every row');
+  assert.equal(matchesScriptFilter(null, '   '), true);
+});
+
+test('scriptNameForRequest prefers an explicit scriptName over the names map', () => {
+  const names = new Map([['s_1', '查表名']]);
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { scriptName: '直接名' }), names), {
+    name: '直接名',
+    scriptId: null,
+  });
+  assert.deepEqual(
+    scriptNameForRequest(toolCall('run_script', { scriptName: '直接名', scriptId: 's_1' }), names),
+    { name: '直接名', scriptId: 's_1' },
+  );
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { scriptId: 's_1' }), names), {
+    name: '查表名',
+    scriptId: 's_1',
+  });
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { code: 'return 1' }), names), {
+    name: null,
+    scriptId: null,
+  });
+  assert.deepEqual(
+    scriptNameForRequest(toolCall('search_tools', { scriptName: '直接名' }), names),
+    { name: null, scriptId: null },
+  );
+});
+
+test('scriptNameForRequest maps a saved script id to its library name', () => {
+  const names = new Map([['s_1', '加法脚本']]);
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { scriptId: 's_1' }), names), {
+    name: '加法脚本',
+    scriptId: 's_1',
+  });
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { scriptId: 's_1' }), new Map()), {
+    name: null,
+    scriptId: 's_1',
+  });
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { scriptId: 's_gone' }), names), {
+    name: null,
+    scriptId: 's_gone',
+  });
+});
+
+test('scriptNameForRequest returns nulls for ad-hoc and non-run_script requests', () => {
+  const names = new Map([['s_1', '加法脚本']]);
+  assert.deepEqual(scriptNameForRequest(toolCall('run_script', { code: 'return 1' }), names), {
+    name: null,
+    scriptId: null,
+  });
+  assert.deepEqual(scriptNameForRequest(toolCall('search_tools', { scriptId: 's_1' }), names), {
+    name: null,
+    scriptId: null,
+  });
+  assert.deepEqual(scriptNameForRequest({ params: 'externalised-preview' }, names), {
+    name: null,
+    scriptId: null,
+  });
+  assert.deepEqual(scriptNameForRequest({}, names), { name: null, scriptId: null });
+  assert.deepEqual(scriptNameForRequest(null, names), { name: null, scriptId: null });
 });
 
 test('scriptInfoFromEvent reads the entry fields and the args prefix', () => {

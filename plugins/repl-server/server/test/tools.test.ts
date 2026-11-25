@@ -74,10 +74,24 @@ test('run_script description stays within the 2KB ceiling and mentions the async
   const bytes = Buffer.byteLength(tool.description, 'utf8');
   assert.ok(bytes <= 2048, `description is ${bytes} bytes`);
   assert.match(tool.description, /async/);
+  assert.match(tool.description, /scriptName/, 'saved scripts are callable by name');
+  assert.doesNotMatch(tool.description, /scriptId/, 'the system id stays out of the model surface');
   assert.match(tool.description, /wait_tasks/);
+  assert.match(tool.description, /Promise\.all/, 'independent calls point at Promise.all');
+  assert.match(tool.description, /independent calls/);
   assert.match(tool.description, /await tools\.<name>\(args\)/);
   assert.match(tool.description, /tools\.mcp\.<server>\.<tool>\(args\)/);
   assert.doesNotMatch(tool.description, /await Read\(/);
+});
+
+test('save_script and search_scripts descriptions use scriptName, never scriptId', () => {
+  for (const name of ['save_script', 'search_scripts'] as const) {
+    const tool = getToolDefinition(name);
+    assert.ok(tool !== undefined);
+    assert.match(tool.description, /scriptName/);
+    assert.doesNotMatch(tool.description, /scriptId/);
+    assert.ok(Buffer.byteLength(tool.description, 'utf8') <= 2048);
+  }
 });
 
 test('the frozen schemas match docs/protocol.md §4', () => {
@@ -85,7 +99,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     type: 'object',
     properties: {
       code: { type: 'string' },
-      scriptId: { type: 'string' },
+      scriptName: { type: 'string' },
       scriptVersion: { type: 'integer', minimum: 1 },
       args: { type: 'object' },
       activateOnSuccess: { type: 'boolean' },
@@ -140,7 +154,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     type: 'object',
     properties: {
       runId: { type: 'string' },
-      scriptId: { type: 'string' },
+      scriptName: { type: 'string' },
       baseVersion: { type: 'integer', minimum: 1 },
       mode: { type: 'string', enum: ['exact', 'parameterized'] },
       name: { type: 'string', minLength: 1, maxLength: 120 },
@@ -179,10 +193,12 @@ test('the published tool surface cannot be mutated', () => {
 });
 
 test('validateToolArguments enforces required fields, types and additionalProperties', () => {
-  assert.equal(validateToolArguments('run_script', {}).ok, true, 'code/scriptId are checked by the handler');
+  assert.equal(validateToolArguments('run_script', {}).ok, true, 'code/scriptName are checked by the handler');
   assert.match(failure('run_script', null), /must be an object/);
   assert.match(failure('run_script', []), /must be an object/);
   assert.match(failure('run_script', { code: 3 }), /code must be a string/);
+  assert.match(failure('run_script', { scriptId: 's_1' }), /does not accept the argument "scriptId"/);
+  assert.match(failure('save_script', { scriptId: 's_1' }), /does not accept the argument "scriptId"/);
   assert.match(failure('run_script', { code: 'x', extra: 1 }), /does not accept the argument "extra"/);
   assert.match(failure('run_script', { code: 'x', timeout: 0 }), /timeout must be >= 1/);
   assert.match(failure('run_script', { code: 'x', timeout: 1.5 }), /timeout must be an integer/);

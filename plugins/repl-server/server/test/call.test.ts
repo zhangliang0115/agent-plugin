@@ -238,7 +238,7 @@ test('argument validation failures are tool-layer errors', async () => {
   const h = harness();
   const missing = asCallResult(await callTool('run_script', {}, h.ctx));
   assert.equal(missing.isError, true);
-  assert.match(textOf(missing), /<error>INVALID_ARGUMENT: exactly one of code or scriptId is required/);
+  assert.match(textOf(missing), /<error>INVALID_ARGUMENT: exactly one of code or scriptName is required/);
 
   const extra = asCallResult(await callTool('run_script', { code: 'x', nope: 1 }, h.ctx));
   assert.equal(extra.isError, true);
@@ -595,4 +595,33 @@ test('discovery tools never touch the task queue', async () => {
   assert.equal(h.gateway.waitCalls.length, 0);
   assert.equal(h.gateway.runCalls.length, 0);
   assert.equal(h.gateway.dispatchCalls.length, 0);
+});
+
+test('top-level calls report usage once; failures report ok:false and unknown tools report nothing', async () => {
+  const h = harness();
+  const seen: Array<[string, boolean]> = [];
+  h.ctx.onUsage = (name, ok) => {
+    seen.push([name, ok]);
+  };
+
+  await callTool('search_tools', { query: 'query' }, h.ctx);
+  await callTool('search_tools', { max: 0 }, h.ctx);
+  await assert.rejects(callTool('does_not_exist', {}, h.ctx), UnknownToolError);
+
+  assert.deepEqual(seen, [
+    ['search_tools', true],
+    ['search_tools', false],
+  ]);
+});
+
+test('a CreateTaskResult counts as a successful top-level call', async () => {
+  const h = harness({ tasksDeclared: true });
+  const seen: Array<[string, boolean]> = [];
+  h.ctx.onUsage = (name, ok) => {
+    seen.push([name, ok]);
+  };
+
+  const result = await callTool('run_script', { code: 'x', timeout: 35_000 }, h.ctx);
+  assert.equal(isCreateTaskResult(result), true);
+  assert.deepEqual(seen, [['run_script', true]]);
 });

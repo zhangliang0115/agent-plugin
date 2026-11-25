@@ -8,6 +8,7 @@ import {
   diffFrom,
   failedRunCount,
   nextCursorFrom,
+  runHasRequestDetail,
   runsFrom,
   scanResultFrom,
   scriptDetailFrom,
@@ -102,6 +103,11 @@ test('runsFrom keeps the request/exec identifiers used to reopen the request dra
   assert.equal(redacted?.argsPreview, '{"x":"<redacted>"}');
   assert.equal(redacted?.args, undefined);
   assert.deepEqual(runsFrom({}), []);
+});
+
+test('runHasRequestDetail only depends on requestId; purpose is not an input', () => {
+  assert.equal(runHasRequestDetail({ requestId: '7' }), true);
+  assert.equal(runHasRequestDetail({ requestId: null }), false);
 });
 
 test('P2 stats are optional and tolerate a ratio or a percentage rate', () => {

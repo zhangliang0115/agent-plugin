@@ -31,14 +31,18 @@ import {
   type StreamState,
 } from '../../lib/api.ts';
 import { listOptions, mergeBindings, mergeValues } from '../../lib/filter-options.ts';
-import { formatBytes, formatDuration, formatNumber, formatTimestamp } from '../../lib/format.ts';
+import { formatBytes, formatDuration, formatId, formatNumber, formatTimestamp } from '../../lib/format.ts';
 import {
   isProtocolFrame,
   matchesDetailKeys,
   toolCallOutcome,
   type RequestDetailKeys,
 } from '../../lib/request-detail.ts';
-import { scriptInfoFromRequest } from '../../lib/script-info.ts';
+import {
+  matchesScriptFilter,
+  scriptNameForRequest,
+} from '../../lib/script-info.ts';
+import { scriptsFrom } from '../../lib/script-api.ts';
 
 const { Text } = Typography;
 
@@ -131,6 +135,8 @@ export function RequestsPage(): React.ReactElement {
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  /** Library script names by id; empty when `/scripts` is unavailable, cells fall back to the id. */
+  const [scriptNames, setScriptNames] = useState<ReadonlyMap<string, string>>(new Map());
 
   const filtersRef = useRef(filters);
   const reloadTimerRef = useRef<number | null>(null);
@@ -159,6 +165,28 @@ export function RequestsPage(): React.ReactElement {
       })
       .catch(() => {
         // Dropdowns still fill from the frames that load below.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let alive = true;
+    // One page is the server cap (GET /scripts: limit <= 200); scripts beyond it
+    // fall back to showing the id. Follow nextCursor if the library outgrows it.
+    void api
+      .get<unknown>('/scripts', { query: new URLSearchParams({ limit: '200' }) })
+      .then((response) => {
+        if (!alive) return;
+        const names = new Map<string, string>();
+        for (const script of scriptsFrom(response)) {
+          if (script.name !== null) names.set(script.scriptId, script.name);
+        }
+        setScriptNames(names);
+      })
+      .catch(() => {
+        // Names only decorate the table; the script column degrades to the id.
       });
     return () => {
       alive = false;
@@ -361,6 +389,13 @@ export function RequestsPage(): React.ReactElement {
       render: (_value, pair) => <span className="mono">{requestToolName(pair) ?? '—'}</span>,
     },
     {
+      title: '脚本',
+      key: 'script',
+      width: 160,
+      ellipsis: true,
+      render: (_value, pair) => <ScriptCell pair={pair} names={scriptNames} />,
+    },
+    {
       title: '协议状态',
       key: 'status',
       width: 104,
@@ -404,12 +439,10 @@ export function RequestsPage(): React.ReactElement {
   ];
 
   const notice = frames === null ? null : framesTruncatedNotice(frames);
-  // The frames endpoint has no scriptId filter yet; narrow the loaded page locally.
+  // The frames endpoint has no script filter yet; narrow the loaded page locally by id or name.
   const visibleFrames = useMemo(() => {
     const list = frames?.frames ?? [];
-    const wanted = filters.scriptId.trim();
-    if (wanted === '') return list;
-    return list.filter((pair) => scriptInfoFromRequest(pair.request)?.scriptId === wanted);
+    return list.filter((pair) => matchesScriptFilter(pair.request, filters.scriptId));
   }, [frames, filters.scriptId]);
   const summary =
     frames === null
@@ -505,7 +538,7 @@ export function RequestsPage(): React.ReactElement {
           />
           <Input
             allowClear
-            placeholder="脚本 ID（本地过滤）"
+            placeholder="脚本名称 / ID（本地过滤）"
             style={{ width: 200 }}
             value={filters.scriptId}
             onChange={(event) => setFilters({ ...filters, scriptId: event.target.value })}
@@ -549,14 +582,14 @@ export function RequestsPage(): React.ReactElement {
           columns={columns}
           loading={loading}
           pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
-          scroll={{ x: 1_200 }}
+          scroll={{ x: 'max-content' }}
           onRow={(pair) => ({
             className: selected === pair ? 'row-clickable row-selected' : 'row-clickable',
             onClick: () => void openRequest(pair),
           })}
           locale={{
             emptyText: (
-              <Empty description="没有匹配的请求。放宽时间范围、清空脚本 ID，或确认服务端已在 full 帧模式重启。" />
+              <Empty description="没有匹配的请求。放宽时间范围、清空脚本名称/ID，或确认服务端已在 full 帧模式重启。" />
             ),
           }}
         />
@@ -598,6 +631,26 @@ function ExecutionResultCell({ pair }: { pair: ProtocolFramePair }): React.React
       {outcome.code === undefined ? null : <span className="mono muted">{outcome.code}</span>}
     </span>
   );
+}
+
+/** Library name of a saved script; falls back to the raw id, `—` for ad-hoc code runs. */
+function ScriptCell({
+  pair,
+  names,
+}: {
+  pair: ProtocolFramePair;
+  names: ReadonlyMap<string, string>;
+}): React.ReactElement {
+  const script = scriptNameForRequest(pair.request, names);
+  if (script.name === null && script.scriptId === null) return <span className="muted">—</span>;
+  if (script.name === null) {
+    return (
+      <span className="mono muted" title={script.scriptId ?? undefined}>
+        {formatId(script.scriptId, 18)}
+      </span>
+    );
+  }
+  return <span title={script.scriptId ?? script.name}>{script.name}</span>;
 }
 
 /** `params.name` of a `tools/call` request; other methods have no tool. */

@@ -345,6 +345,8 @@ export function DiscoverPage(): React.ReactElement {
           columns={columns}
           pagination={false}
           loading={scanning}
+          // Long command lines wrap in auto layout; `max-content` measured 1 648–2 121px
+          // and always forced a scrollbar, while 860 fills the container at 1725px.
           scroll={{ x: 860 }}
           rowSelection={{
             selectedRowKeys: items.filter((item) => selected.has(item.id)).map((item) => item.id),

@@ -385,6 +385,8 @@ export function ScriptCandidates({
         dataSource={candidates}
         columns={columns}
         pagination={false}
+        // Suggested descriptions are unbounded text; keep a measured minimum instead of
+        // letting `max-content` widen the table by the longest description.
         scroll={{ x: 1_300 }}
         locale={{
           emptyText: (

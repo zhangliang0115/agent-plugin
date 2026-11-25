@@ -1,7 +1,8 @@
 /** Admin API for client bindings and locally stored tokens.
  *
  * Routes:
- * - `GET /clients` — bindings (never tokens) plus active MCP sessions
+ * - `GET /clients` — bindings (never tokens), every live transport session and
+ *   15-minute `activeSessions` counts (`activeWindowMs` is echoed for the UI)
  * - `POST /clients` — create a binding; the plaintext token is in the response
  * - `GET /clients/:id/token` — read the stored plaintext token (`404 CLIENT_TOKEN_UNAVAILABLE` before v6)
  * - `POST /clients/:id/token` — rotate the token, invalidating the old one immediately
@@ -31,6 +32,9 @@ import {
   type AdminRequest,
   type AdminResponse,
 } from './servers.ts';
+
+/** A transport session counts as active for this long after its last request (display only). */
+export const ACTIVE_SESSION_WINDOW_MS = 15 * 60_000;
 
 /** Per-binding quotas from 03 §2.6; absent keys fall back to the global defaults. */
 export const CLIENT_QUOTA_KEYS = [
@@ -201,6 +205,17 @@ function generateToken(factory: (() => string) | undefined): string {
   return token;
 }
 
+/**
+ * Active for display: last request within the window, falling back to connect time when the
+ * request stamp is missing. Sessions with neither timestamp stay inactive.
+ */
+function isActiveSession(session: McpSessionRecord, now: number): boolean {
+  const stamp = session.lastRequestAt ?? session.connectedAt;
+  if (stamp === undefined) return false;
+  const at = Date.parse(stamp);
+  return Number.isFinite(at) && now - at <= ACTIVE_SESSION_WINDOW_MS;
+}
+
 /** `client_bindings.token_hash` matches the auth layer's SHA-256 encoding. */
 
 /**
@@ -277,8 +292,9 @@ export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler 
     ]);
 
     const counts = new Map<string, number>();
+    const now = Date.now();
     for (const session of sessions) {
-      if (session.bindingId === null) continue;
+      if (session.bindingId === null || !isActiveSession(session, now)) continue;
       counts.set(session.bindingId, (counts.get(session.bindingId) ?? 0) + 1);
     }
 
@@ -287,7 +303,9 @@ export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler 
         ...publicBinding(binding),
         activeSessions: counts.get(binding.id) ?? 0,
       })),
+      // The unpruned list stays available for troubleshooting; `activeSessions` uses the window.
       sessions: sessions.map(publicSession),
+      activeWindowMs: ACTIVE_SESSION_WINDOW_MS,
     });
   }
 

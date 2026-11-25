@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { assemble, type AssemblyOptions } from '../src/assembly.ts';
 import { createClientBinding } from '../src/db/clients.ts';
 import { getRevision } from '../src/db/meta.ts';
-import { createServer } from '../src/db/servers.ts';
+import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID, createServer } from '../src/db/servers.ts';
 import { upsertTool, getTool } from '../src/db/tools.ts';
 import { searchTools as searchSnapshot } from '../src/tools/search.ts';
 
@@ -243,6 +243,126 @@ test('tool_result events accumulate lifetime usage; denied calls do not', async 
   assert.ok(usage);
   assert.equal(usage.callCount, 2, 'tool_denied must not count');
   assert.equal(usage.successCount, 1);
+});
+
+test('admin tool test reuses the gateway transport without counting usage', async (t) => {
+  await withEnv({ REPL_ADMIN_TOKEN: ADMIN_TOKEN }, async () => {
+    const calls: Array<{ server?: string; tool: string; args: Record<string, unknown> }> = [];
+    const app = await start({
+      callTool: async (call) => {
+        calls.push(call);
+        if (call.tool === 'broken') throw new Error('boom');
+        return { echoed: call.args };
+      },
+    });
+    t.after(app.close);
+
+    createServer(app.assembly.db, { id: 'fake', label: 'Fake', transport: 'stdio', command: 'node' });
+    upsertTool(app.assembly.db, 'fake', {
+      name: 'query',
+      inputSchema: { type: 'object', properties: {} },
+    });
+    upsertTool(app.assembly.db, 'fake', {
+      name: 'broken',
+      inputSchema: { type: 'object', properties: {} },
+    });
+    app.assembly.catalog.refreshServer('fake');
+
+    const post = async (path: string, body: unknown) =>
+      await fetch(`${app.base}/admin/api${path}`, {
+        method: 'POST',
+        headers: adminHeaders({ 'content-type': 'application/json' }),
+        body: JSON.stringify(body),
+      });
+
+    const response = await post('/tools/fake/query/test', {
+      args: { sql: 'select 1' },
+      timeoutMs: 5_000,
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      result: unknown;
+      resultBytes: number;
+      durationMs: number;
+      testedAt: string;
+    };
+    assert.equal(body.ok, true);
+    assert.deepEqual(body.result, { echoed: { sql: 'select 1' } });
+    assert.ok(body.resultBytes > 0);
+    assert.ok(body.durationMs >= 0);
+    assert.ok(!Number.isNaN(Date.parse(body.testedAt)));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.server, 'fake');
+    assert.equal(calls[0]?.tool, 'query');
+
+    // The admin test never goes through an eval's `tool_result`, so lifetime
+    // usage (and the model-visible counters) stay untouched.
+    const usage = getTool(app.assembly.db, 'fake', 'query');
+    assert.ok(usage);
+    assert.equal(usage.callCount, 0);
+    assert.equal(usage.successCount, 0);
+    assert.equal(usage.lastCalledAt, null);
+
+    const failed = await post('/tools/fake/broken/test', {});
+    assert.equal(failed.status, 200, 'tool failures stay HTTP 200');
+    const failedBody = (await failed.json()) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    assert.equal(failedBody.ok, false);
+    assert.equal(failedBody.error.code, 'TOOL_CALL_FAILED');
+    assert.equal(failedBody.error.message, 'boom');
+    const failedUsage = getTool(app.assembly.db, 'fake', 'broken');
+    assert.ok(failedUsage);
+    assert.equal(failedUsage.callCount, 0);
+
+    const builtin = await post('/tools/__builtin__/search_tools/test', {});
+    assert.equal(builtin.status, 400);
+    const builtinBody = (await builtin.json()) as { error: { code: string } };
+    assert.equal(builtinBody.error.code, 'TOOL_TEST_UNSUPPORTED');
+
+    // `__official__` tools are bare: the call reaches the serve transport with
+    // no `server`, exactly like a model call through the gateway.
+    upsertTool(app.assembly.db, OFFICIAL_SERVER_ID, {
+      name: 'Read',
+      inputSchema: { type: 'object', properties: {} },
+    });
+    const official = await post('/tools/__official__/Read/test', {
+      args: { file_path: '/tmp/x' },
+    });
+    assert.equal(official.status, 200);
+    const officialBody = (await official.json()) as { ok: boolean; result: unknown };
+    assert.equal(officialBody.ok, true);
+    const officialCall = calls.at(-1);
+    assert.equal(officialCall?.server, undefined);
+    assert.equal(officialCall?.tool, 'Read');
+    assert.deepEqual(officialBody.result, { echoed: { file_path: '/tmp/x' } });
+  });
+});
+
+test('top-level builtin calls accumulate lifetime usage under __builtin__', async (t) => {
+  const app = await start();
+  t.after(app.close);
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  const call = async (id: number, name: string, args: Record<string, unknown>) =>
+    await rpc(
+      app.base,
+      { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } },
+      session,
+    );
+
+  await call(2, 'search_tools', { query: 'sql' });
+  const failed = await call(3, 'search_tools', { max: 0 });
+  const body = (await failed.json()) as { result: { isError: boolean } };
+  assert.equal(body.result.isError, true);
+
+  const usage = getTool(app.assembly.db, BUILTIN_SERVER_ID, 'search_tools');
+  assert.ok(usage);
+  assert.equal(usage.callCount, 2);
+  assert.equal(usage.successCount, 1, 'an isError result still counts as a call');
+  assert.ok(usage.lastCalledAt !== null);
 });
 
 test('run_script reports the user line for a syntax error', async (t) => {

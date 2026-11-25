@@ -931,7 +931,7 @@ export function ServersPage(): React.ReactElement {
           dataSource={filtered}
           columns={columns}
           pagination={false}
-          scroll={{ x: 1220 }}
+          scroll={{ x: 'max-content' }}
           rowClassName="row-clickable"
           onRow={(record) => ({
             onClick: () => {

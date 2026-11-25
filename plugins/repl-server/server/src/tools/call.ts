@@ -45,6 +45,11 @@ export interface ToolCallContext {
   scripts?: ScriptService;
   /** Audit sink for top-level tool events without an eval (`script_saved`). */
   audit?: (event: Record<string, unknown> & { event: string }) => void;
+  /**
+   * Counts this top-level `tools/call` only. Tool calls made inside a script are
+   * counted by the gateway's `tool_result` audit path, so this must not be fed from there.
+   */
+  onUsage?: (name: string, ok: boolean) => void;
 }
 
 export type ToolCallResponse = CallToolResult | CreateTaskResult;
@@ -62,7 +67,7 @@ export class UnknownToolError extends JsonRpcError {
 
 interface RunScriptArguments {
   code?: string;
-  scriptId?: string;
+  scriptName?: string;
   scriptVersion?: number;
   args?: Record<string, unknown>;
   activateOnSuccess?: boolean;
@@ -73,6 +78,8 @@ interface RunScriptArguments {
   excludeTags?: string[];
 }
 
+type SaveScriptArguments = Omit<SaveScriptInput, 'scriptId'> & { scriptName?: string };
+
 interface SearchScriptsArguments {
   query?: string;
   tags?: string[];
@@ -82,6 +89,29 @@ interface SearchScriptsArguments {
 interface WaitTasksArguments {
   taskIds: string[];
   timeoutMs?: number;
+}
+
+interface LegacyScriptIdSplit {
+  /** The arguments minus any legacy `scriptId`, ready for schema validation. */
+  readonly value: unknown;
+  readonly scriptId?: string;
+  readonly error?: string;
+}
+
+/**
+ * `scriptId` is a system-generated id and is absent from the published schemas,
+ * but old clients still send it. Splitting it off before validation keeps those
+ * calls working without advertising the field to models.
+ */
+function splitLegacyScriptId(input: unknown): LegacyScriptIdSplit {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { value: input };
+  const record = input as Record<string, unknown>;
+  if (!Object.hasOwn(record, 'scriptId')) return { value: input };
+  const { scriptId, ...value } = record;
+  if (typeof scriptId !== 'string' || scriptId === '') {
+    return { value, error: 'scriptId is a legacy alias and must be a non-empty string' };
+  }
+  return { value, scriptId };
 }
 
 function escapeXml(text: string): string {
@@ -164,23 +194,40 @@ function scriptFailure(error: unknown): CallToolResult {
   return toolFailure(errorCode(error), errorMessage(error));
 }
 
+/** Name-based calls must not echo the system id back to the model. */
+function replaceScriptId(error: unknown, scriptId: string, scriptName: string): unknown {
+  if (!(error instanceof ScriptError)) return error;
+  return new ScriptError(
+    error.code,
+    error.message.replaceAll(scriptId, JSON.stringify(scriptName)),
+    error.details,
+  );
+}
+
 async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<ToolCallResponse> {
-  const validation = validateToolArguments('run_script', input);
+  const legacy = splitLegacyScriptId(input);
+  if (legacy.error !== undefined) return runScriptFailure('INVALID_ARGUMENT', legacy.error);
+  const validation = validateToolArguments('run_script', legacy.value);
   if (!validation.ok) return runScriptFailure(validation.code, validation.message);
 
   const args = validation.value as unknown as RunScriptArguments;
   const hasCode = typeof args.code === 'string';
-  const hasScript = typeof args.scriptId === 'string' && args.scriptId !== '';
-  if (hasCode === hasScript) {
+  const hasId = legacy.scriptId !== undefined;
+  const hasName = typeof args.scriptName === 'string' && args.scriptName !== '';
+  if (hasId && hasName) {
+    return runScriptFailure('INVALID_ARGUMENT', 'scriptId is a legacy alias; pass only scriptName');
+  }
+  const hasScript = hasId || hasName;
+  if ([hasCode, hasScript].filter((present) => present).length !== 1) {
     return runScriptFailure(
       'INVALID_ARGUMENT',
-      'exactly one of code or scriptId is required',
+      'exactly one of code or scriptName is required',
     );
   }
   if (!hasScript && (args.args !== undefined || args.scriptVersion !== undefined || args.activateOnSuccess !== undefined)) {
     return runScriptFailure(
       'INVALID_ARGUMENT',
-      'args, scriptVersion and activateOnSuccess require scriptId',
+      'args, scriptVersion and activateOnSuccess require scriptName',
     );
   }
 
@@ -198,18 +245,29 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
     if (ctx.scripts === undefined) {
       return runScriptFailure('MCP_SERVER_UNAVAILABLE', 'the script library is not wired');
     }
+    let scriptId = legacy.scriptId ?? '';
+    if (hasName) {
+      const name = args.scriptName as string;
+      const found = ctx.scripts.resolveIdByName(name);
+      if (found === null) {
+        return runScriptFailure('SCRIPT_NOT_FOUND', `script named ${JSON.stringify(name)} was not found`);
+      }
+      scriptId = found;
+    }
     let resolved;
     try {
       resolved = ctx.scripts.resolveExecution(
         {
-          scriptId: args.scriptId as string,
+          scriptId,
           ...(args.scriptVersion === undefined ? {} : { scriptVersion: args.scriptVersion }),
           ...(args.args === undefined ? {} : { args: args.args }),
         },
         { actor },
       );
     } catch (error) {
-      return failureFromError(error);
+      return failureFromError(
+        hasName ? replaceScriptId(error, scriptId, args.scriptName as string) : error,
+      );
     }
     if (args.activateOnSuccess === true) {
       // The target must still be a draft before dispatch; the settle-time archive
@@ -217,7 +275,7 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
       if (resolved.version.status !== 'draft') {
         return runScriptFailure(
           'SCRIPT_VERSION_NOT_DRAFT',
-          `script ${resolved.script.scriptId} version ${resolved.version.version} is not a draft`,
+          `script ${JSON.stringify(resolved.script.name)} version ${resolved.version.version} is not a draft`,
         );
       }
       activateOnSuccess = true;
@@ -266,16 +324,34 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
 }
 
 async function saveScriptCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
-  const validation = validateToolArguments('save_script', input);
+  const legacy = splitLegacyScriptId(input);
+  if (legacy.error !== undefined) return toolFailure('INVALID_ARGUMENT', legacy.error);
+  const validation = validateToolArguments('save_script', legacy.value);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
   if (ctx.scripts === undefined) {
     return toolFailure('MCP_SERVER_UNAVAILABLE', 'the script library is not wired');
   }
-  const args = validation.value as unknown as SaveScriptInput;
+  const { scriptName, ...args } = validation.value as unknown as SaveScriptArguments;
+  const hasName = typeof scriptName === 'string' && scriptName !== '';
+  if (scriptName !== undefined && !hasName) {
+    return toolFailure('INVALID_ARGUMENT', 'save_script.scriptName must be a non-empty string');
+  }
+  if (legacy.scriptId !== undefined && hasName) {
+    return toolFailure('INVALID_ARGUMENT', 'scriptId is a legacy alias; pass only scriptName');
+  }
+  let scriptId = legacy.scriptId;
+  if (hasName) {
+    const found = ctx.scripts.resolveIdByName(scriptName as string);
+    if (found === null) {
+      return toolFailure('SCRIPT_NOT_FOUND', `script named ${JSON.stringify(scriptName)} was not found`);
+    }
+    scriptId = found;
+  }
+  const saveInput: SaveScriptInput = scriptId === undefined ? args : { ...args, scriptId };
   try {
     const result = ctx.scripts.save(
       { createdBy: ctx.identity.binding ?? ctx.identity.mcp },
-      args,
+      saveInput,
     );
     ctx.audit?.({
       event: 'script_saved',
@@ -283,23 +359,37 @@ async function saveScriptCall(input: unknown, ctx: ToolCallContext): Promise<Cal
       scriptId: result.scriptId,
       version: result.version,
       mode: result.mode,
-      name: args.name ?? null,
+      name: result.name,
       sourceRunId: args.runId ?? null,
       status: result.status,
       activeVersion: result.activeVersion,
       warnings: result.warnings,
     });
-    return jsonResult(result, false);
+    return jsonResult(
+      {
+        scriptName: result.name,
+        version: result.version,
+        status: result.status,
+        activeVersion: result.activeVersion,
+        mode: result.mode,
+        warnings: result.warnings,
+      },
+      false,
+    );
   } catch (error) {
     ctx.audit?.({
       event: 'script_saved',
       ok: false,
-      scriptId: args.scriptId ?? null,
+      scriptId: scriptId ?? null,
       name: args.name ?? null,
       sourceRunId: args.runId ?? null,
       error: { code: errorCode(error), message: errorMessage(error) },
     });
-    return scriptFailure(error);
+    return scriptFailure(
+      hasName && scriptId !== undefined
+        ? replaceScriptId(error, scriptId, scriptName as string)
+        : error,
+    );
   }
 }
 
@@ -316,7 +406,11 @@ async function searchScriptsCall(input: unknown, ctx: ToolCallContext): Promise<
       ...(args.tags === undefined ? {} : { tags: args.tags }),
       ...(args.limit === undefined ? {} : { limit: args.limit }),
     });
-    return jsonResult({ scripts: items }, false);
+    const scripts = items.map(({ scriptId: _scriptId, name, ...rest }) => ({
+      scriptName: name,
+      ...rest,
+    }));
+    return jsonResult({ scripts }, false);
   } catch (error) {
     return scriptFailure(error);
   }
@@ -395,22 +489,33 @@ export async function callTool(
 ): Promise<ToolCallResponse> {
   // MCP makes `arguments` optional; tools with required fields reject the empty object in validation.
   const args = input === undefined ? {} : input;
+  let response: ToolCallResponse;
   switch (name) {
     case 'run_script':
-      return runScriptCall(args, ctx);
+      response = await runScriptCall(args, ctx);
+      break;
     case 'search_tools':
-      return searchToolsCall(args, ctx);
+      response = await searchToolsCall(args, ctx);
+      break;
     case 'describe_tools':
-      return describeToolsCall(args, ctx);
+      response = await describeToolsCall(args, ctx);
+      break;
     case 'wait_tasks':
-      return waitTasksCall(args, ctx);
+      response = await waitTasksCall(args, ctx);
+      break;
     case 'report_problem':
-      return reportProblemCall(args, ctx);
+      response = await reportProblemCall(args, ctx);
+      break;
     case 'save_script':
-      return saveScriptCall(args, ctx);
+      response = await saveScriptCall(args, ctx);
+      break;
     case 'search_scripts':
-      return searchScriptsCall(args, ctx);
+      response = await searchScriptsCall(args, ctx);
+      break;
     default:
       throw new UnknownToolError(name);
   }
+  // A task result means the dispatch was accepted; its outcome arrives via wait_tasks.
+  ctx.onUsage?.(name, response.resultType === 'task' || response.isError !== true);
+  return response;
 }

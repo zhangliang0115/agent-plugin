@@ -63,12 +63,12 @@ function deepFreeze<T>(value: T): T {
  * The visible MCP server list is appended per request by
  * `buildRunScriptDescription`, so no server or built-in example is hardcoded here.
  */
-export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch tool calls and return only what the answer needs.
+export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch independent calls with Promise.all; return only what the answer needs.
 
 - Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
 - Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
 - Pass async: true for long jobs, then collect the task with wait_tasks.
-- Instead of code, pass scriptId (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
+- Instead of code, pass scriptName (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
 - Results carry a run="<id>" attribute; save_script turns a successful run into a reusable script.
 - visibleTools and excludeTags narrow this call only; they cannot widen access.
 - Results: official tool JSON is parsed automatically; MCP tools return { text, images?, documents? } with raw text, so call JSON.parse(result.text) when the payload is JSON.
@@ -87,16 +87,16 @@ const REPORT_PROBLEM_DESCRIPTION =
   'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
 
 const SAVE_SCRIPT_DESCRIPTION =
-  'Save a successful run_script execution as a reusable script, or update an existing one. Pass runId plus mode=exact to store that run\'s code as an active zero-argument script. Pass mode=parameterized with rewritten code and an inputSchema to store a draft; test it with run_script({ scriptId, scriptVersion, args }) and activate on success. With scriptId, name/description/tags update in place; code, inputSchema or mode changes need baseVersion and append a draft.';
+  'Save a successful run_script execution as a reusable script, or update an existing one. Pass runId plus mode=exact to store that run\'s code as an active zero-argument script. Pass mode=parameterized with rewritten code and an inputSchema to store a draft; test it with run_script({ scriptName, scriptVersion, args }) and activate on success. With scriptName, the existing script\'s name/description/tags update in place; code, inputSchema or mode changes need baseVersion and append a draft.';
 
 const SEARCH_SCRIPTS_DESCRIPTION =
-  'Find saved scripts in the global library. Returns each script\'s scriptId, active version, inputSchema and exampleArgs; execute one with run_script({ scriptId, args }). Only active scripts are returned. Use save_script to create or update.';
+  'Find saved scripts in the global library. Returns each script\'s scriptName, active version, inputSchema and exampleArgs; execute one with run_script({ scriptName, args }). Only active scripts are returned. Use save_script to create or update.';
 
 const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
     code: { type: 'string' },
-    scriptId: { type: 'string' },
+    scriptName: { type: 'string' },
     scriptVersion: { type: 'integer', minimum: 1 },
     args: { type: 'object' },
     activateOnSuccess: { type: 'boolean' },
@@ -157,7 +157,7 @@ const SAVE_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
     runId: { type: 'string' },
-    scriptId: { type: 'string' },
+    scriptName: { type: 'string' },
     baseVersion: { type: 'integer', minimum: 1 },
     mode: { type: 'string', enum: ['exact', 'parameterized'] },
     name: { type: 'string', minLength: 1, maxLength: 120 },

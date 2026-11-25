@@ -264,6 +264,15 @@ export function runsFrom(payload: unknown): ScriptRun[] {
 }
 
 /**
+ * Only runs with an MCP `requestId` can open the shared request drawer; test
+ * runs are invoked by the admin API and have none. `purpose` picks the message,
+ * never clickability, so it is deliberately absent from the input type.
+ */
+export function runHasRequestDetail(run: Pick<ScriptRun, 'requestId'>): boolean {
+  return run.requestId !== null;
+}
+
+/**
  * P2 aggregates are optional. `successRate` may arrive as a `0..1` ratio or a
  * `0..100` percentage; anything outside both ranges is treated as missing.
  */

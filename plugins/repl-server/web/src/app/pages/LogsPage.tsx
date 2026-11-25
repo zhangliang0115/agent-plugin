@@ -1090,6 +1090,8 @@ export function LogsPage(): React.ReactElement {
             onChange: (next) => setPage(next),
             showTotal: (total) => `共 ${formatNumber(total)} 条`,
           }}
+          // A fixed header with `x: 'max-content'` measured a 1 434px header over a
+          // 1 373px body, shifting every header after 服务端; keep the numeric width.
           scroll={{ x: 1_000, y: 520 }}
           onRow={(record) => ({
             onClick: () => openEvent(record),

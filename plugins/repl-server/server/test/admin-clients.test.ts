@@ -121,6 +121,7 @@ function setup(options: { token?: string; tokens?: string[]; callbackResult?: nu
   const store = new MemoryBindingStore();
   const changes: Array<[string, BindingChange]> = [];
   const callbackState: { error: Error | null } = { error: null };
+  const now = Date.now();
   const sessions: McpSessionRecord[] = [
     {
       mcpSessionId: 'mcp_1',
@@ -128,7 +129,7 @@ function setup(options: { token?: string; tokens?: string[]; callbackResult?: nu
       client: 'claude-code/2.1.327',
       clientName: 'claude-code',
       clientVersion: '2.1.327',
-      lastRequestAt: '2026-11-18T00:00:00.000Z',
+      lastRequestAt: new Date(now - 60_000).toISOString(),
     },
     {
       mcpSessionId: 'mcp_2',
@@ -143,6 +144,7 @@ function setup(options: { token?: string; tokens?: string[]; callbackResult?: nu
       client: 'other/1.0',
       clientName: 'other',
       clientVersion: '1.0',
+      connectedAt: new Date(now - 5 * 60_000).toISOString(),
       execSessionIds: ['es_1'],
     },
   ];
@@ -256,6 +258,7 @@ test('GET /clients returns bindings, active sessions and per-binding counts', as
   assert.equal(response.status, 200);
   const body = bodyOf(response);
 
+  assert.equal(body['activeWindowMs'], 15 * 60_000);
   const clients = body['clients'] as Record<string, unknown>[];
   assert.equal(clients.length, 1);
   assert.equal(clients[0]!['activeSessions'], 2);
@@ -269,6 +272,54 @@ test('GET /clients returns bindings, active sessions and per-binding counts', as
   assert.deepEqual(sessions[2]!['execSessionIds'], ['es_1']);
   assert.equal(sessions[0]!['clientName'], 'claude-code');
   assert.equal(sessions[0]!['clientVersion'], '2.1.327');
+});
+
+test('GET /clients counts only sessions active in the last 15 minutes', async () => {
+  const { handler, sessions } = setup();
+  await call(handler, makeRequest('POST', '/clients', { label: 'work' }));
+  const now = Date.now();
+  sessions.length = 0;
+  sessions.push(
+    {
+      mcpSessionId: 'fresh',
+      bindingId: 'cb_1',
+      client: 'a/1',
+      clientName: 'a',
+      clientVersion: '1',
+      lastRequestAt: new Date(now - 14 * 60_000).toISOString(),
+    },
+    {
+      mcpSessionId: 'stale',
+      bindingId: 'cb_1',
+      client: 'b/1',
+      clientName: 'b',
+      clientVersion: '1',
+      // Older than the window but still inside the 60-minute transport TTL.
+      lastRequestAt: new Date(now - 45 * 60_000).toISOString(),
+    },
+    {
+      mcpSessionId: 'no-stamps',
+      bindingId: 'cb_1',
+      client: 'c/1',
+      clientName: 'c',
+      clientVersion: '1',
+    },
+    {
+      mcpSessionId: 'bad-stamp',
+      bindingId: 'cb_1',
+      client: 'd/1',
+      clientName: 'd',
+      clientVersion: '1',
+      lastRequestAt: 'not-a-date',
+    },
+  );
+
+  const response = await call(handler, makeRequest('GET', '/clients'));
+  const body = bodyOf(response);
+  const clients = body['clients'] as Record<string, unknown>[];
+  assert.equal(clients[0]!['activeSessions'], 1, 'only the fresh session is active');
+  const listed = body['sessions'] as Record<string, unknown>[];
+  assert.equal(listed.length, 4, 'all transport sessions stay listed for troubleshooting');
 });
 
 test('PUT /clients/:id updates the binding and destroys its execution sessions', async () => {

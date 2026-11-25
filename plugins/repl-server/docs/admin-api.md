@@ -44,13 +44,14 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | GET | `/servers/:id/tools` | 工具列表（上游 + 生效值） | 同步 |
 | POST | `/servers/:id/tools/discover` | 扫描懒加载工具；`preview=true`（默认）只预览，`false` 应用 | 同步，最长 30s |
 | PATCH | `/tools/:serverId/:name` | 改描述/启停/并发/标签/类型 | 同步，下次 eval 生效 |
+| POST | `/tools/:serverId/:name/test` | 真实调用一次工具，返回结果并写 `tool_test` 审计；不计入 `tool_usage` | 同步，受 `timeoutMs` 限制（默认 10s，上限 60s） |
 | POST | `/tools/batch` | 批量修改 | 同步，事务 |
 | GET | `/tags` | 标签字典；未保存过返回内置默认（20 项，不含动作键），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
 | PUT | `/tags` | 全量替换；必须带 `If-Match`，缺失 400 `IF_MATCH_REQUIRED`，不匹配 409 `REVISION_CONFLICT` | 同步 |
 | GET | `/categories` | 分类字典；未保存过返回内置默认（10 项），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
 | PUT | `/categories` | 全量替换；`If-Match` 语义同 `/tags` | 同步 |
 | GET | `/search` | 用同一检索器预览 | 同步 |
-| GET | `/clients` | 活跃 MCP 会话（含 `clientName` / `clientVersion`）+ 绑定 | 同步 |
+| GET | `/clients` | 绑定列表 + 全部传输会话（含 `clientName` / `clientVersion`）；每个绑定的 `activeSessions` 只计 15 分钟内活跃的会话，窗口由 `activeWindowMs` 回显 | 同步 |
 | POST | `/clients` | 创建绑定并返回 token 明文；token 同时存本机 `state.db`，管理端可再次查看/复制，轮换后旧 token 立即失效 | 同步 |
 | PUT | `/clients/:id` | 默认 workspace、可见范围、配额；**销毁该 binding 的执行会话（跨传输会话）** | 同步 |
 | DELETE | `/clients/:id` | 删除绑定，token 立即失效；同样销毁该 binding 的执行会话 | 同步 |
@@ -141,7 +142,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 
 `GET /servers/:id/tools`（以及 `PATCH /tools/:serverId/:name`、`POST /tools/batch` 返回的 `tool`）每个工具还带：
 
-- `callCount` / `successCount` / `successRate` / `lastCalledAt`：来自 `tool_result` 审计事件的终身累计。每次 `tool_result`（成功或失败）计 1 次调用，`successCount` 只计 `ok=true`；`successRate = callCount > 0 ? successCount / callCount : null`；`lastCalledAt` 是最近一次调用的 ISO 8601 时间，从未调用时为 `null`（`callCount`/`successCount` 为 0）。`tool_call` 没有成败、`tool_denied` 没有结果，都不计数；脚本执行与将来的管理端测试执行都计入。工具删除后统计保留，同名工具重新出现时继承。
+- `callCount` / `successCount` / `successRate` / `lastCalledAt`：终身累计。第三方工具与脚本内调用来自 `tool_result` 审计事件；顶层 builtin（`run_script`、`search_tools` 等）不产生 `tool_result`，由 `tools/call` 的 `onUsage` 直接写入 `tool_usage`。每次调用（成功或失败）计 1 次，`successCount` 只计 `ok=true`；`successRate = callCount > 0 ? successCount / callCount : null`；`lastCalledAt` 是最近一次调用的 ISO 8601 时间，从未调用时为 `null`（`callCount`/`successCount` 为 0）。`tool_call` 没有成败、`tool_denied` 没有结果，都不计数；管理端工具测试（`POST /tools/:serverId/:name/test`）走独立通道、不计入。工具删除后统计保留，同名工具重新出现时继承。
 - `modelBytes`：模型可见内容的 UTF-8 JSON 字节数（`Buffer.byteLength`，不是 token 数），四个键：
   - `definition`：`JSON.stringify({ name, description, inputSchema })` 的 UTF-8 字节，即完整工具定义；只含这三个字段，不含上游工具定义里的 `_meta`、`annotations` 等其余字段。`name` 是模型看到的工具名——MCP 工具为 `server.tool`，official/builtin 为裸名；`description` 是生效描述（`description_override` 优先，缺省为空串）。
   - `searchItem`：该工具作为 `search_tools` 结果项时的 UTF-8 字节，复用检索层的 `toItem`（`JSON.stringify(toItem(catalogTool, name))`）。形状是 `SearchToolItem`：必有 `name`（同为模型可见工具名）与 `kind`；MCP 工具带 `server`；server 配置了分类/摘要时带 `category` / `summary`；带生效 `description`；server 标签与工具标签的并集非空时带 `tags`。排序用的 `score` 不写进条目。与 `GET /search` 的 `SearchHit` 不同：后者带 `score`，且没有 `category` / `summary`。
@@ -186,6 +187,56 @@ HTTP 映射：400 校验、404 不存在、409 revision 冲突或 SERVER_BUSY、
 | `GET /search` | 可选 `binding=<id>`；管理员默认不过滤，传了才按该绑定可见性过滤 |
 
 202 操作的进度走 `/events`，`GET /operations/:id` 是断线后的补偿查询；操作完成后保留 10 分钟。
+
+### 工具测试端点
+
+#### `POST /admin/api/tools/:serverId/:name/test`
+
+真实调用一次工具，供管理端「测试」按钮使用。请求体可省略，字段全部可选：
+
+```jsonc
+{ "args": { "x": 1 }, "timeoutMs": 10000 }
+```
+
+- `args`：JSON 对象，默认 `{}`；非对象 400 `INVALID_FIELD`。
+- `timeoutMs`：整数 1..60000，默认 10000；越界或非整数 400 `INVALID_FIELD`。
+- 未知字段 400 `UNKNOWN_FIELD`；请求体不是对象 400 `INVALID_BODY`，非法 JSON 400 `INVALID_JSON`。
+- `serverId` 不存在 404 `SERVER_NOT_FOUND`；`name` 不存在 404 `TOOL_NOT_FOUND`。
+- `__builtin__` 下的顶层工具返回 400 `TOOL_TEST_UNSUPPORTED`：它们没有可复用的 pool/serve 执行路径。
+- 服务端未接线执行器时 503 `TOOL_TEST_UNAVAILABLE`（正常装配不会出现）。
+
+执行路径与模型调用相同：第三方 server 走连接池（`server` 为该 server），`__official__` 走 `claude mcp serve`。测试不使用 binding，`__official__` 的 workspace 取服务进程当前目录。`timeoutMs` 是整个调用的硬期限：超时返回 200，不悬挂请求。
+
+成功 200：
+
+```jsonc
+{ "ok": true, "result": { "...": "工具原始返回值" },
+  "durationMs": 12, "testedAt": "2026-01-01T00:00:00.000Z", "resultBytes": 345 }
+```
+
+- `result`：`{ text, images?, documents? }`（第三方与 official 的归一化结果）或 official 原始结果；UI 按 JSON 展示。
+- `durationMs`：调用耗时；`testedAt`：调用开始时间（ISO 8601）。
+- `resultBytes`：`JSON.stringify(result)` 的 UTF-8 字节数；`undefined` 按 `null` 计 4 字节。
+- 序列化结果超过 1 MiB 时省略 `result`，改返回 `truncated: true` 与 `resultPreview`（序列化 JSON 的前 1 MiB UTF-8 文本，可能不是完整 JSON）；`resultBytes` 仍是完整字节数。UI 在 `truncated` 时展示 `resultPreview` 文本。
+
+工具执行失败也是 200：
+
+```jsonc
+{ "ok": false, "error": { "code": "TOOL_CALL_FAILED", "message": "..." },
+  "durationMs": 12, "testedAt": "..." }
+```
+
+- 超过 `timeoutMs`：`error.code` 为 `TOOL_TEST_TIMEOUT`。
+- 其它失败（连接不可用、上游错误等）：`error.code` 为 `TOOL_CALL_FAILED`，只转发可读的 `message`，不转发上游错误码。
+- `ok=false` 时没有 `result` / `resultBytes` / `truncated`。
+- `ok` 表示调用完成并拿到了结果。第三方 MCP 的上游 `isError` 会抛错（`TOOL_CALL_FAILED`）；`__official__` 的上游 `isError` 按模型调用同一路径归一化成结果值（普通工具为 `{ "error": string }`，Bash 为带 `exitCode` 的结果），所以仍是 `ok=true`。
+
+副作用：
+
+- 这是真实调用，写操作会生效；只应由管理员手工触发。
+- 成功和失败都写一条审计事件 `event: "tool_test"`，字段：`server`、`tool`、`ok`、`durationMs`、`argsBytes`、`resultBytes`（成功时）、`error`（失败时，含 `code` / `message`）。不写原始 `args` 和结果正文，避免密钥或大结果进入日志。
+- **不计入 `tool_usage`**：测试不经过 eval 的 `tool_result` 路径，`callCount` / `successCount` / `lastCalledAt` 只反映模型与脚本的真实调用。
+- 不改变 catalog、revision 或工具启停状态。
 
 ## 4. 生效时机
 
@@ -478,6 +529,9 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `INVALID_SEVERITY` / `UNKNOWN_EVENT` / `WEBHOOK_URL_INVALID` | 422 | PUT 告警配置 |
 | `INVALID_TAGS` | 422 | PUT `/tags`：条目格式、重复 key、动作键或系统托管项被改动 |
 | `TAG_POLICY_VIOLATION` | 422 | 创建/PATCH server、写工具标签、AI 标注 apply：违反 server 0–2 / 工具叠加 1–4 / 不重复 / 禁动作键 |
+| `SERVER_NOT_FOUND` / `TOOL_NOT_FOUND` | 404 | 工具目录写端点与工具测试端点 |
+| `TOOL_TEST_UNSUPPORTED` | 400 | `POST /tools/:serverId/:name/test`：`__builtin__` 顶层工具没有可复用执行路径 |
+| `TOOL_TEST_UNAVAILABLE` | 503 | 同上：服务端未接线测试执行器 |
 | `SCRIPT_NOT_FOUND` / `SCRIPT_VERSION_NOT_FOUND` | 404 | 脚本库端点 |
 | `SCRIPT_RUN_NOT_FOUND` / `SCRIPT_RUN_EXPIRED` | 404 | 脚本库来源执行 |
 | `SCRIPT_NAME_CONFLICT` / `SCRIPT_MODE_CONFLICT` / `SCRIPT_VERSION_CONFLICT` | 409 | 脚本库写端点 |
@@ -489,6 +543,8 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `SCRIPT_CANDIDATE_INCOMPLETE` | 422 | 候选没有建议名称/描述，accept 请求体也未补齐 |
 | `WEBHOOK_NOT_CONFIGURED` | 422 | 测试端点 |
 | `ALERT_TEST_THROTTLED` | 429 | 测试端点 |
+
+工具测试的 `TOOL_CALL_FAILED` 与 `TOOL_TEST_TIMEOUT` 是 HTTP 200 响应体里的 `error.code`，不是 HTTP 错误码（见 §3「工具测试端点」）。
 
 ## 10. 脚本库端点
 

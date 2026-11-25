@@ -6,9 +6,11 @@
  * before offering to load the blob. A preview without the name renders nothing.
  */
 import { Alert, Button, Card, Space, Typography } from 'antd';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { FrameEvent } from './FramePayload.tsx';
+import { formatScriptCode } from '../../lib/format-code.ts';
+import { highlightScriptCode } from '../../lib/highlight-code.ts';
 import {
   fetchPayloadSlice,
   formatBytes,
@@ -83,7 +85,7 @@ export function ScriptCodeCard({
         code === null ? null : (
           <Text
             type="secondary"
-            copyable={{ text: code, tooltips: ['复制代码', '已复制'] }}
+            copyable={{ text: code, tooltips: ['复制原始代码', '已复制'] }}
             style={{ fontSize: 11.5 }}
           >
             复制
@@ -116,21 +118,37 @@ export function ScriptCodeCard({
             description="超过渲染上限，不生成行号；用右上角「复制」取出完整代码。"
           />
         ) : (
-          <div className="script-code-scroll">
-            <div className="script-code-inner">
-              <div className="script-code-gutter" aria-hidden="true">
-                {code.split('\n').map((_line, index) => (
-                  <div key={index}>{index + 1}</div>
-                ))}
-              </div>
-              <pre className="code-block script-code-pre">{code}</pre>
-            </div>
-          </div>
+          <ScriptCodeBlock code={code} />
         )}
         {error === null ? null : (
           <Alert type="error" showIcon message="代码读取失败" description={error} />
         )}
       </Space>
     </Card>
+  );
+}
+
+/** Renders the source formatted for reading; copying still uses the original text. */
+export function ScriptCodeBlock({ code }: { code: string }): React.ReactElement {
+  const display = useMemo(() => formatScriptCode(code), [code]);
+  const highlighted = useMemo(() => highlightScriptCode(display.text), [display.text]);
+  return (
+    <div className="script-code-scroll">
+      <div className="script-code-inner">
+        <div className="script-code-gutter" aria-hidden="true">
+          {display.text.split('\n').map((_line, index) => (
+            <div key={index}>{index + 1}</div>
+          ))}
+        </div>
+        {highlighted === null ? (
+          <pre className="code-block script-code-pre">{display.text}</pre>
+        ) : (
+          <pre
+            className="code-block script-code-pre hljs"
+            dangerouslySetInnerHTML={{ __html: highlighted }}
+          />
+        )}
+      </div>
+    </div>
   );
 }

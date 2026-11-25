@@ -159,6 +159,7 @@ test('exact save stores the source run as an active zero-argument script', (t) =
   );
   assert.deepEqual(saved, {
     scriptId: saved.scriptId,
+    name: 'answer',
     version: 1,
     status: 'active',
     activeVersion: 1,
@@ -721,7 +722,7 @@ test('run_script argument rules and async activateOnSuccess dispatch', async (t)
     f.ctx,
   )) as CallToolResult;
   assert.equal(both.isError, true);
-  assert.match(resultText(both), /exactly one of code or scriptId/);
+  assert.match(resultText(both), /exactly one of code or scriptName/);
 
   const withCode = (await callTool(
     'run_script',
@@ -729,7 +730,7 @@ test('run_script argument rules and async activateOnSuccess dispatch', async (t)
     f.ctx,
   )) as CallToolResult;
   assert.equal(withCode.isError, true);
-  assert.match(resultText(withCode), /require scriptId/);
+  assert.match(resultText(withCode), /require scriptName/);
 
   const saved = f.service.save(
     { createdBy: IDENTITY.binding as string },
@@ -747,6 +748,113 @@ test('run_script argument rules and async activateOnSuccess dispatch', async (t)
   assert.equal(dispatched.activateOnSuccess, true);
   assert.equal(dispatched.purpose, 'test');
   assert.equal(f.service.get(saved.scriptId)?.status, 'draft', 'activation waits for the async settle');
+});
+
+test('run_script resolves a saved script by name to the same execution as scriptId', async (t) => {
+  const f = fixture(t);
+  const runId = archiveRun(f, { runId: 'run_named' });
+  const saved = f.service.save(
+    { createdBy: IDENTITY.binding as string },
+    { runId, mode: 'exact', name: 'answer-by-name', description: 'd' },
+  );
+
+  const byName = (await callTool(
+    'run_script',
+    { scriptName: 'answer-by-name' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(byName.isError, false);
+  const nameRequest = f.gateway.runCalls[0];
+  assert.ok(nameRequest !== undefined);
+  assert.equal(nameRequest.entryMode, 'script');
+  assert.equal(nameRequest.scriptId, saved.scriptId, 'the name resolves to the real scriptId');
+  assert.equal(nameRequest.scriptVersion, 1);
+  assert.equal(nameRequest.code, 'return 41 + 1;');
+
+  const byId = (await callTool('run_script', { scriptId: saved.scriptId }, f.ctx)) as CallToolResult;
+  assert.equal(byId.isError, false);
+  assert.deepEqual(f.gateway.runCalls[1], nameRequest, 'name and id produce the same request');
+
+  const idAsName = (await callTool(
+    'run_script',
+    { scriptName: saved.scriptId },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(idAsName.isError, true);
+  assert.match(resultText(idAsName), /SCRIPT_NOT_FOUND/);
+  assert.equal(f.gateway.runCalls.length, 2, 'a scriptId is never reinterpreted as a name');
+});
+
+test('run_script rejects unknown, empty and competing script names', async (t) => {
+  const f = fixture(t);
+
+  const missing = (await callTool('run_script', { scriptName: 'no-such-script' }, f.ctx)) as CallToolResult;
+  assert.equal(missing.isError, true);
+  assert.match(resultText(missing), /SCRIPT_NOT_FOUND/);
+  assert.match(resultText(missing), /no-such-script/);
+
+  const empty = (await callTool('run_script', { scriptName: '' }, f.ctx)) as CallToolResult;
+  assert.equal(empty.isError, true);
+  assert.match(resultText(empty), /INVALID_ARGUMENT: exactly one of code or scriptName is required/);
+
+  const both = (await callTool(
+    'run_script',
+    { scriptId: 's_1', scriptName: 'x' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(both.isError, true);
+  assert.match(resultText(both), /scriptId is a legacy alias; pass only scriptName/);
+
+  const codeAndName = (await callTool(
+    'run_script',
+    { code: 'x', scriptName: 'x' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(codeAndName.isError, true);
+  assert.match(resultText(codeAndName), /exactly one of code or scriptName/);
+
+  assert.equal(f.gateway.runCalls.length, 0, 'no invalid shape reaches execution');
+});
+
+test('run_script by name keeps version, args and lifecycle checks', async (t) => {
+  const f = fixture(t);
+  const saved = f.service.save(
+    { createdBy: IDENTITY.binding as string },
+    {
+      mode: 'parameterized',
+      name: 'add-by-name',
+      description: 'add',
+      code: 'return args.x + 1;',
+      inputSchema: {
+        type: 'object',
+        properties: { x: { type: 'integer' } },
+        required: ['x'],
+        additionalProperties: false,
+      },
+    },
+  );
+
+  const result = (await callTool(
+    'run_script',
+    { scriptName: 'add-by-name', scriptVersion: 1, args: { x: 41 } },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(result.isError, false);
+  const request = f.gateway.runCalls[0];
+  assert.ok(request !== undefined);
+  assert.equal(request.scriptId, saved.scriptId);
+  assert.equal(request.scriptVersion, 1);
+  assert.equal(request.purpose, 'test', 'the owner still tests an unactivated draft');
+  assert.deepEqual(request.args, { x: 41 });
+
+  const badArgs = (await callTool(
+    'run_script',
+    { scriptName: 'add-by-name', scriptVersion: 1, args: {} },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(badArgs.isError, true);
+  assert.match(resultText(badArgs), /SCRIPT_ARGS_INVALID/);
+  assert.equal(f.gateway.runCalls.length, 1, 'argument checks run before dispatch');
 });
 
 test('save_script and search_scripts emit audit and validate through the tool surface', async (t) => {
@@ -777,8 +885,170 @@ test('save_script and search_scripts emit audit and validate through the tool su
 
   const found = (await callTool('search_scripts', { query: 'audited' }, f.ctx)) as CallToolResult;
   assert.equal(found.isError, false);
-  const payload = JSON.parse(resultText(found)) as { scripts: Array<{ name: string }> };
-  assert.deepEqual(payload.scripts.map((item) => item.name), ['audited']);
+  const payload = JSON.parse(resultText(found)) as { scripts: Array<{ scriptName: string }> };
+  assert.deepEqual(payload.scripts.map((item) => item.scriptName), ['audited']);
+});
+
+test('run_script by name keeps the system id out of lifecycle errors', async (t) => {
+  const f = fixture(t);
+  const saved = f.service.save(
+    { createdBy: IDENTITY.binding as string },
+    {
+      mode: 'parameterized',
+      name: 'disabled-by-name',
+      description: 'd',
+      code: 'return 1;',
+      inputSchema: { type: 'object', properties: {} },
+    },
+  );
+  f.service.patch(saved.scriptId, { status: 'disabled' });
+
+  const disabled = (await callTool(
+    'run_script',
+    { scriptName: 'disabled-by-name' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(disabled.isError, true);
+  assert.match(resultText(disabled), /SCRIPT_DISABLED/);
+  assert.match(resultText(disabled), /disabled-by-name/);
+  assert.doesNotMatch(resultText(disabled), new RegExp(saved.scriptId));
+});
+
+test('save_script updates by scriptName and returns scriptName without scriptId', async (t) => {
+  const f = fixture(t);
+  const saved = f.service.save(
+    { createdBy: IDENTITY.binding as string },
+    {
+      mode: 'parameterized',
+      name: 'rename-me',
+      description: 'before',
+      code: 'return 1;',
+      inputSchema: { type: 'object', properties: {} },
+    },
+  );
+
+  const updated = (await callTool(
+    'save_script',
+    { scriptName: 'rename-me', name: 'renamed-by-tool', description: 'after' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(updated.isError, false);
+  const payload = JSON.parse(resultText(updated)) as Record<string, unknown>;
+  assert.equal(payload['scriptName'], 'renamed-by-tool');
+  assert.equal('scriptId' in payload, false);
+  assert.equal(payload['version'], 1);
+  assert.equal(payload['status'], 'draft');
+  assert.equal(payload['activeVersion'], null);
+  assert.equal(payload['mode'], 'parameterized');
+  assert.deepEqual(payload['warnings'], []);
+  assert.equal(f.service.get(saved.scriptId)?.name, 'renamed-by-tool');
+
+  const unknown = (await callTool(
+    'save_script',
+    { scriptName: 'no-such-script', description: 'x' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(unknown.isError, true);
+  assert.match(resultText(unknown), /SCRIPT_NOT_FOUND/);
+  assert.match(resultText(unknown), /no-such-script/);
+
+  const foreign = f.service.save(
+    { createdBy: 'someone-else' },
+    {
+      mode: 'parameterized',
+      name: 'owned-elsewhere',
+      description: 'd',
+      code: 'return 1;',
+      inputSchema: { type: 'object', properties: {} },
+    },
+  );
+  const forbidden = (await callTool(
+    'save_script',
+    { scriptName: 'owned-elsewhere', description: 'x' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(forbidden.isError, true);
+  assert.match(resultText(forbidden), /SCRIPT_FORBIDDEN/);
+  assert.match(resultText(forbidden), /owned-elsewhere/);
+  assert.doesNotMatch(resultText(forbidden), new RegExp(foreign.scriptId));
+
+  const both = (await callTool(
+    'save_script',
+    { scriptId: saved.scriptId, scriptName: 'renamed-by-tool', description: 'x' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(both.isError, true);
+  assert.match(resultText(both), /scriptId is a legacy alias; pass only scriptName/);
+});
+
+test('save_script still updates a legacy scriptId target', async (t) => {
+  const f = fixture(t);
+  const saved = f.service.save(
+    { createdBy: IDENTITY.binding as string },
+    {
+      mode: 'parameterized',
+      name: 'legacy-target',
+      description: 'before',
+      code: 'return 1;',
+      inputSchema: { type: 'object', properties: {} },
+    },
+  );
+
+  const updated = (await callTool(
+    'save_script',
+    { scriptId: saved.scriptId, description: 'after' },
+    f.ctx,
+  )) as CallToolResult;
+  assert.equal(updated.isError, false);
+  const payload = JSON.parse(resultText(updated)) as Record<string, unknown>;
+  assert.equal(payload['scriptName'], 'legacy-target');
+  assert.equal('scriptId' in payload, false);
+  assert.equal(f.service.get(saved.scriptId)?.description, 'after');
+});
+
+test('search_scripts returns scriptName and keeps every documented field', async (t) => {
+  const f = fixture(t);
+  const runId = archiveRun(f, { runId: 'run_search' });
+  const saved = f.service.save(
+    { createdBy: 'x' },
+    { runId, mode: 'exact', name: 'searchable', description: 'find me', tags: ['demo'] },
+  );
+  f.service.noteUsage(saved.scriptId);
+
+  const found = (await callTool('search_scripts', { query: 'searchable' }, f.ctx)) as CallToolResult;
+  assert.equal(found.isError, false);
+  const { scripts } = JSON.parse(resultText(found)) as {
+    scripts: Array<Record<string, unknown>>;
+  };
+  assert.equal(scripts.length, 1);
+  const item = scripts[0];
+  assert.ok(item !== undefined);
+  assert.equal('scriptId' in item, false);
+  assert.deepEqual(
+    Object.keys(item).sort(),
+    [
+      'scriptName',
+      'description',
+      'tags',
+      'mode',
+      'activeVersion',
+      'inputSchema',
+      'exampleArgs',
+      'useCount',
+      'lastUsedAt',
+      'updatedAt',
+    ].sort(),
+  );
+  assert.equal(item['scriptName'], 'searchable');
+  assert.equal(item['description'], 'find me');
+  assert.deepEqual(item['tags'], ['demo']);
+  assert.equal(item['mode'], 'exact');
+  assert.equal(item['activeVersion'], 1);
+  assert.deepEqual(item['inputSchema'], {});
+  assert.equal(item['exampleArgs'], null);
+  assert.equal(item['useCount'], 1);
+  assert.equal(typeof item['lastUsedAt'], 'string');
+  assert.equal(typeof item['updatedAt'], 'string');
 });
 
 test('scriptId mode surfaces lifecycle errors', async (t) => {
