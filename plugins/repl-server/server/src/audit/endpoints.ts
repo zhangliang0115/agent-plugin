@@ -352,12 +352,17 @@ function pairProtocol(pair: ProtocolFramePair): FrameStatusFilter {
   return pair.ok === false ? 'error' : 'ok';
 }
 
-/** Tool-level outcome from `result.isError`; non-tool requests have none. */
+/**
+ * Tool-level outcome from `result.isError`; non-tool requests have none. Once
+ * the body is externalised, the row keeps `resultIsError` for this decision.
+ */
 function pairResult(pair: ProtocolFramePair): FrameStatusFilter {
   if (pair.method !== 'tools/call') return 'none';
   const result = pair.response?.['result'];
-  if (typeof result !== 'object' || result === null) return 'none';
-  const isError = (result as { isError?: unknown }).isError;
+  const inline = typeof result === 'object' && result !== null
+    ? (result as { isError?: unknown }).isError
+    : undefined;
+  const isError = typeof inline === 'boolean' ? inline : pair.response?.['resultIsError'];
   if (typeof isError !== 'boolean') return 'none';
   return isError ? 'error' : 'ok';
 }

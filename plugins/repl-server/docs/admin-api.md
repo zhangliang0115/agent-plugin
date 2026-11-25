@@ -101,7 +101,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | POST | `/script-candidates/:id/accept` | 接受候选，生成 draft 脚本 | 同步 |
 | POST | `/script-candidates/:id/reject` | 拒绝候选 | 同步 |
 
-**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 90 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
+**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`、`children`（后代中 RSS 最大的前 5 个，每项 `{ pid, rssBytes, command }`，`command` 截断到 120 字符、没有命令时为空字符串；没有后代时为空数组）；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。子进程 RSS 合计超过 1 GiB 时写一条 `level=warn, scope=memory` 日志（含总量与前 5 子进程摘要），并写 `memory_warning` 审计事件（字段 `childRssBytes`、`totalRssBytes`、`children`），每小时最多一次。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`，同样带 `children`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 90 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
 
 **实时并发**：`/overview` 的 `bindings` 返回每个 binding 的 `label`、`execSessions`、`inFlightEvals`、`inFlightCalls`、`queuedCalls`；未绑定客户端归到 `binding: null`。前三项来自执行会话注册表，后两项来自池闸门，页面每 5 秒随 `/overview` 刷新。
 
@@ -282,7 +282,7 @@ data: {"id":"op_...","state":"ok"}
 - `/logs/sessions`：按最近活动排序。
 - `/logs/frames?mcp=&id=`：请求与响应配对返回，额外支持 `tool` / `protocol` / `result` 多值筛选。
 - `/logs/payload?ref=&mode=&offset=&limit=`：入参是行上的 `argsRef`/`resultRef`/`paramsRef`/`resultTailRef` 等字段值，`mode` 取 `full|head|tail|range`；返回 `{ ref, mode, total, start, end, truncated, body }`，`body` 是 UTF-8 文本。缺参 400，越界或缺失 404（`PAYLOAD_NOT_FOUND`）。`ref` 只允许落在 `log/` 之内。
-- 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 90 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。
+- 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 90 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。响应体外置后，帧行上仍保留布尔字段 `resultIsError`，列表与 `result` 筛选据此判定执行结果。
 - `/logs/stats?from=&to=&groupBy=`：工具调用量（仅 `tool_result`）、错误率、p50/p95、排队均值；响应另带 `retention`（上次清理时间、删除天数/文件数、当前 `log/` 体积）。`p50`/`p95` 是**执行时长**（`ms - queueMs`），`queueAvgMs` 单列排队，所以一个堵在闸门上的调用不会把工具本身算成慢。
 - `/logs/stream`：SSE，新增事件实时推送。
 - `/logs/export`：按当前筛选导出 JSONL。
@@ -304,7 +304,7 @@ tool, server      工具与来源；可多选（`server` 同时匹配 `serverId`
 method            协议方法；可多选
 status            ok | error | timeout；可多选。按事件类型映射：`tool_result.ok=false` → error；`eval_end.outcome=timeout` → timeout；`eval_end.outcome=error` / `worker_dead` → error；`eval_end.outcome=cancelled` → ok（取消不算失败）；`ai_run.outcome=error` → error，其余 → ok；其他事件默认 ok
 protocol          `/logs/frames` 专用：ok | error | none（无响应）
-result            `/logs/frames` 专用：ok | error | none（`tools/call` 的 `result.isError`；无 `isError` 或非工具请求为 none）
+result            `/logs/frames` 专用：ok | error | none（`tools/call` 的 `result.isError`，响应体外置后读行上的 `resultIsError`；两者都无或非工具请求为 none）
 minMs, minQueueMs 慢调用筛选
 groupBy           聚合维度：server | tool | client | status
 cursor, limit     分页

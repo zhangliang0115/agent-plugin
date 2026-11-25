@@ -20,7 +20,7 @@ export interface ProcessRow {
   command: string;
 }
 
-/** One row of `ps -axo pid=,ppid=,rss=,%cpu=`. */
+/** One row of `ps -axo pid=,ppid=,rss=,%cpu=,command=`. */
 export interface ResourceRow {
   pid: number;
   ppid: number;
@@ -28,16 +28,18 @@ export interface ResourceRow {
   rssBytes: number;
   /** `ps` `%cpu`, not an interval-instantaneous value. */
   cpuPercent: number;
+  /** Command plus arguments; absent when `ps` reports no command. */
+  command?: string;
 }
 
 const PS_FIELDS = 'pid=,ppid=,pgid=,lstart=,command=';
-const PS_RESOURCE_FIELDS = 'pid=,ppid=,rss=,%cpu=';
+const PS_RESOURCE_FIELDS = 'pid=,ppid=,rss=,%cpu=,command=';
 /** `ps` output is parsed, so force the C locale for stable weekday/month abbreviations. */
 const PS_ENV: NodeJS.ProcessEnv = { ...process.env, LC_ALL: 'C' };
 const WEEKDAYS = new Set(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
 const MONTHS = new Set(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
 const ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/;
-const RESOURCE_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([0-9]+(?:\.[0-9]+)?)\s*$/;
+const RESOURCE_ROW_RE = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([0-9]+(?:\.[0-9]+)?)(?:\s+(.*))?$/;
 const BYTES_PER_KB = 1024;
 
 interface PsResult {
@@ -118,7 +120,7 @@ export function psRows(): ProcessRow[] {
   return psSnapshot(['-axo', PS_FIELDS]);
 }
 
-/** Parse the stdout of `ps -axo pid=,ppid=,rss=,%cpu=`. */
+/** Parse the stdout of `ps -axo pid=,ppid=,rss=,%cpu=,command=`. */
 export function parseResourceRows(stdout: string): ResourceRow[] {
   const rows: ResourceRow[] = [];
   for (const line of stdout.split('\n')) {
@@ -130,12 +132,15 @@ export function parseResourceRows(stdout: string): ResourceRow[] {
     const cpuPercent = Number(match[4]);
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
     if (!Number.isSafeInteger(rssKb) || !Number.isFinite(cpuPercent)) continue;
-    rows.push({ pid, ppid, rssBytes: rssKb * BYTES_PER_KB, cpuPercent });
+    const row: ResourceRow = { pid, ppid, rssBytes: rssKb * BYTES_PER_KB, cpuPercent };
+    const command = match[5]?.trim();
+    if (command !== undefined && command !== '') row.command = command;
+    rows.push(row);
   }
   return rows;
 }
 
-/** Process table with rss and `%cpu`. Throws when `ps` itself fails. */
+/** Process table with rss, `%cpu` and command. Throws when `ps` itself fails. */
 export function psResourceRows(): ResourceRow[] {
   const args = ['-axo', PS_RESOURCE_FIELDS];
   const result = runPs(args);

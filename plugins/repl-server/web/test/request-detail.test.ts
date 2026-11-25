@@ -90,6 +90,17 @@ test('toolCallOutcome separates protocol success from execution failure', () => 
   assert.equal(toolCallOutcome({ result: {} }), null, 'no isError means no tool result');
 });
 
+test('toolCallOutcome falls back to resultIsError when the result body is externalised', () => {
+  assert.deepEqual(
+    toolCallOutcome({ result: { content: [{ type: 'text', text: 'ok' }], isError: false } }),
+    { ok: true },
+    'inline result still wins',
+  );
+  assert.deepEqual(toolCallOutcome({ ok: true, resultIsError: false }), { ok: true });
+  assert.deepEqual(toolCallOutcome({ ok: true, resultIsError: true }), { ok: false });
+  assert.equal(toolCallOutcome({ ok: true }), null, 'neither result nor resultIsError');
+});
+
 test('requestDetailKeys links an async dispatch through evalTaskId', () => {
   const events = [
     { event: 'eval_start', requestId: 7, runId: 'r-1' },

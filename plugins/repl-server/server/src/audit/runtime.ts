@@ -450,6 +450,13 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
         framePayloadRef(date, ordinal, rpcId, phase, 'params', part), blobs);
     }
     if (index['result'] !== undefined) {
+      // Externalising drops `result`; this bit is what the list and `result`
+      // filter read afterwards (`docs/admin-api.md` §6).
+      const result = index['result'];
+      if (typeof result === 'object' && result !== null) {
+        const isError = (result as { isError?: unknown }).isError;
+        if (typeof isError === 'boolean') index['resultIsError'] = isError;
+      }
       applyPlan(index, 'result', FRAME_KEYS.result, (part) =>
         framePayloadRef(date, ordinal, rpcId, phase, 'result', part), blobs);
     }

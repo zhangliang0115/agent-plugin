@@ -14,9 +14,22 @@ import type { LogFn } from '../log.ts';
 
 export const RESOURCE_INTERVAL_MS = 10_000;
 export const RESOURCE_HISTORY_MS = 30 * 60_000;
+/** Total descendant RSS above this raises one `memory_warning` per interval. */
+export const MEMORY_WARN_BYTES = 1024 * 1024 * 1024;
+export const MEMORY_WARN_INTERVAL_MS = 60 * 60_000;
 const LOG_INTERVAL_MS = 60_000;
 const PS_WARN_INTERVAL_MS = 60_000;
 const BYTES_PER_MB = 1024 * 1024;
+const MAX_CHILD_DETAILS = 5;
+const CHILD_COMMAND_MAX_CHARS = 120;
+
+/** Largest descendant kept on each sample so RSS growth can be attributed after the fact. */
+export interface ResourceChild {
+  pid: number;
+  rssBytes: number;
+  /** `ps` command, truncated to {@link CHILD_COMMAND_MAX_CHARS}; empty when unknown. */
+  command: string;
+}
 
 export interface ResourceSample {
   ts: number;
@@ -29,6 +42,8 @@ export interface ResourceSample {
   /** Sum of `ps` `%cpu` for descendants. */
   childCpuPercent: number;
   totalCpuPercent: number;
+  /** Up to five descendants with the largest RSS, descending. */
+  children?: ResourceChild[];
 }
 
 export interface ResourceSnapshot {
@@ -41,6 +56,8 @@ export interface ResourceMonitorOptions {
   log: LogFn;
   /** Receives every sample after it enters the in-memory series (JSONL persistence). */
   onSample?: (sample: ResourceSample) => void;
+  /** Called when descendant RSS crosses {@link MEMORY_WARN_BYTES}, at most once per interval. */
+  onMemoryWarning?: (sample: ResourceSample) => void;
   intervalMs?: number;
   historyMs?: number;
   /** Test seams; production uses the process APIs and a live `ps`. */
@@ -60,9 +77,11 @@ interface ChildTotals {
   rssBytes: number;
   cpuPercent: number;
   count: number;
+  /** Up to {@link MAX_CHILD_DETAILS} descendants with the largest RSS, descending. */
+  top: ResourceChild[];
 }
 
-const EMPTY_CHILDREN: ChildTotals = { rssBytes: 0, cpuPercent: 0, count: 0 };
+const EMPTY_CHILDREN: ChildTotals = { rssBytes: 0, cpuPercent: 0, count: 0, top: [] };
 
 /** Descendants of `rootPid`, excluding the root; a corrupt ppid cycle is ignored. */
 function descendantRows(rows: readonly ResourceRow[], rootPid: number): ResourceRow[] {
@@ -90,13 +109,31 @@ function descendantRows(rows: readonly ResourceRow[], rootPid: number): Resource
 }
 
 function sumChildren(rows: readonly ResourceRow[], rootPid: number): ChildTotals {
-  const totals: ChildTotals = { rssBytes: 0, cpuPercent: 0, count: 0 };
+  const totals: ChildTotals = { rssBytes: 0, cpuPercent: 0, count: 0, top: [] };
+  const details: ResourceChild[] = [];
   for (const row of descendantRows(rows, rootPid)) {
     totals.rssBytes += row.rssBytes;
     totals.cpuPercent += row.cpuPercent;
     totals.count += 1;
+    details.push({
+      pid: row.pid,
+      rssBytes: row.rssBytes,
+      command: row.command?.slice(0, CHILD_COMMAND_MAX_CHARS) ?? '',
+    });
   }
+  details.sort((a, b) => b.rssBytes - a.rssBytes);
+  totals.top = details.slice(0, MAX_CHILD_DETAILS);
   return totals;
+}
+
+function describeChildren(children: readonly ResourceChild[]): string {
+  if (children.length === 0) return 'none';
+  return children
+    .map(
+      (child) =>
+        `pid=${child.pid} ${megabytes(child.rssBytes)}MB ${child.command === '' ? '?' : child.command}`,
+    )
+    .join('; ');
 }
 
 function megabytes(bytes: number): number {
@@ -122,6 +159,7 @@ export function createResourceMonitor(options: ResourceMonitorOptions): Resource
   let lastChildren: ChildTotals | null = null;
   let lastPsWarnAt = 0;
   let lastPersistWarnAt = 0;
+  let lastMemoryWarnAt = 0;
   let lastLogAt = 0;
 
   function sample(): void {
@@ -162,6 +200,7 @@ export function createResourceMonitor(options: ResourceMonitorOptions): Resource
       selfCpuPercent,
       childCpuPercent: children.cpuPercent,
       totalCpuPercent: selfCpuPercent + children.cpuPercent,
+      children: children.top,
     };
     current = next;
     series.push(next);
@@ -175,6 +214,23 @@ export function createResourceMonitor(options: ResourceMonitorOptions): Resource
         log(`resources: sample persistence failed: ${(error as Error).message}`, {
           level: 'warn',
           scope: 'resource',
+        });
+      }
+    }
+
+    if (next.childRssBytes > MEMORY_WARN_BYTES && ts - lastMemoryWarnAt >= MEMORY_WARN_INTERVAL_MS) {
+      lastMemoryWarnAt = ts;
+      log(
+        `resources: child rss ${megabytes(next.childRssBytes)}MB exceeds ${megabytes(MEMORY_WARN_BYTES)}MB ` +
+          `(total ${megabytes(next.totalRssBytes)}MB); top: ${describeChildren(next.children ?? [])}`,
+        { level: 'warn', scope: 'memory' },
+      );
+      try {
+        options.onMemoryWarning?.(next);
+      } catch (error) {
+        log(`resources: memory warning handler failed: ${(error as Error).message}`, {
+          level: 'warn',
+          scope: 'memory',
         });
       }
     }

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
+import { INLINE_MAX_BYTES } from '@zhangliang0115/repl-server-core';
+
 import type { AdminHandler, AdminRequest, AdminResponse } from '../src/admin/servers.ts';
 import { createAuditEndpoints, type AuditEndpointResult } from '../src/audit/endpoints.ts';
 import { createAuditRuntime, type AuditRuntime } from '../src/audit/runtime.ts';
@@ -44,14 +46,18 @@ interface Fixture {
 
 async function createFixture(
   t: TestContext,
-  options: { onEvent?: (event: AuditEvent) => void; log?: (line: string) => void } = {},
+  options: {
+    onEvent?: (event: AuditEvent) => void;
+    log?: (line: string) => void;
+    frameMode?: 'off' | 'summary' | 'full';
+  } = {},
 ): Promise<Fixture> {
   const dir = await mkdtemp(join(tmpdir(), 'repl-audit-runtime-'));
   const clock = new TestClock(START);
   const runtime = createAuditRuntime({
     dir,
     clock,
-    frameMode: 'summary',
+    frameMode: options.frameMode ?? 'summary',
     log: options.log ?? (() => undefined),
     ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
   });
@@ -242,6 +248,36 @@ test('records eval, tool, task and frame events into daily JSONL and drains on c
   assert.equal(stats.frames.written, 2);
   assert.equal(stats.frames.pending, 0);
   assert.equal(stats.file, null, 'close clears the current file handle');
+});
+
+test('frames keep resultIsError when the result is externalised or inline', async (t) => {
+  const { dir, runtime } = await createFixture(t, { frameMode: 'full' });
+
+  runtime.recordFrameIn({ mcp: 'mcp_1', id: 11, method: 'tools/call', params: { name: 'run_script' } });
+  runtime.recordFrameOut({
+    mcp: 'mcp_1',
+    id: 11,
+    result: { content: [{ type: 'text', text: 'x'.repeat(INLINE_MAX_BYTES + 1) }], isError: true },
+  });
+  runtime.recordFrameOut({ mcp: 'mcp_1', id: 12, result: { content: [], isError: false } });
+  runtime.recordFrameOut({ mcp: 'mcp_1', id: 13, method: 'tools/list', result: { tools: [] } });
+  await runtime.close();
+
+  const records = (await readRecords(dir)).filter((record) => record['event'] === 'proto_out');
+  const externalised = records.find((record) => record['id'] === 11);
+  assert.ok(externalised !== undefined);
+  assert.equal(externalised['resultIsError'], true);
+  assert.equal('result' in externalised, false, 'the large body moved to payload/');
+  assert.equal(typeof externalised['resultRef'], 'string');
+
+  const inline = records.find((record) => record['id'] === 12);
+  assert.ok(inline !== undefined);
+  assert.equal(inline['resultIsError'], false);
+  assert.ok(inline['result'] !== undefined, 'a small body stays on the row');
+
+  const noFlag = records.find((record) => record['id'] === 13);
+  assert.ok(noFlag !== undefined);
+  assert.equal('resultIsError' in noFlag, false, 'a result without isError adds no field');
 });
 
 test('flush drains without closing and close is idempotent', async (t) => {

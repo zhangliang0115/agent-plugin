@@ -91,13 +91,27 @@ test('parses ps rows, including padded lstart days and commands with spaces', ()
   assert.equal(parsePsLine('  10   1  10 Mon Nov 17 14:31:58 2026')?.command, '');
 });
 
-test('parses resource rows with rss in bytes and ps %cpu', () => {
+test('parses resource rows with rss, %cpu and an optional command', () => {
   const rows = parseResourceRows(
-    ['    1     0   1234  0.0', ' 48213   202  20480  1.5', '', 'pid ppid rss %cpu'].join('\n'),
+    [
+      '    1     0   1234  0.0 /sbin/launchd',
+      ' 48213   202  20480  1.5 node /opt/server.js --flag value',
+      ' 48214   202  10240  0.7',
+      '',
+      'pid ppid rss %cpu command',
+    ].join('\n'),
   );
   assert.deepEqual(rows, [
-    { pid: 1, ppid: 0, rssBytes: 1234 * 1024, cpuPercent: 0 },
-    { pid: 48213, ppid: 202, rssBytes: 20480 * 1024, cpuPercent: 1.5 },
+    { pid: 1, ppid: 0, rssBytes: 1234 * 1024, cpuPercent: 0, command: '/sbin/launchd' },
+    {
+      pid: 48213,
+      ppid: 202,
+      rssBytes: 20480 * 1024,
+      cpuPercent: 1.5,
+      command: 'node /opt/server.js --flag value',
+    },
+    // A row without a command keeps the field absent, matching the optional type.
+    { pid: 48214, ppid: 202, rssBytes: 10240 * 1024, cpuPercent: 0.7 },
   ]);
   assert.deepEqual(parseResourceRows(' 10 1 not-a-number 1.0'), []);
 });

@@ -323,6 +323,15 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
         throw resourceWriter.error ?? new Error('resource writer is unhealthy');
       }
     },
+    onMemoryWarning: (sample) => {
+      audit.recordTask({
+        ts: new Date(clock.now()).toISOString(),
+        event: 'memory_warning',
+        childRssBytes: sample.childRssBytes,
+        totalRssBytes: sample.totalRssBytes,
+        children: sample.children,
+      });
+    },
   });
   const adminSession = createAdminSession({ adminToken: tokens.adminToken });
   const baseLauncher = createOperationLauncher();

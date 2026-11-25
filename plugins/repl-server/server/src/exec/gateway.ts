@@ -7,6 +7,7 @@ import {
   ExecSession,
   KeyedGate,
   LIMITS,
+  McpToolError,
   TaskStore,
   clampBashArgs,
   formatUserError,
@@ -251,6 +252,46 @@ const OFFICIAL_TOOL_SERVER = '__official__';
 
 function toolServer(call: ToolCallRequest): string {
   return call.server ?? OFFICIAL_TOOL_SERVER;
+}
+
+/** Error texts that mean the model sent the wrong argument shape (docs/triage-log.md). */
+const ARGUMENT_ERROR_PATTERN =
+  /validation error|missing required argument|unexpected keyword argument|invalid arguments|no argument is passed|required parameter|requires explicit/i;
+
+const ARGUMENT_HINT_PREFIX = '[repl-server] expected arguments for';
+
+/**
+ * Names the tool's catalog fields inside an argument-shape failure, so the model
+ * can correct the call in the same turn instead of guessing again. Names only,
+ * never the schema; anything else (timeout, cancel, transport, no schema) is
+ * returned untouched. Appending the prefix once keeps a rethrow from doubling it.
+ */
+function annotateArgumentError(
+  catalog: Catalog | undefined,
+  call: ToolCallRequest,
+  error: unknown,
+): unknown {
+  if (call.server === undefined || !(error instanceof McpToolError)) return error;
+  if (!ARGUMENT_ERROR_PATTERN.test(error.message)) return error;
+  if (error.message.includes(ARGUMENT_HINT_PREFIX)) return error;
+  const tool = catalog
+    ?.snapshot()
+    .tools.find((item) => catalogToolName(item) === canonicalToolName(call));
+  const schema = tool?.inputSchema;
+  if (!isRecord(schema)) return error;
+  const properties = schema['properties'];
+  if (!isRecord(properties)) return error;
+  const available = Object.keys(properties);
+  if (available.length === 0) return error;
+  const requiredValue = schema['required'];
+  const required = Array.isArray(requiredValue)
+    ? requiredValue.filter((item): item is string => typeof item === 'string')
+    : [];
+  const requiredText = required.length === 0 ? 'none' : required.join(', ');
+  error.message =
+    `${error.message}\n${ARGUMENT_HINT_PREFIX} ${call.server}.${call.tool}: ` +
+    `required: ${requiredText}; available: ${available.join(', ')}`;
+  return error;
 }
 
 /** Correlation and identity fields shared by the tool events of one eval. */
@@ -1009,13 +1050,13 @@ export class ExecGateway implements ExecutionGateway {
           })
           .catch((error: unknown) => {
             finish(false, error);
-            throw error;
+            throw annotateArgumentError(this.catalog, call, error);
           })
           .finally(cleanup);
       } catch (error) {
         cleanup();
         finish(false, error);
-        throw error;
+        throw annotateArgumentError(this.catalog, call, error);
       }
     };
 

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 
+import { McpToolError } from '@zhangliang0115/repl-server-core';
+
 import { ExecGateway, type ExecGatewayOptions } from '../src/exec/gateway.ts';
-import type { RequestIdentity, ScriptRequest } from '../src/ports.ts';
+import type { Catalog, CatalogTool, RequestIdentity, ScriptRequest } from '../src/ports.ts';
 
 const IDENTITY: RequestIdentity = {
   identity: 'unbound',
@@ -153,4 +155,86 @@ test('the eval deadline aborts the in-flight tool signal', async (t) => {
   assert.match(outcome.content, /<error>(eval cancelled|eval stopped at layer soft|Read timed out)/);
   assert.equal(signals.length, 1);
   assert.equal(signals[0]?.aborted, true);
+});
+
+const SEARCH_TOOL: CatalogTool = {
+  name: 'sentry.search_issues',
+  kind: 'mcp',
+  server: 'sentry',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project_slug_or_id: { type: 'string' },
+      query: { type: 'string' },
+    },
+    required: ['project_slug_or_id'],
+  },
+  concurrency: 'parallel',
+  enabled: true,
+};
+
+function catalogWith(inputSchema: unknown): Catalog {
+  return {
+    snapshot: () => ({ revision: 1, tools: [{ ...SEARCH_TOOL, inputSchema }] }),
+  };
+}
+
+/** The shape seen in the 24h logs: the model guessed `organizationSlug`. */
+const ARGUMENT_ERROR =
+  '1 validation error for call[search_issues]\norganizationSlug\n  Unexpected keyword argument';
+
+const CALL_SEARCH = `
+  try {
+    await tools.mcp.sentry.search_issues({ organizationSlug: 'x' });
+    return 'no-error';
+  } catch (error) {
+    return error.message;
+  }
+`;
+
+test('an argument-shape MCP failure appends the catalog fields once', async (t) => {
+  const { gateway } = createGateway(t, {
+    catalog: catalogWith(SEARCH_TOOL.inputSchema),
+    onCall: async () => {
+      throw new McpToolError(ARGUMENT_ERROR, { server: 'sentry', tool: 'search_issues' });
+    },
+  });
+  const outcome = await gateway.runScript(request(CALL_SEARCH));
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.ok(outcome.content.includes(ARGUMENT_ERROR), 'the original message must stay');
+  const hint =
+    '[repl-server] expected arguments for sentry.search_issues: ' +
+    'required: project_slug_or_id; available: project_slug_or_id, query';
+  assert.ok(outcome.content.includes(hint), outcome.content);
+  assert.equal(outcome.content.split(hint).length, 2, 'the hint must be appended once');
+});
+
+test('a non-argument MCP failure is left untouched', async (t) => {
+  const { gateway } = createGateway(t, {
+    catalog: catalogWith(SEARCH_TOOL.inputSchema),
+    onCall: async () => {
+      throw new McpToolError('sentry.search_issues timed out after 60000ms', {
+        code: 'MCP_CALL_TIMEOUT',
+        server: 'sentry',
+        tool: 'search_issues',
+      });
+    },
+  });
+  const outcome = await gateway.runScript(request(CALL_SEARCH));
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.ok(outcome.content.includes('timed out after 60000ms'));
+  assert.ok(!outcome.content.includes('[repl-server] expected arguments for'), outcome.content);
+});
+
+test('an argument-shape MCP failure without a schema appends nothing', async (t) => {
+  const { gateway } = createGateway(t, {
+    catalog: catalogWith({ type: 'object' }),
+    onCall: async () => {
+      throw new McpToolError(ARGUMENT_ERROR, { server: 'sentry', tool: 'search_issues' });
+    },
+  });
+  const outcome = await gateway.runScript(request(CALL_SEARCH));
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.ok(outcome.content.includes(ARGUMENT_ERROR));
+  assert.ok(!outcome.content.includes('[repl-server] expected arguments for'), outcome.content);
 });

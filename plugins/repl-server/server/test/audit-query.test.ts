@@ -840,6 +840,11 @@ test('frames endpoint filters by tool, protocol status and execution result', as
       error: { code: -32600, message: 'bad request' },
     },
     { ...common, ts: at(30), event: 'proto_in', id: 4, method: 'tools/call', params: { name: 'run_script' } },
+    // Externalised bodies: no `result`, only the flag the writer kept.
+    { ...common, ts: at(40), event: 'proto_in', id: 5, method: 'tools/call', params: { name: 'run_script' } },
+    { ...common, ts: at(41), event: 'proto_out', id: 5, method: 'tools/call', ok: true, resultIsError: true },
+    { ...common, ts: at(50), event: 'proto_in', id: 6, method: 'tools/call', params: { name: 'run_script' } },
+    { ...common, ts: at(51), event: 'proto_out', id: 6, method: 'tools/call', ok: true, resultIsError: false },
   ];
   await writeFile(
     join(dir, 'events-2026-11-18.jsonl'),
@@ -868,7 +873,19 @@ test('frames endpoint filters by tool, protocol status and execution result', as
     params: new URLSearchParams({ result: 'error' }),
   });
   const resultFrames = bodyOf(resultError).frames as Array<Record<string, unknown>>;
-  assert.deepEqual(resultFrames.map((frame) => frame.id), [2]);
+  assert.deepEqual(resultFrames.map((frame) => frame.id), [2, 5]);
+
+  const resultOk = await endpoints.frames({
+    identity: IDENTITY,
+    params: new URLSearchParams({ result: 'ok' }),
+  });
+  const okFrames = bodyOf(resultOk).frames as Array<Record<string, unknown>>;
+  assert.deepEqual(okFrames.map((frame) => frame.id), [6]);
+  assert.equal(
+    (okFrames[0]?.response as Record<string, unknown>)['resultIsError'],
+    false,
+    'summary detail keeps the flag even though result is stripped',
+  );
 
   const unresolved = await endpoints.frames({
     identity: IDENTITY,

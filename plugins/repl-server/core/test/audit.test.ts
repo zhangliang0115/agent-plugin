@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { redactValue, stripUrlQuery } from '../src/audit/redact.ts';
+import { redactDeep, redactValue, stripUrlQuery } from '../src/audit/redact.ts';
 import { boundedJson, summarizeArgs } from '../src/audit/summarize.ts';
 import { AuditWriter, type AuditIdentity } from '../src/audit/writer.ts';
 
@@ -63,6 +63,72 @@ test('strips URL query strings', () => {
   assert.equal(stripUrlQuery('https://example.com/x?token=abc&y=1'), 'https://example.com/x');
   assert.equal(stripUrlQuery('/relative/path?token=abc'), '/relative/path');
   assert.equal(stripUrlQuery('https://example.com/x'), 'https://example.com/x');
+});
+
+test('redactDeep keeps a 9-level query structure intact', () => {
+  const fields = {
+    tool: 'mcp__elasticsearch__search',
+    args: {
+      body: {
+        query: {
+          bool: {
+            filter: [{ range: { '@timestamp': { gte: '2026-11-24T00:00:00Z' } } }],
+          },
+        },
+      },
+    },
+  };
+
+  assert.deepEqual(redactDeep(fields), fields);
+});
+
+test('redactDeep replaces content past 16 levels with [max-depth]', () => {
+  let value: Record<string, unknown> = {};
+  for (let level = 0; level < 17; level += 1) {
+    value = { [`level${level}`]: value };
+  }
+
+  let cursor: unknown = redactDeep(value);
+  let objects = 0;
+  while (typeof cursor === 'object' && cursor !== null) {
+    objects += 1;
+    cursor = Object.values(cursor)[0];
+  }
+
+  // Sixteen containers are kept; the seventeenth becomes a marker string.
+  assert.equal(objects, 16);
+  assert.equal(cursor, '[max-depth]');
+});
+
+test('redactDeep truncates a circular reference at 16 levels without throwing', () => {
+  const cyclic: Record<string, unknown> = { name: 'loop' };
+  cyclic.self = cyclic;
+
+  let cursor: unknown = redactDeep(cyclic);
+  let objects = 0;
+  while (typeof cursor === 'object' && cursor !== null) {
+    objects += 1;
+    cursor = (cursor as Record<string, unknown>).self;
+  }
+
+  assert.equal(objects, 16);
+  assert.equal(cursor, '[max-depth]');
+});
+
+test('redactDeep still redacts secrets within the depth limit', () => {
+  let value: Record<string, unknown> = {
+    password: 'hunter2',
+    note: 'GITHUB_TOKEN=ghp_abcdefghijklmnop',
+  };
+  for (let level = 0; level < 10; level += 1) {
+    value = { [`level${level}`]: value };
+  }
+
+  const text = JSON.stringify(redactDeep(value));
+  assert.ok(!text.includes('hunter2'), text);
+  assert.ok(!text.includes('ghp_abcdefghijklmnop'), text);
+  assert.ok(text.includes('"password":"<redacted>"'), text);
+  assert.ok(text.includes('GITHUB_TOKEN=<redacted>'), text);
 });
 
 test('summarizes Bash by redacting and truncating the command', () => {

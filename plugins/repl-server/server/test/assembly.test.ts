@@ -803,6 +803,7 @@ test('persists resource samples as daily JSONL', async () => {
     assert.equal(sample['event'], 'resource_sample');
     assert.equal(typeof sample['ts'], 'string');
     assert.equal(typeof sample['totalRssBytes'], 'number');
+    assert.ok(Array.isArray(sample['children']), 'per-child details reach the metrics file');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

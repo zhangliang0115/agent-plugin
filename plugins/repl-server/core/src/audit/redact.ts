@@ -47,9 +47,11 @@ export function stripUrlQuery(url: string): string {
 
 /**
  * Recursively redacts string values and secret-named keys.
- * Depth-bounded so a hostile object cannot stall the writer.
+ * Sixteen levels cover common query structures (an ES
+ * `body.query.bool.filter[].range.gte` is about 9 deep) while still bounding
+ * hostile deep objects.
  */
-export function redactDeep(value: unknown, maxDepth = 8): unknown {
+export function redactDeep(value: unknown, maxDepth = 16): unknown {
   return walk(value, 0, maxDepth);
 }
 

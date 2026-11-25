@@ -128,10 +128,13 @@ export function toolCallOutcome(response: unknown): ToolCallOutcome | null {
   if (typeof response !== 'object' || response === null) return null;
   if ((response as { error?: unknown }).error !== undefined) return null;
   const result = (response as { result?: unknown }).result;
-  if (typeof result !== 'object' || result === null) return null;
-  const isError = (result as { isError?: unknown }).isError;
-  if (typeof isError !== 'boolean') return null;
-  if (!isError) return { ok: true };
+  // An externalised body leaves only `resultIsError` on the row.
+  const raw = typeof result === 'object' && result !== null
+    ? (result as { isError?: unknown }).isError
+    : (response as { resultIsError?: unknown }).resultIsError;
+  if (typeof raw !== 'boolean') return null;
+  if (!raw) return { ok: true };
+  // The error text lives in the externalised body, so it may be absent.
   return { ok: false, ...toolErrorDetail(responseText(response) ?? '') };
 }
 
