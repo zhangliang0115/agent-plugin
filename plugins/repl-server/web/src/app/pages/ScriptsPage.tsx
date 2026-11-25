@@ -172,7 +172,6 @@ export function ScriptsPage(): React.ReactElement {
       setDetailLoading(true);
       setDetailError(null);
       setVersionError(null);
-      setVersionDetail(null);
       const [scriptResult, versionsResult] = await Promise.allSettled([
         api.get<unknown>(`/scripts/${encodeURIComponent(scriptId)}`),
         api.get<unknown>(`/scripts/${encodeURIComponent(scriptId)}/versions`),
@@ -224,9 +223,23 @@ export function ScriptsPage(): React.ReactElement {
     return () => {
       alive = false;
     };
-  }, [api, selectedId, selectedVersion]);
+  }, [api, selectedId, selectedVersion, versions]);
+
+  const versionSignature = `${selectedId ?? ''}:${versions.map((entry) => entry.version).join(',')}`;
+  const diffVersionSignatureRef = useRef<string | null>(null);
+  const diffSelectedVersionRef = useRef<number | null>(null);
 
   useEffect(() => {
+    // A metadata refresh after testing returns the same versions; keep the
+    // loaded code/diff instead of clearing both panels.
+    if (
+      diffVersionSignatureRef.current === versionSignature &&
+      diffSelectedVersionRef.current === selectedVersion
+    ) {
+      return;
+    }
+    diffVersionSignatureRef.current = versionSignature;
+    diffSelectedVersionRef.current = selectedVersion;
     // Any in-flight diff belongs to the previous version pair.
     diffTicketRef.current += 1;
     setDiffLoading(false);
@@ -251,7 +264,7 @@ export function ScriptsPage(): React.ReactElement {
     setDiffMissing(false);
     setDiffError(null);
     setDiffTried(false);
-  }, [versions, selectedVersion]);
+  }, [versionSignature, selectedVersion, versions]);
 
   async function loadDiff(): Promise<void> {
     if (selectedId === null || diffBase === null || diffTarget === null) return;
@@ -847,7 +860,9 @@ export function ScriptsPage(): React.ReactElement {
       {!versionLoading && versionError === null && versionDetail === null ? (
         <Empty description="选择一个版本查看代码与参数 schema。" />
       ) : null}
-      {versionDetail === null ? null : (
+      {versionDetail === null ||
+      versionLoading ||
+      versionDetail.version !== selectedVersion ? null : (
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           <Descriptions column={2} size="small">
             <Descriptions.Item label="状态">

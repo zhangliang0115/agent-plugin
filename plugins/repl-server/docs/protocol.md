@@ -235,7 +235,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-返回 `{ "tools": [{ "name", "inputSchema" }] }`，按请求顺序返回全部 schema，不做字符预算截断。`names` 超过 10 个是参数校验失败（`INVALID_ARGUMENT`）；任一名字未知或对该客户端不可见时整次调用失败，返回 `UNKNOWN_TOOL`，不返回部分结果。
+返回 `{ "tools": [{ "name", "inputSchema" }] }`，按请求顺序返回全部 schema，不做字符预算截断。`names` 超过 10 个是参数校验失败（`INVALID_ARGUMENT`）。名字未知或对该客户端不可见时**不使整次调用失败**：已知工具的 schema 照常返回在 `tools`，未知名单放在 `unknown`；`result.isError` 仍为 `false`。
 
 ### `wait_tasks`
 
@@ -385,7 +385,6 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | code | 场景 |
 |---|---|
 | `INVALID_ARGUMENT` | schema 校验失败、timeout 非正整数、`describe_tools` 超过 10 个名字 |
-| `UNKNOWN_TOOL` | `describe_tools` 的名字未知或对该客户端不可见 |
 | `WS_INVALID` | workspace 不存在或不是目录 |
 | `CAPACITY_EXCEEDED` | 执行会话/绑定配额已满且无可淘汰 |
 | `UNKNOWN_TASK` | `wait_tasks` 的 id 不存在 |
@@ -425,7 +424,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | `SCRIPT_NOT_ACTIVE` | 脚本没有 active 版本且未显式给 `scriptVersion` |
 | `SCRIPT_FORBIDDEN` | 非 owner 更新脚本，或非 owner/admin 测试 draft 版本 |
 
-工具层错误一律 `isError: true`，正文是 `<repl-output>`；JSON-RPC 层只用于协议错误（未知方法、参数不是对象）。
+工具层错误一律 `isError: true`，正文是 `<repl-output>`；JSON-RPC 层只用于协议错误（未知方法、参数不是对象）。`describe_tools` 的 `unknown` 不是错误，`isError` 仍为 `false`。
 
 **错误通道映射**：
 

@@ -437,13 +437,9 @@ async function describeToolsCall(input: unknown, ctx: ToolCallContext): Promise<
   if (!validation.ok) return toolFailure(validation.code, validation.message);
   const args = validation.value as unknown as DescribeToolsInput;
   const result = describeTools(ctx.catalog.snapshot(), args.names, ctx.visibility);
-  if (result.unknown !== undefined) {
-    return toolFailure(
-      'UNKNOWN_TOOL',
-      `unknown or invisible tool names: ${result.unknown.join(', ')}; use search_tools to find canonical names`,
-    );
-  }
-  return jsonResult({ tools: result.tools }, false);
+  const body: Record<string, unknown> = { tools: result.tools };
+  if (result.unknown !== undefined) body['unknown'] = result.unknown;
+  return jsonResult(body, false);
 }
 
 function waitTasksFailure(error: unknown): { ok: false; error: Record<string, unknown> } | undefined {

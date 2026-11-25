@@ -78,7 +78,7 @@ const SEARCH_TOOLS_DESCRIPTION =
   'Search this client\'s visible tools and return canonical names for run_script or describe_tools. An empty query without server returns the server overview plus the __official__ group of bare-name tools; an empty query with server (including __official__) returns that group\'s tools. A non-empty query matches tool names, effective tags and descriptions; server, category and tags only narrow, and tags is all-of. Filter values must come from this request\'s schema enums.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
-  'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names fail, and more than 10 names fails validation. Get names from search_tools.';
+  'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names are listed in unknown; known tools still return. More than 10 names fails validation. Get names from search_tools.';
 
 const WAIT_TASKS_DESCRIPTION =
   'Wait until the given eval tasks started with async: true finish, consume their results, and return events plus a pending count. taskIds is required: pass one or more task ids; the call never collects other tasks of the session.';

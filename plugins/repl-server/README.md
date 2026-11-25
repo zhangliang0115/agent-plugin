@@ -22,17 +22,23 @@
 
 ## 工具面
 
-模型看到 5 个工具：
+模型看到 7 个工具：
 
 ```text
-run_script({ code, timeout?, async?, workspace?, visibleTools?, excludeTags? })
-search_tools({ query?, category?, tags?, max? })
+run_script({ code?, scriptName?, scriptVersion?, args?, activateOnSuccess?, timeout?, async?, workspace?, visibleTools?, excludeTags? })
+search_tools({ query?, server?, category?, tags?, max? })
 describe_tools({ names })
 wait_tasks({ taskIds, timeoutMs? })
 report_problem({ title, detail, severity, context? })
+save_script({ runId?, scriptName?, baseVersion?, mode?, name?, description?, tags?, code?, inputSchema?, exampleArgs?, changelog? })
+search_scripts({ query?, tags?, limit? })
 ```
 
 结果契约、并发档位、审计与容量见 learn-ai 的设计文档 01–03。
+
+## 配套 skill
+
+给 agent 的使用说明在 `skills/zl-repl-server/SKILL.md`：工具发现、`run_script`、长任务、脚本库复用与失败处理。`learn-ai` 仓库的 `cc-plugins/repl-server` 是同一 skill 的安装包装；改内容时两处同步。
 
 ## 开发
 

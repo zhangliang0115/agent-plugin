@@ -403,19 +403,18 @@ test('search_tools and describe_tools report validation failures as isError JSON
   assert.equal(h.catalog.calls, 0);
 });
 
-test('describe_tools returns schemas and fails on unknown names', async () => {
+test('describe_tools returns known schemas and reports unknown names without failing', async () => {
   const h = harness();
   const result = asCallResult(
     await callTool('describe_tools', { names: ['Read', 'pg.query', 'missing'] }, h.ctx),
   );
-  assert.equal(result.isError, true);
-  assert.deepEqual(parseText(result), {
-    ok: false,
-    error: {
-      code: 'UNKNOWN_TOOL',
-      message: 'unknown or invisible tool names: missing; use search_tools to find canonical names',
-    },
-  });
+  assert.equal(result.isError, false);
+  const parsed = parseText(result) as {
+    tools: Array<{ name: string }>;
+    unknown: string[];
+  };
+  assert.deepEqual(parsed.tools.map((tool) => tool.name), ['Read', 'pg.query']);
+  assert.deepEqual(parsed.unknown, ['missing']);
 });
 
 test('describe_tools rejects more than ten names at validation', async () => {
@@ -454,13 +453,18 @@ test('search_tools applies the request visibility before matching', async () => 
   );
 });
 
-test('describe_tools fails on tools outside the request visibility', async () => {
+test('describe_tools reports tools outside the request visibility without failing', async () => {
   const h = harness({ visibility: { allowedServers: ['github'], allowedTags: null } });
   const result = asCallResult(
     await callTool('describe_tools', { names: ['Read', 'pg.query'] }, h.ctx),
   );
-  assert.equal(result.isError, true);
-  assert.equal((parseText(result) as { error: { code: string } }).error.code, 'UNKNOWN_TOOL');
+  assert.equal(result.isError, false);
+  const parsed = parseText(result) as {
+    tools: Array<{ name: string }>;
+    unknown: string[];
+  };
+  assert.deepEqual(parsed.tools.map((tool) => tool.name), ['Read']);
+  assert.deepEqual(parsed.unknown, ['pg.query']);
 });
 
 test('search_tools rejects server, category and tags outside the per-request enums', async () => {
