@@ -19,6 +19,7 @@ import {
   type ServerStore,
 } from '../src/admin/servers.ts';
 import { createFileSecretStore } from '../src/secrets/store.ts';
+import { canonicalToolDiscovery, parseToolDiscoveryConfig } from '../src/discovery/config.ts';
 
 class MemoryServerStore implements ServerStore {
   readonly records = new Map<string, ServerRecord>();
@@ -514,4 +515,18 @@ test('old documents without toolDiscovery import as static', async (t) => {
   );
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal(store.records.get('hexhub')?.toolDiscovery ?? null, null);
+});
+
+test('__proto__ inside discovery args is canonicalized as data, not a prototype', () => {
+  const args = JSON.parse('{"__proto__":{"polluted":true},"q":"$query"}') as Record<string, unknown>;
+  const config = parseToolDiscoveryConfig({ mode: 'search', searchTool: 'search_tools', args });
+  assert.ok(config !== null);
+
+  const canonical = JSON.parse(canonicalToolDiscovery(config)) as {
+    args: Record<string, unknown>;
+  };
+  assert.equal(Object.hasOwn(canonical.args, '__proto__'), true);
+  assert.deepEqual(canonical.args['__proto__'], { polluted: true });
+  assert.deepEqual(canonical.args['q'], '$query');
+  assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
 });

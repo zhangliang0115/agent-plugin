@@ -34,6 +34,9 @@ export const LOG_HIGH_WATER_RATIO = 0.8;
 /** Boot reports kept regardless of age; they are tiny but unbounded in count. */
 export const BOOTS_KEEP = 50;
 
+/** A persisting failure warns at most once per minute, not once per retry. */
+const WARN_INTERVAL_MS = 60_000;
+
 export interface RetentionOptions {
   /** The `log/` directory. Nothing outside it is ever touched. */
   logDir: string;
@@ -132,6 +135,8 @@ export function createRetention(options: RetentionOptions): Retention {
   let timer: NodeJS.Timeout | undefined;
   /** `payload_high_water` is a daily nudge, not a per-sweep drumbeat. */
   let warnedDay: string | null = null;
+  /** Last time a sweep failure reached the log, for {@link WARN_INTERVAL_MS}. */
+  let lastWarnAt: number | null = null;
 
   /** UTC days present under `log/`, from file names and `payload/` folders. */
   async function days(): Promise<string[]> {
@@ -287,26 +292,43 @@ export function createRetention(options: RetentionOptions): Retention {
     return state;
   }
 
-  return {
-    runOnce() {
-      queue = queue.then(
-        () => sweep(),
-        () => sweep(),
-      ).catch((error: unknown) => {
-        state = {
-          ...state,
-          lastRunAt: now(),
-          error: error instanceof Error ? error.message : String(error),
-        };
-        log(`retention failed: ${state.error ?? 'unknown'}`, { level: 'error', scope: 'audit' });
-        return state;
-      });
-      return queue;
-    },
+  /** Records a failed sweep and warns, at most once per {@link WARN_INTERVAL_MS}. */
+  function recordFailure(error: unknown): RetentionStats {
+    const at = now();
+    const message = error instanceof Error ? error.message : String(error);
+    state = { ...state, lastRunAt: at, error: message };
+    if (lastWarnAt === null || at - lastWarnAt >= WARN_INTERVAL_MS) {
+      lastWarnAt = at;
+      log(`retention failed: ${message}`, { level: 'warn', scope: 'audit' });
+    }
+    return state;
+  }
+
+  function runOnce(): Promise<RetentionStats> {
+    queue = queue.then(
+      () => sweep(),
+      // The queue only rejects when reporting a failure itself threw; retry the
+      // sweep instead of dropping it, and report the carried rejection.
+      (previous: unknown) => {
+        recordFailure(previous);
+        return sweep();
+      },
+    ).catch(recordFailure);
+    return queue;
+  }
+
+  const retention: Retention = {
+    runOnce,
     start() {
       if (timer !== undefined) return;
       timer = setInterval(() => {
-        void this.runOnce();
+        // Captured `retention`, not `this`: a detached start/stop must still work.
+        void retention.runOnce().catch((error: unknown) => {
+          log(`retention failed: ${error instanceof Error ? error.message : String(error)}`, {
+            level: 'warn',
+            scope: 'audit',
+          });
+        });
       }, intervalMs);
       timer.unref?.();
     },
@@ -319,4 +341,5 @@ export function createRetention(options: RetentionOptions): Retention {
       return state;
     },
   };
+  return retention;
 }

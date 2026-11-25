@@ -113,6 +113,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Payload keys may be `__proto__`; defineProperty keeps them own data. */
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function sha256Buffer(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
@@ -189,7 +199,7 @@ function replaceBlobMembers(value: Record<string, unknown>, depth: number): Reco
     ) {
       out.blob = replaceBlob(member, value.mimeType ?? value.mediaType);
     } else {
-      out[key] = transformValue(member, depth + 1);
+      setOwn(out, key, transformValue(member, depth + 1));
     }
   }
   return out;
@@ -213,14 +223,14 @@ function transformValue(value: unknown, depth = 0): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, member] of Object.entries(value)) {
     if (SECRET_KEY.test(key)) {
-      out[key] = '<redacted>';
+      setOwn(out, key, '<redacted>');
       continue;
     }
     if (URL_KEY.test(key) && typeof member === 'string') {
-      out[key] = stripUrlQuery(member);
+      setOwn(out, key, stripUrlQuery(member));
       continue;
     }
-    out[key] = transformValue(member, depth + 1);
+    setOwn(out, key, transformValue(member, depth + 1));
   }
   return out;
 }

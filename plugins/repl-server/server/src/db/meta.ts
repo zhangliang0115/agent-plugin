@@ -62,7 +62,13 @@ export function listSettings(db: DatabaseSync): Record<string, unknown> {
   for (const row of rows) {
     const key = readText(row, 'key');
     if (key === null) continue;
-    out[key] = parseSettingValue(readText(row, 'value'), key);
+    // A setting key may be `__proto__`; defineProperty keeps it own data.
+    Object.defineProperty(out, key, {
+      value: parseSettingValue(readText(row, 'value'), key),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
   return out;
 }

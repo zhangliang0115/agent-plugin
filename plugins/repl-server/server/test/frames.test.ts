@@ -195,6 +195,22 @@ test('full mode redacts Authorization/Cookie, strips URL queries and replaces ba
   });
 });
 
+test('full mode keeps a __proto__ payload key as data without polluting prototypes', () => {
+  const { sink, recorder } = makeRecorder('full');
+  const params = JSON.parse('{"__proto__":{"polluted":true},"safe":1}') as Record<string, unknown>;
+  recorder.recordIn({ mcp: 'mcp_1', id: 5, method: 'tools/call', params });
+  recorder.flush();
+
+  const event = sink.events[0];
+  assert.ok(event !== undefined);
+  const recorded = event.params as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(recorded), Object.prototype);
+  assert.equal(Object.hasOwn(recorded, '__proto__'), true);
+  assert.deepEqual(recorded['__proto__'], { polluted: true });
+  assert.deepEqual(recorded['safe'], 1);
+  assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+});
+
 test('full mode keeps a large payload verbatim for the runtime to externalise', () => {
   const { sink, recorder } = makeRecorder('full');
   const params = { blobText: 'y'.repeat(300 * 1024) };

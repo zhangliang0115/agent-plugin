@@ -18,6 +18,7 @@ class FakeChild {
   readonly stderr = new PassThrough();
   readonly written: WrittenMessage[] = [];
   private readonly exitListeners: Array<() => void> = [];
+  private readonly errorListeners: Array<(error: Error) => void> = [];
   private exited = false;
 
   constructor() {
@@ -53,7 +54,13 @@ class FakeChild {
   }
 
   once(event: 'exit' | 'error', listener: () => void): this {
-    return this.on(event as 'exit', listener);
+    if (event === 'error') this.errorListeners.push(listener as (error: Error) => void);
+    else this.exitListeners.push(listener);
+    return this;
+  }
+
+  emitError(error: Error): void {
+    for (const listener of this.errorListeners.splice(0)) listener(error);
   }
 
   kill(): boolean {
@@ -122,5 +129,30 @@ test('a per-request timeout narrows the client-wide budget', async () => {
     /serve request timed out: tools\/call/,
   );
   assert.ok(Date.now() - started < 500);
+  await client.close();
+});
+
+test('a stdin error rejects pending requests instead of crashing', async () => {
+  const { client, child } = await connect();
+  const pending = client.callTool('Slow', {});
+  await tick();
+
+  const error = new Error('EPIPE');
+  child.stdin.emit('error', error);
+
+  await assert.rejects(pending, (reason: unknown) => reason === error);
+  await client.close();
+});
+
+test('a process error rejects pending requests and leaves the client closed', async () => {
+  const { client, child } = await connect();
+  const pending = client.callTool('Slow', {});
+  await tick();
+
+  const error = new Error('spawn ENOENT');
+  child.emitError(error);
+
+  await assert.rejects(pending, (reason: unknown) => reason === error);
+  assert.equal(client.isClosed, true);
   await client.close();
 });

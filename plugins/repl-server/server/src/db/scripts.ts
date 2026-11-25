@@ -15,6 +15,7 @@ import {
   requireText,
 } from './schema.ts';
 import type { DbRow } from './schema.ts';
+import { likeContainsPattern } from '../search/fts-kernel.ts';
 
 export type EntryMode = 'code' | 'script';
 export type ScriptRunPurpose = 'run' | 'test';
@@ -337,8 +338,10 @@ export function listScripts(
     params.push(query.status);
   }
   if (query.query !== undefined && query.query !== '') {
-    where.push('(s.name LIKE ? OR s.description LIKE ? OR s.tags_json LIKE ?)');
-    const like = `%${query.query}%`;
+    where.push(
+      "(s.name LIKE ? ESCAPE '\\' OR s.description LIKE ? ESCAPE '\\' OR s.tags_json LIKE ? ESCAPE '\\')",
+    );
+    const like = likeContainsPattern(query.query);
     params.push(like, like, like);
   }
   if (query.cursor !== undefined && query.cursor !== null) {

@@ -137,7 +137,9 @@ function visibleTools(snapshot: CatalogSnapshot, input: SearchToolsInput): Catal
  */
 export function searchTools(snapshot: CatalogSnapshot, input: SearchToolsInput): SearchToolItem[] {
   const tools = visibleTools(snapshot, input);
-  const limit = input.max ?? SEARCH_DEFAULT_MAX;
+  // A negative or non-finite max turns `slice` into "all but N" or no cap.
+  const requested = input.max ?? SEARCH_DEFAULT_MAX;
+  const limit = Number.isSafeInteger(requested) && requested > 0 ? requested : SEARCH_DEFAULT_MAX;
   const query = (input.query ?? '').trim();
 
   if (query === '') {

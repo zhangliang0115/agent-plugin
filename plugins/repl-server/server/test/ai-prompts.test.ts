@@ -4,7 +4,12 @@ import test from 'node:test';
 
 import { DEFAULT_CATEGORY_DICTIONARY } from '../src/admin/categories.ts';
 import { DEFAULT_TAG_DICTIONARY } from '../src/admin/tags.ts';
-import { buildAnnotatePrompt, buildProposePrompt, PROMPT_VERSION } from '../src/ai/prompts.ts';
+import {
+  buildAnnotatePrompt,
+  buildProposePrompt,
+  PROMPT_VERSION,
+  truncateDescription,
+} from '../src/ai/prompts.ts';
 
 test('propose prompt injects both dictionaries and forbids invented keys', () => {
   const prompt = buildProposePrompt(
@@ -52,4 +57,25 @@ test('annotate prompt carries both dictionaries and the suggestion rules', () =>
   assert.match(result.prompt, /不要生成工具描述/);
   assert.match(result.prompt, /"toolOverrides": \[\n    \{"name": "query", "tags"/);
   assert.doesNotMatch(result.prompt, /"description": "Run a read-only/);
+});
+
+test('description truncation keeps 400 characters and never splits a surrogate pair', () => {
+  assert.equal(truncateDescription(null), null);
+  const ascii = 'a'.repeat(400);
+  assert.equal(truncateDescription(ascii), ascii);
+
+  const longAscii = truncateDescription('a'.repeat(401)) ?? '';
+  assert.equal([...longAscii].length, 401);
+  assert.ok(longAscii.endsWith('…'));
+
+  const chinese = '中'.repeat(200);
+  assert.equal(truncateDescription(chinese), chinese);
+
+  const emoji = truncateDescription('😀'.repeat(401)) ?? '';
+  assert.equal([...emoji].length, 401);
+  assert.equal(
+    Buffer.from(emoji, 'utf8').toString('utf8'),
+    emoji,
+    'a surrogate pair must not be cut in half',
+  );
 });

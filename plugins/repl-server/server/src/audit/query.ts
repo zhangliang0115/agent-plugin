@@ -321,7 +321,7 @@ export function parseLimit(
 ): number {
   if (value === null || value === undefined || value.trim() === '') return fallback;
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maximum) {
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
     throw new InvalidAuditFilterError(`limit must be an integer between 1 and ${maximum}`, {
       limit: value,
     });
@@ -679,7 +679,7 @@ export async function queryAudit(
 ): Promise<AuditQueryResult> {
   const normalized = ensureAuditFilter(filter);
   const limit = options.limit ?? AUDIT_PAGE_SIZE;
-  if (!Number.isInteger(limit) || limit < 1 || limit > AUDIT_MAX_PAGE_SIZE) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > AUDIT_MAX_PAGE_SIZE) {
     throw new InvalidAuditFilterError(`limit must be an integer between 1 and ${AUDIT_MAX_PAGE_SIZE}`, {
       limit,
     });
@@ -905,6 +905,10 @@ export async function* exportAuditJsonl(
 ): AsyncGenerator<string> {
   const normalized = ensureAuditFilter(filter);
   const maxRows = options.maxRows ?? AUDIT_EXPORT_MAX_ROWS;
+  // NaN/Infinity would make the generator's only stop condition never fire.
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1) {
+    throw new InvalidAuditFilterError('maxRows must be a positive integer', { maxRows });
+  }
   let emitted = 0;
   for await (const { event } of streamAuditEvents(dir, 'events', normalized)) {
     if (emitted >= maxRows) return;
@@ -1324,7 +1328,7 @@ export class AuditStatsService {
       options.timeoutGraceMs ?? this.defaults.timeoutGraceMs ?? AUDIT_STATS_TIMEOUT_GRACE_MS;
     const workerFactory =
       options.workerFactory ?? this.defaults.workerFactory ?? defaultStatsWorkerFactory;
-    if (!Number.isInteger(maxRows) || maxRows < 1) {
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1) {
       throw new InvalidAuditFilterError('maxRows must be a positive integer', { maxRows });
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {

@@ -11,6 +11,16 @@ import type { LogFields } from '../src/log.ts';
 
 const MB = 1024 * 1024;
 
+test('rejects a non-positive or non-finite interval instead of sampling in a loop', () => {
+  for (const intervalMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => createResourceMonitor({ log: () => undefined, intervalMs }),
+      RangeError,
+      `intervalMs=${String(intervalMs)} must be rejected`,
+    );
+  }
+});
+
 test('aggregates descendants and computes the self CPU delta', () => {
   const root = process.pid;
   const rows = [
@@ -125,7 +135,7 @@ test('reuses the last child values when ps fails and warns at most once a minute
   assert.equal(warnings.length, 2, 'a new warn is allowed after a minute');
 });
 
-test('keeps the five largest descendants with a truncated command', () => {
+test('keeps the five largest descendants with their command identity', () => {
   const root = process.pid;
   const longCommand = `node ${'x'.repeat(200)}`;
   const rows = [
@@ -152,12 +162,63 @@ test('keeps the five largest descendants with a truncated command', () => {
   const current = monitor.snapshot().current;
   assert.equal(current?.childCount, 6, 'the unrelated top-level process is not a descendant');
   assert.deepEqual(current?.children, [
-    { pid: root + 1, rssBytes: 70 * MB, command: longCommand.slice(0, 120) },
+    { pid: root + 1, rssBytes: 70 * MB, command: longCommand },
     { pid: root + 2, rssBytes: 60 * MB, command: 'node heavy.js' },
     { pid: root + 3, rssBytes: 50 * MB, command: '' },
     { pid: root + 4, rssBytes: 40 * MB, command: 'node four.js' },
     { pid: root + 5, rssBytes: 30 * MB, command: 'node five.js' },
   ]);
+});
+
+test('child commands keep only the first three tokens and redact secret values', () => {
+  const root = process.pid;
+  const rows = [
+    {
+      pid: root + 1,
+      ppid: root,
+      rssBytes: 90 * MB,
+      cpuPercent: 0,
+      command: 'npm exec prometheus-mcp-server --port 9090',
+    },
+    {
+      pid: root + 2,
+      ppid: root,
+      rssBytes: 80 * MB,
+      cpuPercent: 0,
+      command: 'node /srv/server.js --api-key super-secret-value',
+    },
+    {
+      pid: root + 3,
+      ppid: root,
+      rssBytes: 70 * MB,
+      cpuPercent: 0,
+      command: 'node app.js --token=abc',
+    },
+    { pid: root + 4, ppid: root, rssBytes: 60 * MB, cpuPercent: 0, command: '' },
+  ];
+  const monitor = createResourceMonitor({
+    log: () => undefined,
+    intervalMs: 1_000,
+    now: () => 1_000_000,
+    memoryUsage: () => ({ rss: 1 * MB }),
+    cpuUsage: () => ({ user: 0, system: 0 }),
+    readRows: () => rows,
+  });
+
+  monitor.start();
+  monitor.stop();
+
+  const children = monitor.snapshot().current?.children ?? [];
+  assert.deepEqual(children, [
+    { pid: root + 1, rssBytes: 90 * MB, command: 'npm exec prometheus-mcp-server' },
+    { pid: root + 2, rssBytes: 80 * MB, command: 'node /srv/server.js --api-key' },
+    { pid: root + 3, rssBytes: 70 * MB, command: 'node app.js --token=<redacted>' },
+    { pid: root + 4, rssBytes: 60 * MB, command: '' },
+  ]);
+  assert.ok(
+    children.every((child) => !child.command.includes('super-secret-value')),
+    'the secret resolved at spawn time never reaches the sample',
+  );
 });
 
 test('raises one memory warning per interval above the child RSS threshold', () => {

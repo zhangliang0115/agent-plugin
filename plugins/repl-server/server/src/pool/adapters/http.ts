@@ -27,6 +27,9 @@ const DELETE_TIMEOUT_MS = 2_000;
 /** How much of a non-2xx body is kept in `detail`. */
 const ERROR_BODY_CHARS = 2_048;
 
+/** Upper bound on one response body, matching the stdio frame cap. */
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+
 function messageOf(error: unknown): string {
   if (error instanceof Error && error.message !== '') return error.message;
   return error === undefined ? 'unknown error' : String(error);
@@ -170,7 +173,13 @@ export class HttpTransport implements RpcTransport {
         return;
       }
       if (!response.ok) {
-        const body = await response.text().catch(() => '');
+        let body = '';
+        try {
+          body = await this.readBody(response);
+        } catch (error) {
+          if (error instanceof McpToolError) throw error;
+          body = '';
+        }
         throw new McpToolError(`MCP HTTP server answered ${response.status}`, {
           code: 'MCP_SERVER_UNAVAILABLE',
           retryable: true,
@@ -185,7 +194,7 @@ export class HttpTransport implements RpcTransport {
         return;
       }
 
-      const text = await response.text();
+      const text = await this.readBody(response);
       if (text.trim() === '') return;
       this.emitMessage(parseJsonFrame(text));
     } catch (error) {
@@ -227,6 +236,46 @@ export class HttpTransport implements RpcTransport {
   }
 
   /**
+   * Reads a whole response body under the byte cap. The length header is a
+   * cheap early rejection; the streamed count is authoritative.
+   */
+  private async readBody(response: Response): Promise<string> {
+    const declared = response.headers.get('content-length');
+    if (declared !== null && Number(declared) > MAX_RESPONSE_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      throw this.responseTooLarge();
+    }
+    const body = response.body;
+    if (body === null) return '';
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let total = 0;
+    let text = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          text += decoder.decode();
+          return text;
+        }
+        total += value.byteLength;
+        if (total > MAX_RESPONSE_BYTES) throw this.responseTooLarge();
+        text += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+
+  private responseTooLarge(): McpToolError {
+    return new McpToolError('MCP HTTP response exceeded the size limit', {
+      code: 'MCP_PROTOCOL_ERROR',
+      retryable: true,
+    });
+  }
+
+  /**
    * Reads one SSE body. Data lines are joined per the SSE specification; the
    * POST is released as soon as the response frame with `requestId` is seen, so
    * a server that leaves the stream open cannot hold the caller.
@@ -239,11 +288,17 @@ export class HttpTransport implements RpcTransport {
         retryable: true,
       });
     }
+    const declared = response.headers.get('content-length');
+    if (declared !== null && Number(declared) > MAX_RESPONSE_BYTES) {
+      await body.cancel().catch(() => {});
+      throw this.responseTooLarge();
+    }
 
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let dataLines: string[] = [];
+    let total = 0;
     let stop = false;
 
     const dispatch = (): void => {
@@ -276,6 +331,8 @@ export class HttpTransport implements RpcTransport {
           buffer += decoder.decode();
           break;
         }
+        total += value.byteLength;
+        if (total > MAX_RESPONSE_BYTES) throw this.responseTooLarge();
         buffer += decoder.decode(value, { stream: true });
         for (;;) {
           const index = buffer.indexOf('\n');
@@ -288,7 +345,9 @@ export class HttpTransport implements RpcTransport {
       if (buffer !== '') processLine(buffer);
       dispatch();
     } finally {
-      if (stop) await reader.cancel().catch(() => {});
+      // Cancel on the stop path (the server may keep the stream open) and after
+      // a size violation; cancelling an already-finished stream is a no-op.
+      await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

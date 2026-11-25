@@ -164,6 +164,31 @@ const EVAL_WATCHDOG_INTERVAL_MS = 60_000;
 const SCRIPT_RUN_PRUNE_INTERVAL_MS = 86_400_000;
 
 /**
+ * Wraps a timer callback: a throw or rejection becomes one warn line instead of
+ * an uncaught exception, and the interval keeps firing.
+ */
+function timerGuard(
+  log: LogFn,
+  scope: string,
+  what: string,
+  run: () => unknown,
+): () => void {
+  const fail = (error: unknown): void => {
+    log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`, {
+      level: 'warn',
+      scope,
+    });
+  };
+  return () => {
+    try {
+      void Promise.resolve(run()).catch(fail);
+    } catch (error) {
+      fail(error);
+    }
+  };
+}
+
+/**
  * Stops accepting connections and waits for the listener to close. Idle
  * keep-alive sockets are dropped first; a lingering request cannot hold
  * shutdown forever, so the wait is bounded.
@@ -494,7 +519,10 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       entries,
     });
   };
-  const poolStateTimer = setInterval(publishPoolState, 2_000);
+  const poolStateTimer = setInterval(
+    timerGuard(log, 'pool', 'pool state publish', publishPoolState),
+    2_000,
+  );
   poolStateTimer.unref();
 
   const auditSink = {
@@ -1244,50 +1272,58 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     );
     return run;
   };
-  const sweepTimer = setInterval(() => {
-    void sweepNow();
-  }, options.sweepIntervalMs ?? SWEEP_INTERVAL_MS);
+  const sweepTimer = setInterval(
+    timerGuard(log, 'exec', 'idle sweep', sweepNow),
+    options.sweepIntervalMs ?? SWEEP_INTERVAL_MS,
+  );
   sweepTimer.unref();
 
   // One sweep at boot (a crash can leave yesterday's payload tree behind) and
   // then every six hours; failures are logged by the service itself.
   retention.start();
-  void retention.runOnce();
+  void retention.runOnce().catch((error: unknown) => {
+    log(`retention run failed: ${(error as Error).message}`, { level: 'warn', scope: 'audit' });
+  });
   // `run/` is not a log domain, but stale `sessions/<id>` dirs are bounded
   // state: one sweep at boot, then every six hours on the same cadence.
   sessionPruner.start();
-  void sessionPruner.runOnce();
+  void sessionPruner.runOnce().catch((error: unknown) => {
+    log(`session prune run failed: ${(error as Error).message}`, { level: 'warn', scope: 'serve' });
+  });
 
   // Each eval warns once when it first crosses the threshold; the key is
   // dropped once that eval settles.
   const warnedEvals = new Set<string>();
-  const evalWatchdogTimer = setInterval(() => {
-    if (closing) return;
-    // The default 200-row page would hide young evals behind old stuck ones.
-    const inFlight = gateway.inFlightEvals(Number.MAX_SAFE_INTEGER);
-    if (inFlight.total === 0) {
-      warnedEvals.clear();
-      return;
-    }
-    const live = new Set(inFlight.items.map((item) => `${item.exec}:${item.evalId}`));
-    for (const key of warnedEvals) {
-      if (!live.has(key)) warnedEvals.delete(key);
-    }
-    for (const item of stuckEvalsOf(inFlight.items)) {
-      const key = `${item.exec}:${item.evalId}`;
-      if (warnedEvals.has(key)) continue;
-      warnedEvals.add(key);
-      log(`eval ${item.evalId} has been in flight for ${item.ageMs}ms`, {
-        level: 'warn',
-        scope: 'eval',
-        exec: item.exec,
-        evalId: item.evalId,
-        binding: item.binding,
-        workspace: item.workspace,
-        ageMs: item.ageMs,
-      });
-    }
-  }, EVAL_WATCHDOG_INTERVAL_MS);
+  const evalWatchdogTimer = setInterval(
+    timerGuard(log, 'eval', 'eval watchdog', () => {
+      if (closing) return;
+      // The default 200-row page would hide young evals behind old stuck ones.
+      const inFlight = gateway.inFlightEvals(Number.MAX_SAFE_INTEGER);
+      if (inFlight.total === 0) {
+        warnedEvals.clear();
+        return;
+      }
+      const live = new Set(inFlight.items.map((item) => `${item.exec}:${item.evalId}`));
+      for (const key of warnedEvals) {
+        if (!live.has(key)) warnedEvals.delete(key);
+      }
+      for (const item of stuckEvalsOf(inFlight.items)) {
+        const key = `${item.exec}:${item.evalId}`;
+        if (warnedEvals.has(key)) continue;
+        warnedEvals.add(key);
+        log(`eval ${item.evalId} has been in flight for ${item.ageMs}ms`, {
+          level: 'warn',
+          scope: 'eval',
+          exec: item.exec,
+          evalId: item.evalId,
+          binding: item.binding,
+          workspace: item.workspace,
+          ageMs: item.ageMs,
+        });
+      }
+    }),
+    EVAL_WATCHDOG_INTERVAL_MS,
+  );
   evalWatchdogTimer.unref();
 
   return {

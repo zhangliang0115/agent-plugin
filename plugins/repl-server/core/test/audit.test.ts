@@ -1,5 +1,6 @@
 // hook-allow: this test deliberately builds dummy credential strings to prove redaction.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,6 +60,72 @@ test('redacts credential values while keeping their key names', () => {
   assert.match(redacted, /\?keep=1&token=<redacted>/);
 });
 
+test('redacts bearer tokens regardless of case', () => {
+  const token = ['lower', 'case', 'bearer', '0123456789'].join('-');
+  const redacted = redactValue(`curl -H 'bearer ${token}'`);
+
+  assert.ok(!redacted.includes(token));
+  assert.match(redacted, /Bearer <redacted>/);
+});
+
+test('redacts URL userinfo and fragments but leaves plain text alone', () => {
+  const password = ['hunter', '2', 'dummy'].join('-');
+  const fragmentToken = ['oauth', 'fragment', '7f3a'].join('-');
+  const text = [
+    `git clone https://user:${password}@github.com/org/repo.git`,
+    `open https://x.test/cb#access_token=${fragmentToken}`,
+  ].join('\n');
+
+  const redacted = redactValue(text);
+  assert.ok(!redacted.includes(password));
+  assert.ok(!redacted.includes(fragmentToken));
+  assert.match(redacted, /https:\/\/<redacted>@github\.com\/org\/repo\.git/);
+  assert.match(redacted, /https:\/\/x\.test\/cb#<redacted>/);
+
+  const prose = 'see example.com/#/faq or mail dev@example.com';
+  assert.equal(redactValue(prose), prose, 'only scheme:// URLs are rewritten');
+});
+
+test('redacts quoted JSON credential keys while keeping the key', () => {
+  const passwordKey = ['pass', 'word'].join('');
+  const tokenValue = ['abc', '123', 'def'].join('-');
+  const passwordValue = ['hunter', '2', 'dummy'].join('-');
+  const redacted = redactValue(`{"token": "${tokenValue}", '${passwordKey}': '${passwordValue}'}`);
+
+  assert.ok(!redacted.includes(tokenValue));
+  assert.ok(!redacted.includes(passwordValue));
+  assert.match(redacted, /"token":\s*<redacted>/);
+  assert.ok(redacted.includes(`'${passwordKey}':<redacted>`));
+});
+
+test('descriptive token keys keep their values; secret-bearing names are redacted', () => {
+  const out = redactDeep({
+    tokenCount: 3,
+    tokenLength: 128,
+    secretType: 'oauth',
+    accessToken: 'abc',
+    api_key: 'def',
+    authorization: 'Bearer xyz',
+  }) as Record<string, unknown>;
+
+  assert.equal(out.tokenCount, 3);
+  assert.equal(out.tokenLength, 128);
+  assert.equal(out.secretType, 'oauth');
+  assert.equal(out.accessToken, '<redacted>');
+  assert.equal(out.api_key, '<redacted>');
+  assert.equal(out.authorization, '<redacted>');
+});
+
+test('a __proto__ key stays inert data and does not pollute Object.prototype', () => {
+  const payload = JSON.parse('{"__proto__":{"polluted":true},"format":"json"}') as Record<string, unknown>;
+  const out = redactDeep(payload) as Record<string, unknown>;
+
+  assert.equal(Object.getPrototypeOf(out), null);
+  assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(out, '__proto__'), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(out)), payload);
+});
+
 test('strips URL query strings', () => {
   assert.equal(stripUrlQuery('https://example.com/x?token=abc&y=1'), 'https://example.com/x');
   assert.equal(stripUrlQuery('/relative/path?token=abc'), '/relative/path');
@@ -79,7 +146,7 @@ test('redactDeep keeps a 9-level query structure intact', () => {
     },
   };
 
-  assert.deepEqual(redactDeep(fields), fields);
+  assert.deepEqual(JSON.parse(JSON.stringify(redactDeep(fields))), fields);
 });
 
 test('redactDeep replaces content past 16 levels with [max-depth]', () => {
@@ -165,8 +232,8 @@ test('summarizes Edit with a redacted head and byte counts', () => {
   assert.ok((summary.oldHead as string).length <= 100);
   assert.ok(!(summary.oldHead as string).includes('b'.repeat(40)));
   assert.match(summary.oldHead as string, /<redacted>/);
-  assert.equal(summary.oldBytes, oldString.length);
-  assert.equal(summary.newBytes, newString.length);
+  assert.equal(summary.oldBytes, Buffer.byteLength(oldString, 'utf8'));
+  assert.equal(summary.newBytes, Buffer.byteLength(newString, 'utf8'));
 });
 
 test('bounds unknown tool arguments to 2KB and depth 2', () => {
@@ -190,6 +257,44 @@ test('boundedJson falls back when the value cannot fit', () => {
 
   assert.equal(bounded.truncated, true);
   assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= 512);
+});
+
+test('summarizes UTF-8 byte counts, not UTF-16 code units', () => {
+  const text = '中文内容'; // 4 characters, 12 UTF-8 bytes
+  const edit = summarizeArgs('Edit', { file_path: '/tmp/a.ts', old_string: text, new_string: text });
+  assert.equal(edit.oldBytes, 12);
+  assert.equal(edit.newBytes, 12);
+
+  const write = summarizeArgs('Write', { file_path: '/tmp/a.ts', content: text });
+  assert.equal(write.contentBytes, 12);
+});
+
+test('truncated strings hash their redacted text, never the original', () => {
+  const secret = ['dummy', 'token', 'value', '42'].join('-');
+  const text = `${'x'.repeat(300)} token=${secret}`;
+  const bounded = boundedJson(text) as Record<string, unknown>;
+
+  assert.equal(typeof bounded.sha256, 'string');
+  assert.equal(typeof bounded.len, 'number');
+  assert.equal(bounded.sha256, createHash('sha256').update(redactValue(text)).digest('hex'));
+  assert.notEqual(bounded.sha256, createHash('sha256').update(text).digest('hex'));
+});
+
+test('wide containers keep 100 entries and mark the rest', () => {
+  const wide: Record<string, number> = {};
+  for (let index = 0; index < 150; index += 1) wide[`k${index}`] = index;
+
+  const bounded = boundedJson({ wide }) as { wide: Record<string, unknown> };
+  assert.equal(Object.keys(bounded.wide).length, 101);
+  assert.equal(bounded.wide['[+50 more]'], true);
+  assert.equal(bounded.wide['k99'], 99);
+  assert.equal('k100' in bounded.wide, false);
+
+  const listed = boundedJson({ list: Array.from({ length: 150 }, (_, index) => index) }) as {
+    list: unknown[];
+  };
+  assert.equal(listed.list.length, 101);
+  assert.equal(listed.list[100], '[+50 more]');
 });
 
 test('splits files at UTC midnight and creates them with 0600', async () => {
@@ -350,6 +455,65 @@ test('prune only touches files with the writer prefix', async () => {
       'audit-2020-01-01.jsonl',
       'protocol-2026-11-18.jsonl',
     ]);
+  });
+});
+
+test('event fields cannot override writer-supplied attribution', async () => {
+  await withTempDir(async (dir) => {
+    const writer = new AuditWriter({
+      dir,
+      identity: IDENTITY,
+      now: () => Date.parse('2026-11-18T10:00:00.000Z'),
+    });
+
+    writer.write('eval_start', {
+      mcp: 'mcp_forged',
+      binding: 'cb_forged',
+      identity: 'unbound',
+      client: 'forged/0',
+      exec: 'es_forged',
+      v: 99,
+      ts: '1999-01-01T00:00:00.000Z',
+      evalId: 5,
+    });
+    await writer.close();
+
+    const [event] = await readEvents(join(dir, 'events-2026-11-18.jsonl'));
+    assert.ok(event !== undefined);
+    assert.equal(event.mcp, IDENTITY.mcp);
+    assert.equal(event.binding, IDENTITY.binding);
+    assert.equal(event.identity, 'bound');
+    assert.equal(event.client, IDENTITY.client);
+    assert.equal(event.exec, IDENTITY.exec);
+    assert.equal(event.v, 2);
+    assert.equal(event.ts, '2026-11-18T10:00:00.000Z');
+    assert.equal(event.evalId, 5);
+  });
+});
+
+test('without a writer identity, event fields still carry attribution', async () => {
+  await withTempDir(async (dir) => {
+    const writer = new AuditWriter({ dir, now: () => Date.parse('2026-11-18T10:30:00.000Z') });
+
+    writer.write('tool_call', { tool: 'Bash', mcp: 'mcp_row', binding: 'cb_row', identity: 'bound' });
+    await writer.close();
+
+    const [event] = await readEvents(join(dir, 'events-2026-11-18.jsonl'));
+    assert.ok(event !== undefined);
+    assert.equal(event.mcp, 'mcp_row');
+    assert.equal(event.binding, 'cb_row');
+    assert.equal(event.tool, 'Bash');
+  });
+});
+
+test('flush rejects after a write has failed', async () => {
+  await withTempDir(async (dir) => {
+    const writer = new AuditWriter({ dir, now: () => Date.parse('2026-11-18T11:00:00.000Z') });
+
+    writer.write('eval_start', { evalId: 1, unserializable: 1n });
+    assert.equal(writer.healthy, false);
+    await assert.rejects(() => writer.flush(), /serialize/u);
+    await writer.close();
   });
 });
 

@@ -9,7 +9,7 @@ import { openStateDb } from '../src/db/migrate.ts';
 import { hashScriptCode, type ScriptCandidateSuggester } from '../src/scripts/analysis/index.ts';
 import { ScriptCandidatesService } from '../src/scripts/candidates.ts';
 import { normalizeCandidateSuggestion } from '../src/scripts/candidate-suggester.ts';
-import { ScriptService, SCRIPT_RUN_RETENTION_DAYS } from '../src/scripts/service.ts';
+import { ScriptService, SCRIPT_CODE_MAX_BYTES, SCRIPT_RUN_RETENTION_DAYS } from '../src/scripts/service.ts';
 
 const NOW = Date.UTC(2026, 10, 24, 6, 0, 0);
 const NOW_ISO = new Date(NOW).toISOString();
@@ -530,6 +530,26 @@ test('candidate list paginates, filters and rejects reviewed candidates once', a
   });
   assert.equal(scanValidation.status, 400);
   assert.equal(errorCode(scanValidation), 'INVALID_FIELD');
+});
+
+test('accept rejects code that exceeds the UTF-8 byte cap even below the char cap', async (t) => {
+  const f = fixture(t);
+  seedRun(f, 'r1', echo('alpha'), { toolsUsed: ['demo.echo'] });
+  await scan(f);
+  const candidate = (await list(f)).items[0];
+  assert.ok(candidate !== undefined);
+
+  const code = `return "${'😀'.repeat(Math.ceil(SCRIPT_CODE_MAX_BYTES / 4) + 1)}";`;
+  assert.ok(code.length <= SCRIPT_CODE_MAX_BYTES, 'fixture must fit the UTF-16 cap');
+  assert.ok(Buffer.byteLength(code, 'utf8') > SCRIPT_CODE_MAX_BYTES);
+
+  const response = await f.call(
+    'POST',
+    `/admin/api/script-candidates/${candidate.candidateId}/accept`,
+    { code },
+  );
+  assert.equal(response.status, 400);
+  assert.equal(errorCode(response), 'INVALID_FIELD');
 });
 
 test('AI suggestion validation rejects invalid schemas, code and empty output', () => {

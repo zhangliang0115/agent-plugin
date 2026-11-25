@@ -46,25 +46,30 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/** Own entries only; `constructor`/`toString` must not resolve via the prototype. */
+function lookup(table: Readonly<Record<string, string>>, key: string): string | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 /** Chinese event name; unknown names pass through so new events stay visible. */
 export function eventLabel(name: unknown): string {
   const raw = text(name);
   if (raw === null) return '—';
-  return EVENT_LABELS[raw] ?? raw;
+  return lookup(EVENT_LABELS, raw) ?? raw;
 }
 
 /** `annotate` / `propose` in Chinese; unknown kinds pass through. */
 export function aiRunKindLabel(kind: unknown): string {
   const raw = text(kind);
   if (raw === null) return '—';
-  return AI_RUN_KIND_LABELS[raw] ?? raw;
+  return lookup(AI_RUN_KIND_LABELS, raw) ?? raw;
 }
 
 /** `manual` / `auto` in Chinese; unknown triggers pass through. */
 export function aiRunTriggerLabel(trigger: unknown): string {
   const raw = text(trigger);
   if (raw === null) return '—';
-  return AI_RUN_TRIGGER_LABELS[raw] ?? raw;
+  return lookup(AI_RUN_TRIGGER_LABELS, raw) ?? raw;
 }
 
 export interface AuditSubjectEvent {

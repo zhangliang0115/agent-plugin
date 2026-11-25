@@ -766,6 +766,40 @@ test('start arms a jittered timer and stop clears it', async () => {
   assert.deepEqual(timers.cleared, [2]);
 });
 
+test('a rejected health tick is reported once and the loop keeps scheduling', async () => {
+  const timers = new FakeTimers();
+  const reported: Array<{ id: string; error: unknown }> = [];
+  const boom = new Error('entries failed');
+  const pool: HealthPool = {
+    entries() {
+      throw boom;
+    },
+    async ping() {
+      // never reached
+    },
+    markPingUnsupported() {},
+    markTransportFailure() {},
+  };
+  const monitor = new HealthMonitor({
+    pool,
+    intervalMs: 100,
+    timers,
+    onFailure: (id, error) => reported.push({ id, error }),
+  });
+
+  monitor.start();
+  timers.scheduled[0]!.callback();
+  await tick(5);
+  assert.equal(timers.scheduled.length, 2, 'a rejected tick must still schedule the next one');
+  assert.deepEqual(reported, [{ id: '*', error: boom }]);
+
+  timers.scheduled[1]!.callback();
+  await tick(5);
+  assert.equal(timers.scheduled.length, 3, 'the loop survives repeated failures');
+  assert.equal(reported.length, 1, 'monitor-level failures are rate-limited');
+  monitor.stop();
+});
+
 test('health monitor drives the real pool: unsupported servers stop being pinged', async (t) => {
   const { pool, clients } = makePool({ servers: [spec()] });
   t.after(() => pool.close());

@@ -639,6 +639,18 @@ test('admin exact version edits require a source run and support rollback', asyn
   assert.equal(f.service.version(exact.scriptId, 2).status, 'superseded');
 });
 
+test('admin version paths reject integers outside the safe range', async (t) => {
+  const f = fixture(t);
+  const saved = createParameterized(f, 'huge-version');
+
+  const response = await f.call(
+    'GET',
+    `/admin/api/scripts/${saved.scriptId}/versions/9007199254740993`,
+  );
+  assert.equal(response.status, 400);
+  assert.equal(bodyError(response).code, 'INVALID_FIELD');
+});
+
 test('admin parameterized version edits record an optional source run', async (t) => {
   const f = fixture(t);
   const saved = createParameterized(f, 'provenance');

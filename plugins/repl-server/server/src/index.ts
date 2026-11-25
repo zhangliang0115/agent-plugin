@@ -109,6 +109,18 @@ if (options.stdio) {
     log,
   });
 
+  // `listen()` reports EADDRINUSE / EACCES through `error`; without a listener
+  // Node turns that into an uncaught exception. Boot cannot continue, so log
+  // the cause and exit the way the other startup failures do.
+  assembly.server.on('error', (error: NodeJS.ErrnoException) => {
+    log(`http server failed: ${error.message}`, {
+      level: 'error',
+      scope: 'server',
+      ...(error.code === undefined ? {} : { code: error.code }),
+    });
+    process.exit(1);
+  });
+
   assembly.server.listen(options.port, host, () => {
     // stdout is reserved for the stdio bridge; logs go to stderr.
     const address = assembly.server.address();

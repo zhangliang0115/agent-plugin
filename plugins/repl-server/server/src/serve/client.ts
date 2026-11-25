@@ -20,7 +20,11 @@ export interface ServeClientConnectOptions {
  * started by the keeper; tests pass a fake object with the same shape.
  */
 export interface ServeClientProcess {
-  readonly stdin: { write(chunk: string): unknown; end(): unknown };
+  readonly stdin: {
+    write(chunk: string): unknown;
+    end(): unknown;
+    on(event: 'error', listener: (error: Error) => void): unknown;
+  };
   readonly stdout: NodeJS.ReadableStream;
   readonly stderr?: NodeJS.ReadableStream | null;
   readonly pid?: number | undefined;
@@ -59,6 +63,18 @@ export class ServeClient {
     child.on('exit', () => {
       this.exited = true;
       this.rejectAll(new Error('serve process exited'));
+    });
+    // A spawn failure or a failed kill arrives as `error`; without a listener
+    // Node turns it into an uncaught exception. Fail pending requests with the
+    // real cause instead of letting them wait for the timeout.
+    child.once('error', (error) => {
+      this.exited = true;
+      this.rejectAll(error);
+    });
+    // EPIPE and friends are stream errors, not process exits: fail pending
+    // requests now, but leave `exited` to the process event.
+    child.stdin?.on('error', (error) => {
+      this.rejectAll(error);
     });
     child.stderr?.on('data', () => undefined);
   }

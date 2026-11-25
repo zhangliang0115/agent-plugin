@@ -200,6 +200,18 @@ test('validateToolArguments enforces required fields, types and additionalProper
   assert.match(failure('run_script', { scriptId: 's_1' }), /does not accept the argument "scriptId"/);
   assert.match(failure('save_script', { scriptId: 's_1' }), /does not accept the argument "scriptId"/);
   assert.match(failure('run_script', { code: 'x', extra: 1 }), /does not accept the argument "extra"/);
+  assert.match(
+    failure('run_script', { constructor: 'x' }),
+    /does not accept the argument "constructor"/,
+  );
+  assert.match(
+    failure('run_script', { toString: 'x' }),
+    /does not accept the argument "toString"/,
+  );
+  assert.match(
+    failure('run_script', JSON.parse('{"__proto__":1}')),
+    /does not accept the argument "__proto__"/,
+  );
   assert.match(failure('run_script', { code: 'x', timeout: 0 }), /timeout must be >= 1/);
   assert.match(failure('run_script', { code: 'x', timeout: 1.5 }), /timeout must be an integer/);
   assert.match(failure('run_script', { code: 'x', async: 'yes' }), /async must be a boolean/);

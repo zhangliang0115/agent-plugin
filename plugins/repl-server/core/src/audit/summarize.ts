@@ -7,6 +7,8 @@ const DEFAULT_MAX_BYTES = 2048;
 const DEFAULT_DEPTH = 2;
 const INITIAL_STRING_CAP = 256;
 const MIN_STRING_CAP = 16;
+/** Objects and arrays keep at most this many entries; the rest become `[+N more]`. */
+const MAX_CONTAINER_ITEMS = 100;
 
 export interface BoundedJsonOptions {
   /** Soft limit for the serialized JSON, in UTF-8 bytes. */
@@ -18,8 +20,9 @@ export interface BoundedJsonOptions {
 }
 
 /**
- * Serializes while bounding: oversized strings become `{len, sha256}`,
- * nested containers are cut at `depth`, then the whole value falls back to
+ * Serializes while bounding: oversized strings become `{len, sha256}` of their
+ * redacted text, nested containers are cut at `depth`, containers keep at most
+ * `MAX_CONTAINER_ITEMS` entries, then the whole value falls back to
  * `{truncated, bytes, sha256}` if it still does not fit `maxBytes`.
  */
 export function boundedJson(value: unknown, options: BoundedJsonOptions = {}): unknown {
@@ -35,8 +38,9 @@ export function boundedJson(value: unknown, options: BoundedJsonOptions = {}): u
     if (stringCap === MIN_STRING_CAP) break;
   }
 
-  const original = stringify(value);
-  return { truncated: true, bytes: Buffer.byteLength(original, 'utf8'), sha256: sha256(original) };
+  // Hash the redacted form so the digest can never describe a secret value.
+  const text = stringify(normalize(value, 0, depth, MIN_STRING_CAP, keyPattern));
+  return { truncated: true, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256(text) };
 }
 
 /**
@@ -64,14 +68,14 @@ export function summarizeArgs(tool: string, args: Record<string, unknown> | unde
       return {
         file_path: redactValue(asText(input.file_path)),
         oldHead: redactValue(oldString).slice(0, 100),
-        oldBytes: oldString.length,
-        newBytes: newString.length,
+        oldBytes: Buffer.byteLength(oldString, 'utf8'),
+        newBytes: Buffer.byteLength(newString, 'utf8'),
       };
     }
     case 'Write':
       return {
         file_path: redactValue(asText(input.file_path)),
-        contentBytes: asText(input.content).length,
+        contentBytes: Buffer.byteLength(asText(input.content), 'utf8'),
       };
     default:
       return boundedJson(input, { maxBytes: DEFAULT_MAX_BYTES, depth: DEFAULT_DEPTH, redact: SECRET_KEY }) as Record<
@@ -97,7 +101,7 @@ function normalize(
   if (typeof value === 'string') {
     const redacted = redactValue(value);
     if (redacted.length > stringCap) {
-      return { len: value.length, sha256: sha256(value) };
+      return { len: redacted.length, sha256: sha256(redacted) };
     }
     return redacted;
   }
@@ -105,13 +109,21 @@ function normalize(
   if (level >= depth) return '[max-depth]';
 
   if (Array.isArray(value)) {
-    return value.map((item) => normalize(item, level + 1, depth, stringCap, keyPattern));
+    const out = value
+      .slice(0, MAX_CONTAINER_ITEMS)
+      .map((item) => normalize(item, level + 1, depth, stringCap, keyPattern));
+    if (value.length > MAX_CONTAINER_ITEMS) out.push(`[+${value.length - MAX_CONTAINER_ITEMS} more]`);
+    return out;
   }
 
+  const entries = Object.entries(value as Record<string, unknown>);
   const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, item] of entries.slice(0, MAX_CONTAINER_ITEMS)) {
     keyPattern.lastIndex = 0;
     out[key] = keyPattern.test(key) ? '<redacted>' : normalize(item, level + 1, depth, stringCap, keyPattern);
+  }
+  if (entries.length > MAX_CONTAINER_ITEMS) {
+    out[`[+${entries.length - MAX_CONTAINER_ITEMS} more]`] = true;
   }
   return out;
 }

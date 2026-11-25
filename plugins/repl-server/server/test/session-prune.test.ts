@@ -146,3 +146,35 @@ test('onPrune fires once per sweep and non-directory entries are ignored', async
     await cleanup();
   }
 });
+
+test('a rejected background run is logged instead of left unhandled', async () => {
+  const { sessions, cleanup } = await fixture();
+  try {
+    const warnings: string[] = [];
+    // A throwing clock makes both the sweep and its own error path reject.
+    const p = createSessionPruner({
+      sessionsDir: sessions,
+      now: () => {
+        throw new Error('clock failed');
+      },
+      intervalMs: 5,
+      log: (message, fields) => {
+        if (fields?.['level'] === 'warn') warnings.push(message);
+      },
+    });
+    // A detached start also proves the interval does not rely on `this`.
+    const { start, stop } = p;
+    start();
+    try {
+      const deadline = Date.now() + 1_000;
+      while (Date.now() < deadline && !warnings.some((line) => line.includes('clock failed'))) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } finally {
+      stop();
+    }
+    assert.ok(warnings.some((line) => line.includes('clock failed')), warnings.join('\n'));
+  } finally {
+    await cleanup();
+  }
+});

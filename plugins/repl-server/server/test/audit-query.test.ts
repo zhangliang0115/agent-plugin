@@ -596,6 +596,26 @@ test('countAudit and exportAuditJsonl stream every matching event', async (t) =>
   }
 });
 
+test('non-finite limits are rejected instead of disabling the only stop condition', async (t) => {
+  const { dir } = await createFixture(t);
+  await assert.rejects(
+    queryAudit(dir, {}, { limit: Number.POSITIVE_INFINITY }),
+    (error: unknown) => error instanceof InvalidAuditFilterError,
+  );
+  await assert.rejects(
+    collectStream(exportAuditJsonl(dir, {}, { maxRows: Number.NaN })),
+    (error: unknown) => error instanceof InvalidAuditFilterError,
+  );
+  await assert.rejects(
+    collectStream(exportAuditJsonl(dir, {}, { maxRows: Number.POSITIVE_INFINITY })),
+    (error: unknown) => error instanceof InvalidAuditFilterError,
+  );
+  await assert.rejects(
+    computeAuditStats(dir, {}, { maxRows: Number.NaN }),
+    (error: unknown) => error instanceof InvalidAuditFilterError,
+  );
+});
+
 test('stats aggregate tool results in a worker thread', async (t) => {
   const { dir } = await createFixture(t);
   const stats = await computeAuditStats(dir, normalizeFilter({}));

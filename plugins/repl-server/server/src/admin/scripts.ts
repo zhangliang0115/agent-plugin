@@ -102,7 +102,7 @@ function limitOf(request: AdminRequest, fallback: number, max: number): number {
   const raw = queryValue(request, 'limit');
   if (raw === null || raw === '') return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1 || value > max) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
     throw new AdminApiError(400, 'INVALID_QUERY', `limit must be an integer between 1 and ${max}`);
   }
   return value;
@@ -110,7 +110,7 @@ function limitOf(request: AdminRequest, fallback: number, max: number): number {
 
 function versionNumber(raw: string, field = 'version'): number {
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new AdminApiError(400, 'INVALID_FIELD', `${field} must be a positive integer`, {
       field,
     });

@@ -117,7 +117,9 @@ export function missingRequiredFields(
   args: Record<string, unknown>,
 ): ArgsField[] {
   return plan.fields.filter(
-    (field) => field.required && isMissingValue(args[field.name]),
+    (field) =>
+      field.required
+      && (!Object.hasOwn(args, field.name) || isMissingValue(args[field.name])),
   );
 }
 

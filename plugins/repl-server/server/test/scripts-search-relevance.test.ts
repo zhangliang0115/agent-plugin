@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 
 import { openStateDb } from '../src/db/migrate.ts';
+import { listScripts } from '../src/db/scripts.ts';
 import { ScriptService } from '../src/scripts/service.ts';
 
 /**
@@ -203,6 +204,38 @@ test('known limitation: an FTS hit suppresses LIKE substring results', (t) => {
   const names = searchNames(f, { query: '脚本' });
   assert.deepEqual(names, ['脚本运行器']);
   assert.ok(!names.includes('加法脚本'));
+});
+
+test('LIKE search treats % and _ as literals, not wildcards', (t) => {
+  const f = fixture(t);
+  const saveActive = (name: string, description: string): void => {
+    const saved = f.service.save(ACTOR, {
+      mode: 'parameterized',
+      name,
+      description,
+      tags: [],
+      code: 'return 1;',
+      inputSchema: { type: 'object', properties: {} },
+    });
+    f.service.activate(saved.scriptId, 1, `run_like_${saved.scriptId}`, ACTOR);
+  };
+  saveActive('100% coverage', 'literal percent');
+  saveActive('100 apples', 'unrelated');
+  saveActive('sql_tools', 'literal underscore');
+  saveActive('sqlXtools', 'unrelated underscore');
+
+  // Admin list path: unescaped patterns would also match the unrelated rows.
+  assert.deepEqual(
+    listScripts(f.db, { query: '100%', limit: 10 }).items.map((item) => item.name),
+    ['100% coverage'],
+  );
+  assert.deepEqual(
+    listScripts(f.db, { query: 'sql_tools', limit: 10 }).items.map((item) => item.name),
+    ['sql_tools'],
+  );
+
+  // A token-less query falls back to LIKE; "%%" must not mean "match anything".
+  assert.deepEqual(searchNames(f, { query: '%' }), ['100% coverage']);
 });
 
 test('search results carry the mode of their active version', (t) => {

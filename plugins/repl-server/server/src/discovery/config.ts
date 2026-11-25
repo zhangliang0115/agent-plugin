@@ -259,7 +259,15 @@ function sortJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortJsonValue);
   if (!isPlainObject(value)) return value;
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) out[key] = sortJsonValue(value[key]);
+  for (const key of Object.keys(value).sort()) {
+    // Args may carry a `__proto__` key; defineProperty keeps it own data.
+    Object.defineProperty(out, key, {
+      value: sortJsonValue(value[key]),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
   return out;
 }
 

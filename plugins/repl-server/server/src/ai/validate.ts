@@ -558,12 +558,22 @@ export function normalizeProposal(value: unknown): NormalizedProposal {
   return { server, explanation, warnings };
 }
 
+/** Draft keys may be `__proto__`; defineProperty keeps them own data. */
+function defineOwn(target: Record<string, SecretValue>, key: string, value: SecretValue): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 /** Converts a normalized proposal into the shape `ServerStore.create` accepts. */
 export function toServerConfig(server: ProposalServer): ServerConfig {
   const env: Record<string, SecretValue> = {};
-  for (const key of server.envKeys) env[key] = { $secret: key };
+  for (const key of server.envKeys) defineOwn(env, key, { $secret: key });
   const headers: Record<string, SecretValue> = {};
-  for (const key of server.headerKeys) headers[key] = { $secret: key };
+  for (const key of server.headerKeys) defineOwn(headers, key, { $secret: key });
 
   return {
     id: server.id,

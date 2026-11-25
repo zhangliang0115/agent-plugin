@@ -262,6 +262,28 @@ test('stdio adapter spawns fake-serve detached and round-trips initialize, listT
   assert.equal(processAlive(pid), false, 'close must remove the child process');
 });
 
+test('a stdout error closes the transport instead of becoming an unhandled event', async (t) => {
+  const transport = createStdioTransport(
+    {
+      command: process.execPath,
+      args: [FAKE_SERVE],
+      env: CHILD_ENV,
+      detached: true,
+      stderr: 'pipe',
+    },
+    100,
+  );
+  t.after(() => transport.close());
+
+  const closed = new Promise<unknown>((resolve) => transport.onClose((error) => resolve(error)));
+  const error = new Error('stdout pipe failed');
+  // Test seam: reach the child stream the adapter owns.
+  const child = (transport as unknown as { child: { stdout: { emit(event: string, error: Error): boolean } } }).child;
+  child.stdout.emit('error', error);
+
+  assert.equal(await closed, error, 'the transport must report the failure through onClose');
+});
+
 test('stdio close escalates from SIGTERM to SIGKILL after the grace window', async (t) => {
   const transport = createStdioTransport(
     {
@@ -421,6 +443,15 @@ async function startStubServer(): Promise<RunningStub> {
           res.end('data: not-json\n\n');
           return;
         }
+        if (name === 'huge') {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'mcp-session-id': 'stub-session',
+          });
+          res.on('error', () => {});
+          res.end('x'.repeat(17 * 1024 * 1024));
+          return;
+        }
         if (name === 'slow') return; // held until the caller's signal aborts the fetch
         sendSse(res, [{ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }]);
         return;
@@ -535,6 +566,27 @@ test('a non-JSON protocol frame rejects the call with MCP_PROTOCOL_ERROR', async
     (error: unknown) => {
       assert.ok(error instanceof McpToolError);
       assert.equal(error.code, 'MCP_PROTOCOL_ERROR');
+      return true;
+    },
+  );
+});
+
+test('an oversized response body rejects the call with MCP_PROTOCOL_ERROR', async (t) => {
+  const stub = await startStubServer();
+  const { transport, client } = makeStubClient(stub.url);
+  t.after(async () => {
+    client.close();
+    await transport.close();
+    await stub.close();
+  });
+
+  await client.connect(transport, { signal: requestSignal() });
+  await assert.rejects(
+    client.callTool('huge', {}, { signal: requestSignal(10_000) }),
+    (error: unknown) => {
+      assert.ok(error instanceof McpToolError);
+      assert.equal(error.code, 'MCP_PROTOCOL_ERROR');
+      assert.match(error.message, /exceeded the size limit/);
       return true;
     },
   );

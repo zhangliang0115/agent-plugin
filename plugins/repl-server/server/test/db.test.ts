@@ -523,6 +523,18 @@ test('settings round-trip JSON values and bump the catalog revision', (t) => {
   assert.deepEqual(Object.keys(listSettings(db)), ['capacity', 'strict_auth']);
 });
 
+test('a __proto__ setting key round-trips as data without polluting prototypes', (t) => {
+  const { db } = fixture(t);
+  const patch = JSON.parse('{"__proto__":{"polluted":true},"safe":1}') as Record<string, unknown>;
+  const result = patchSettings(db, patch);
+
+  assert.equal(Object.getPrototypeOf(result.settings), Object.prototype);
+  assert.equal(Object.hasOwn(result.settings, '__proto__'), true);
+  assert.deepEqual(result.settings['__proto__'], { polluted: true });
+  assert.deepEqual(Object.keys(listSettings(db)), ['__proto__', 'safe']);
+  assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
+});
+
 test('DbSettingsStore reads back the top-level keys written by replace', async (t) => {
   const { db } = fixture(t);
   const store = new DbSettingsStore(db);

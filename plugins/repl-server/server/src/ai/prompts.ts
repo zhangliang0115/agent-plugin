@@ -25,8 +25,10 @@ export function createPromptNonce(): string {
 /** Truncates a third-party description to 400 characters for the prompt. */
 export function truncateDescription(value: string | null): string | null {
   if (value === null) return null;
-  return value.length > AI_TOOL_DESCRIPTION_MAX
-    ? `${value.slice(0, AI_TOOL_DESCRIPTION_MAX)}…`
+  // Code points, so a surrogate pair (emoji) is never cut in half.
+  const chars = [...value];
+  return chars.length > AI_TOOL_DESCRIPTION_MAX
+    ? `${chars.slice(0, AI_TOOL_DESCRIPTION_MAX).join('')}…`
     : value;
 }
 

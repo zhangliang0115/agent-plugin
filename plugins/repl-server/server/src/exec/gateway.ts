@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  DEFAULT_OUTPUT_LIMITS,
   DEFAULT_TASK_CAPACITY,
   ExecSession,
   KeyedGate,
@@ -200,11 +201,20 @@ interface EvalToolFilter {
   readonly excludedByTag: ReadonlySet<string>;
 }
 
-/** One eval's media, deduplicated and later capped by `normalizeOutput`. */
+/** One eval's media, deduplicated and capped while it is collected. */
 interface EvalMedia {
   readonly images: OutputImage[];
   readonly documents: OutputDocument[];
-  /** Base64 payloads already seen; the strings are shared, not copied. */
+  /** Blocks dropped because the count cap was already full. */
+  imagesOmitted: number;
+  documentsOmitted: number;
+  /**
+   * Fingerprints of dropped blocks (not the payloads), so the settlement pass
+   * does not count the same block twice.
+   */
+  readonly omittedImages: Set<string>;
+  readonly omittedDocuments: Set<string>;
+  /** Base64 payloads already kept; the strings are shared, not copied. */
   readonly seenImages: Set<string>;
   readonly seenDocuments: Set<string>;
 }
@@ -520,9 +530,16 @@ function outcomeOf(
   };
   if (normalized.images.length > 0) outcome.images = normalized.images;
   if (normalized.documents.length > 0) outcome.documents = normalized.documents;
-  if (normalized.imagesOmitted > 0) outcome.imagesOmitted = normalized.imagesOmitted;
-  if (normalized.documentsOmitted > 0) outcome.documentsOmitted = normalized.documentsOmitted;
+  const imagesOmitted = normalized.imagesOmitted + (media?.imagesOmitted ?? 0);
+  const documentsOmitted = normalized.documentsOmitted + (media?.documentsOmitted ?? 0);
+  if (imagesOmitted > 0) outcome.imagesOmitted = imagesOmitted;
+  if (documentsOmitted > 0) outcome.documentsOmitted = documentsOmitted;
   return outcome;
+}
+
+/** Content address for a dropped media block; the payload itself is not retained. */
+function mediaFingerprint(base64: string): string {
+  return createHash('sha256').update(base64, 'utf8').digest('base64');
 }
 
 /** Extracts top-level media from a tool result or a script return value. */
@@ -856,22 +873,53 @@ export class ExecGateway implements ExecutionGateway {
     return { visible: pending.visible, excludedByTag };
   }
 
-  /** Records images/documents returned at the top level of a tool result. */
+  /** Records images/documents returned at the top level of a tool result.
+   * The count caps apply here, so a loop cannot accumulate payloads that
+   * `normalizeOutput` would only drop after the eval settles.
+   */
   private collectMedia(runtime: SessionRuntime, evalId: number, value: unknown): void {
     const media = mediaOf(value);
     if (media === undefined) return;
     let bucket = runtime.media.get(evalId);
     if (bucket === undefined) {
-      bucket = { images: [], documents: [], seenImages: new Set(), seenDocuments: new Set() };
+      bucket = {
+        images: [],
+        documents: [],
+        imagesOmitted: 0,
+        documentsOmitted: 0,
+        omittedImages: new Set(),
+        omittedDocuments: new Set(),
+        seenImages: new Set(),
+        seenDocuments: new Set(),
+      };
       runtime.media.set(evalId, bucket);
     }
+    const maxImages = this.outputLimits.images ?? DEFAULT_OUTPUT_LIMITS.images;
+    const maxDocuments = this.outputLimits.documents ?? DEFAULT_OUTPUT_LIMITS.documents;
     for (const image of media.images) {
       if (bucket.seenImages.has(image.base64)) continue;
+      if (bucket.images.length >= maxImages) {
+        // Not remembered as seen: keeping the payload would defeat the cap.
+        const fingerprint = mediaFingerprint(image.base64);
+        if (!bucket.omittedImages.has(fingerprint)) {
+          bucket.omittedImages.add(fingerprint);
+          bucket.imagesOmitted += 1;
+        }
+        continue;
+      }
       bucket.seenImages.add(image.base64);
       bucket.images.push(image);
     }
     for (const document of media.documents) {
       if (bucket.seenDocuments.has(document.base64)) continue;
+      if (bucket.documents.length >= maxDocuments) {
+        const fingerprint = mediaFingerprint(document.base64);
+        if (!bucket.omittedDocuments.has(fingerprint)) {
+          bucket.omittedDocuments.add(fingerprint);
+          bucket.documentsOmitted += 1;
+        }
+        continue;
+      }
       bucket.seenDocuments.add(document.base64);
       bucket.documents.push(document);
     }

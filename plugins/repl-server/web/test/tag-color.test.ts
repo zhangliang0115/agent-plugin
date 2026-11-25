@@ -27,6 +27,13 @@ test('unknown keys hash into the fallback palette, not the semantic colors', () 
   }
 });
 
+test('prototype member names hash into the fallback palette instead of resolving', () => {
+  for (const key of ['constructor', 'toString', '__proto__']) {
+    const color = tagColor(key);
+    assert.ok(FALLBACK_COLORS.includes(color), `${key} -> ${String(color)}`);
+  }
+});
+
 test('unknown keys are stable across calls and sessions', () => {
   assert.equal(tagColor('db'), tagColor('db'));
   assert.equal(tagColor('db'), 'cyan');

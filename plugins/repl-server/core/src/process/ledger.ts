@@ -470,7 +470,13 @@ function parseState(value: unknown): StateFile | null {
 
     const entry: StateSession = { serve };
     if (isNonEmptyString(raw.updatedAt)) entry.updatedAt = raw.updatedAt;
-    sessions[sessionId] = entry;
+    // A session id may be `__proto__`; defineProperty keeps it an own data key.
+    Object.defineProperty(sessions, sessionId, {
+      value: entry,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
 
   const state: StateFile = { bootId: value.bootId, pid: value.pid, sessions };

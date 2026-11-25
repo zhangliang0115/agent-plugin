@@ -8,6 +8,7 @@
  * @module
  */
 
+import { redactValue } from '@zhangliang0115/repl-server-core';
 import { psResourceRows, type ResourceRow } from '@zhangliang0115/repl-server-core/src/process/tree.ts';
 
 import type { LogFn } from '../log.ts';
@@ -21,13 +22,12 @@ const LOG_INTERVAL_MS = 60_000;
 const PS_WARN_INTERVAL_MS = 60_000;
 const BYTES_PER_MB = 1024 * 1024;
 const MAX_CHILD_DETAILS = 5;
-const CHILD_COMMAND_MAX_CHARS = 120;
 
 /** Largest descendant kept on each sample so RSS growth can be attributed after the fact. */
 export interface ResourceChild {
   pid: number;
   rssBytes: number;
-  /** `ps` command, truncated to {@link CHILD_COMMAND_MAX_CHARS}; empty when unknown. */
+  /** Process identity from {@link sanitizeCommand}; empty when unknown. */
   command: string;
 }
 
@@ -83,6 +83,15 @@ interface ChildTotals {
 
 const EMPTY_CHILDREN: ChildTotals = { rssBytes: 0, cpuPercent: 0, count: 0, top: [] };
 
+/**
+ * Keeps the process identity (executable plus at most two arguments) and redacts
+ * credential values. The full `ps` argv can contain secrets resolved at spawn
+ * time, and this string reaches 90-day metrics and `/overview`.
+ */
+function sanitizeCommand(command: string): string {
+  return redactValue(command.trim().split(/\s+/).slice(0, 3).join(' '));
+}
+
 /** Descendants of `rootPid`, excluding the root; a corrupt ppid cycle is ignored. */
 function descendantRows(rows: readonly ResourceRow[], rootPid: number): ResourceRow[] {
   const byParent = new Map<number, ResourceRow[]>();
@@ -118,7 +127,7 @@ function sumChildren(rows: readonly ResourceRow[], rootPid: number): ChildTotals
     details.push({
       pid: row.pid,
       rssBytes: row.rssBytes,
-      command: row.command?.slice(0, CHILD_COMMAND_MAX_CHARS) ?? '',
+      command: sanitizeCommand(row.command ?? ''),
     });
   }
   details.sort((a, b) => b.rssBytes - a.rssBytes);
@@ -144,6 +153,10 @@ function megabytes(bytes: number): number {
 export function createResourceMonitor(options: ResourceMonitorOptions): ResourceMonitor {
   const log = options.log;
   const intervalMs = options.intervalMs ?? RESOURCE_INTERVAL_MS;
+  // 0/NaN spin the timer and make maxSamples Infinity, growing the series without bound.
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1) {
+    throw new RangeError('intervalMs must be a positive integer');
+  }
   const historyMs = options.historyMs ?? RESOURCE_HISTORY_MS;
   const now = options.now ?? ((): number => Date.now());
   const memoryUsage = options.memoryUsage ?? ((): { rss: number } => process.memoryUsage());

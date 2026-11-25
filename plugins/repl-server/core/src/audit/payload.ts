@@ -10,7 +10,7 @@
  *
  * @module
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, type ReadStream } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, posix } from 'node:path';
@@ -161,7 +161,7 @@ export class PayloadStore {
     const target = resolveLogRef(this.logRoot, ref);
     if (target === null) throw new RangeError(`invalid payload ref: ${JSON.stringify(ref)}`);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-    const tmp = `${target}.${process.pid}.tmp`;
+    const tmp = `${target}.${process.pid}-${randomUUID()}.tmp`;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(tmp, 'wx', 0o600);
@@ -229,42 +229,72 @@ export interface PayloadReadResult {
 
 export const PAYLOAD_RANGE_LIMIT = 8 * 1024 * 1024;
 
+/** Reads exactly `length` bytes at `position`; a file that shrinks yields what is left. */
+async function readAt(
+  handle: Awaited<ReturnType<typeof open>>,
+  position: number,
+  length: number,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let filled = 0;
+  while (filled < length) {
+    const { bytesRead } = await handle.read(buffer, filled, length - filled, position + filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return filled === length ? buffer : buffer.subarray(0, filled);
+}
+
+function assertSliceOption(name: 'limit' | 'offset', value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
+}
+
 /**
  * Reads a payload for the admin API. Returns `null` when the ref escapes the
- * log tree or the file is gone, so the endpoint can answer 400/404.
+ * log tree or the file is gone, so the endpoint can answer 400/404. An invalid
+ * `limit`/`offset` is a caller bug and throws `RangeError` instead of silently
+ * clamping.
  */
 export async function readPayload(
   logRoot: string,
   ref: string,
   options: PayloadReadOptions = {},
 ): Promise<PayloadReadResult | null> {
+  assertSliceOption('limit', options.limit);
+  assertSliceOption('offset', options.offset);
+
   const target = resolveLogRef(logRoot, ref);
   if (target === null) return null;
-  let buffer: Buffer;
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    buffer = await readFile(target);
+    handle = await open(target, 'r');
+    const total = (await handle.stat()).size;
+    const mode = options.mode ?? 'full';
+
+    if (mode === 'full') {
+      return { body: await readAt(handle, 0, total), total, start: 0, end: total, truncated: false };
+    }
+    if (mode === 'head') {
+      const end = Math.min(total, options.limit ?? PAYLOAD_HEAD_BYTES);
+      return { body: await readAt(handle, 0, end), total, start: 0, end, truncated: end < total };
+    }
+    if (mode === 'tail') {
+      const length = Math.min(total, options.limit ?? PAYLOAD_TAIL_BYTES);
+      const start = total - length;
+      return { body: await readAt(handle, start, length), total, start, end: total, truncated: start > 0 };
+    }
+    const limit = Math.min(options.limit ?? PAYLOAD_RANGE_LIMIT, PAYLOAD_RANGE_LIMIT);
+    const start = Math.min(options.offset ?? 0, total);
+    const end = Math.min(total, start + limit);
+    return { body: await readAt(handle, start, end - start), total, start, end, truncated: end < total };
   } catch {
     return null;
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
   }
-  const total = buffer.length;
-  const mode = options.mode ?? 'full';
-
-  if (mode === 'full') {
-    return { body: buffer, total, start: 0, end: total, truncated: false };
-  }
-  if (mode === 'head') {
-    const end = Math.min(total, options.limit ?? PAYLOAD_HEAD_BYTES);
-    return { body: buffer.subarray(0, end), total, start: 0, end, truncated: end < total };
-  }
-  if (mode === 'tail') {
-    const length = Math.min(total, options.limit ?? PAYLOAD_TAIL_BYTES);
-    const start = total - length;
-    return { body: buffer.subarray(start), total, start, end: total, truncated: start > 0 };
-  }
-  const limit = Math.min(options.limit ?? PAYLOAD_RANGE_LIMIT, PAYLOAD_RANGE_LIMIT);
-  const start = Math.max(0, Math.min(options.offset ?? 0, total));
-  const end = Math.min(total, start + limit);
-  return { body: buffer.subarray(start, end), total, start, end, truncated: end < total };
 }
 
 /** Default relative path for one direction of one tool call. */

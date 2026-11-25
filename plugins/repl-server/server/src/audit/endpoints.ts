@@ -468,8 +468,8 @@ export async function auditPayloadEndpoint(
     const numeric = (name: string, value: string | undefined): number | undefined => {
       if (value === undefined) return undefined;
       const parsed = Number(value);
-      if (!Number.isInteger(parsed) || parsed < 0) {
-        throw new InvalidAuditFilterError(`${name} must be a non-negative integer`, { [name]: value });
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new InvalidAuditFilterError(`${name} must be a non-negative safe integer`, { [name]: value });
       }
       return parsed;
     };

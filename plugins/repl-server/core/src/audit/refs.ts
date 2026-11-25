@@ -7,11 +7,18 @@
  */
 import { isAbsolute, resolve, sep } from 'node:path';
 
+/** Every ref segment: letters, digits, dot, underscore, hyphen only. */
+const REF_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
 export function resolveLogRef(logRoot: string, ref: string): string | null {
   if (ref === '' || ref.includes('\0') || ref.includes('\\')) return null;
   if (isAbsolute(ref)) return null;
   const segments = ref.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return null;
+  for (const segment of segments) {
+    // `.` and `..` are both rejected: a ref names a file, never a directory hop.
+    if (segment === '' || segment === '.' || segment === '..') return null;
+    if (!REF_SEGMENT.test(segment)) return null;
+  }
   const base = resolve(logRoot);
   const target = resolve(base, ref);
   if (target === base || !target.startsWith(`${base}${sep}`)) return null;

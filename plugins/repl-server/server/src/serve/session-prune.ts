@@ -178,7 +178,11 @@ export function createSessionPruner(options: SessionPruneOptions): SessionPruner
   function runOnce(): Promise<SessionPruneStats> {
     // Runs are serialized: a timer tick must not race the boot sweep.
     const run = queue.then(guardedSweep, guardedSweep);
-    queue = run.then(() => undefined);
+    // Keep the chain usable even when `guardedSweep` itself failed.
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 
@@ -187,7 +191,9 @@ export function createSessionPruner(options: SessionPruneOptions): SessionPruner
     start() {
       if (timer !== null) return;
       timer = setInterval(() => {
-        void runOnce();
+        void runOnce().catch((error: unknown) => {
+          log(`session prune: sweep failed: ${String(error)}`, { level: 'warn', scope: 'serve' });
+        });
       }, intervalMs);
       timer.unref();
     },

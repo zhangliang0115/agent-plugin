@@ -61,6 +61,13 @@ export interface AuditEvent extends Record<string, unknown> {
 /** Fine-grained events whose loss is acceptable under write pressure. */
 const DETAIL_EVENTS = new Set(['tool_call', 'tool_result', 'tool_denied']);
 
+/**
+ * Fields owned by the record. `v`/`ts`/`event` are always reserved; the
+ * attribution fields are reserved when the caller supplied an identity, so an
+ * event payload can never rewrite who the write is attributed to.
+ */
+const RESERVED_FIELDS = new Set(['v', 'ts', 'event', 'identity', 'binding', 'client', 'mcp', 'exec']);
+
 const DAY_MS = 86_400_000;
 
 /** `<prefix>-YYYY-MM-DD.jsonl` for the given UTC date. */
@@ -162,6 +169,11 @@ export class AuditWriter {
       }
     }
     await Promise.all(this.retired.slice());
+    // A failed write leaves the stream unusable; resolving here would report
+    // "durable" for lines that were never written.
+    if (!this.healthyState) {
+      throw this.lastError ?? new Error('audit writer is not healthy');
+    }
   }
 
   /** Flushes, ends the current stream and waits for every retired stream. */
@@ -307,6 +319,10 @@ export class AuditWriter {
     const safeFields = this.redact ? (redactDeep(fields) as Record<string, unknown>) : fields;
     for (const [key, value] of Object.entries(safeFields)) {
       if (key === 'v' || key === 'ts' || key === 'event') continue;
+      // Without a caller-supplied identity the event fields are the only
+      // attribution source (the runtime writes rows that way); with one, the
+      // identity is authoritative and the payload cannot override it.
+      if (identity !== undefined && RESERVED_FIELDS.has(key)) continue;
       record[key] = value;
     }
     return record;

@@ -111,6 +111,34 @@ test('round-trips state.json atomically with mode 0600', () => {
   assert.equal(statSync(ledger.statePath).mode & 0o777, 0o600);
 });
 
+test('a __proto__ session key stays ordinary data and never pollutes prototypes', () => {
+  const ledger = new ProcessLedger();
+  mkdirSync(dataRoot(), { recursive: true });
+  writeFileSync(
+    ledger.statePath,
+    JSON.stringify({
+      bootId: 'b_boot',
+      pid: 1,
+      sessions: JSON.parse('{"__proto__":{"serve":null},"s_a1":{"serve":null}}'),
+    }),
+  );
+
+  const state = ledger.readState();
+  assert.equal(Object.getPrototypeOf(state.sessions), Object.prototype);
+  assert.equal(Object.hasOwn(state.sessions, '__proto__'), true);
+  assert.deepEqual(state.sessions['__proto__'], { serve: null });
+  assert.deepEqual(state.sessions['s_a1'], { serve: null });
+  assert.equal(({} as Record<string, unknown>)['serve'], undefined);
+
+  ledger.writeState(state);
+  const raw = JSON.parse(readFileSync(ledger.statePath, 'utf8')) as {
+    sessions: Record<string, unknown>;
+  };
+  assert.equal(Object.hasOwn(raw.sessions, '__proto__'), true);
+  assert.deepEqual(raw.sessions['__proto__'], { serve: null });
+  assert.deepEqual(ledger.corruptions, []);
+});
+
 test('round-trips sessions/<id>/serve.json and lists records', () => {
   const ledger = new ProcessLedger();
   const first = serveRecord({ sessionId: 's_b2' });

@@ -146,6 +146,23 @@ test('missingRequiredFields reports blank required values and keeps falsy ones',
   );
 });
 
+test('a missing required constructor field is reported missing, not resolved from the prototype', () => {
+  const plan = argsFormPlan({
+    type: 'object',
+    required: ['constructor'],
+    properties: { constructor: { type: 'string' } },
+  });
+
+  assert.deepEqual(
+    missingRequiredFields(plan, {}).map((field) => field.name),
+    ['constructor'],
+  );
+  assert.deepEqual(
+    missingRequiredFields(plan, JSON.parse('{"constructor":"x"}')).map((field) => field.name),
+    [],
+  );
+});
+
 test('argsObjectFrom copies objects only', () => {
   const source = { a: 1 };
   const copy = argsObjectFrom(source);

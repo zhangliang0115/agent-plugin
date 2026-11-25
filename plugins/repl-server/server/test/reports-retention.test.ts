@@ -56,6 +56,14 @@ function countRows(db: DatabaseSync): number {
   return Number(db.prepare('SELECT count(*) AS n FROM reports').get()?.['n'] ?? 0);
 }
 
+test('list rejects a limit that is not a positive safe integer', (t) => {
+  const { store } = fixture(t);
+  assert.throws(() => store.list({ limit: Number.NaN }), RangeError);
+  assert.throws(() => store.list({ limit: Number.POSITIVE_INFINITY }), RangeError);
+  assert.throws(() => store.list({ limit: 1.5 }), RangeError);
+  assert.deepEqual(store.list({ limit: 1 }).items, []);
+});
+
 test('retention drops only closed reports older than the cutoff', (t) => {
   const { db, store } = fixture(t);
   const cutoff = '2026-06-01T00:00:00.000Z';

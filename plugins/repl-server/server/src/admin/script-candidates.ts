@@ -67,7 +67,7 @@ function limitOf(request: AdminRequest, fallback: number, max: number): number {
   const raw = queryValue(request, 'limit');
   if (raw === null || raw === '') return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1 || value > max) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
     throw new AdminApiError(400, 'INVALID_QUERY', `limit must be an integer between 1 and ${max}`);
   }
   return value;
@@ -110,7 +110,17 @@ function acceptBody(request: AdminRequest): AcceptCandidateInput {
     input.tags = expectStringArray(body['tags'], 'tags', { maxItems: 10, maxLength: 64 });
   }
   if (body['code'] !== undefined) {
-    input.code = expectString(body['code'], 'code', { max: SCRIPT_CODE_MAX_BYTES });
+    // `expectString` counts UTF-16 units; the actual ceiling is UTF-8 bytes.
+    const code = expectString(body['code'], 'code', { max: SCRIPT_CODE_MAX_BYTES });
+    if (Buffer.byteLength(code, 'utf8') > SCRIPT_CODE_MAX_BYTES) {
+      throw new AdminApiError(
+        400,
+        'INVALID_FIELD',
+        `code must be at most ${SCRIPT_CODE_MAX_BYTES} bytes`,
+        { field: 'code' },
+      );
+    }
+    input.code = code;
   }
   if (body['inputSchema'] !== undefined) {
     if (!isPlainObject(body['inputSchema'])) {

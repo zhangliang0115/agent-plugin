@@ -20,8 +20,8 @@ const FALLBACK_COLORS = ['blue', 'geekblue', 'purple', 'cyan', 'green', 'lime', 
 
 /** Stable color per tag key; unknown keys hash into the fallback palette. */
 export function tagColor(key: string): string {
-  const explicit = TAG_COLORS[key];
-  if (explicit !== undefined) return explicit;
+  // Own entries only; `constructor`/`toString` must not resolve via the prototype.
+  if (Object.hasOwn(TAG_COLORS, key)) return TAG_COLORS[key]!;
   let hash = 2166136261;
   for (let index = 0; index < key.length; index += 1) {
     hash = Math.imul(hash ^ key.charCodeAt(index), 16777619);

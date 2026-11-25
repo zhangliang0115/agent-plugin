@@ -117,6 +117,9 @@ export class StdioTransport implements RpcTransport {
     child.stderr.on('data', (chunk: string) => this.emitStderr(chunk));
     // Draining errors keeps a broken pipe from becoming an unhandled event.
     child.stderr.on('error', () => {});
+    // A broken stdout pipe makes the connection unusable; an unheard `error`
+    // event would be an uncaught exception.
+    child.stdout.on('error', (error: Error) => this.notifyClosed(error));
     // A stdin failure makes the connection unusable but does not prove the
     // child exited, so `close()` must still signal the process group.
     child.stdin.on('error', (error: Error) => this.notifyClosed(error));

@@ -118,6 +118,32 @@ test('media is capped through normalizeOutput: 8 images, 4 PDFs, byte limit', as
   assert.equal(outcomeCapped.documentsOmitted, 1);
 });
 
+test('a tool loop keeps only the first 8 images instead of accumulating 20', async (t) => {
+  const gateway = createGateway(t, {
+    callTool: async (call) => ({
+      text: 'saved',
+      images: [
+        {
+          base64: Buffer.from(`loop-image-${String(call.args['index'] ?? 0)}`).toString('base64'),
+          mediaType: 'image/png',
+        },
+      ],
+    }),
+  });
+
+  const outcome = (await gateway.runScript(request(`
+    for (let index = 0; index < 20; index += 1) {
+      await tools.Read({ path: '/tmp/a', index });
+    }
+    return 'done';
+  `))) as ScriptOutcomeWithOmitted;
+
+  assert.equal(outcome.isError, false, outcome.content);
+  assert.equal(outcome.images?.length, 8);
+  assert.equal(outcome.imagesOmitted, 12);
+  assert.equal(new Set(outcome.images?.map((image) => image.base64)).size, 8);
+});
+
 test('a real MCP media result returned by the script stays out of the XML and appears once', async (t) => {
   const fixture = fileURLToPath(new URL('./fixtures/media-mcp/server.mjs', import.meta.url));
   const record: PoolRuntimeServerRecord = {

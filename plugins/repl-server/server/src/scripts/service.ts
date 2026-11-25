@@ -34,7 +34,7 @@ import {
   type VersionStatus,
 } from '../db/scripts.ts';
 import type { ScriptActor } from '../ports.ts';
-import { bm25Expression, buildFtsMatch, tokenizeFts } from '../search/fts-kernel.ts';
+import { bm25Expression, buildFtsMatch, likeContainsPattern, tokenizeFts } from '../search/fts-kernel.ts';
 import type { ToolDefinition, ToolInputSchema } from '../tools/registry.ts';
 import { validateToolArguments } from '../tools/registry.ts';
 import {
@@ -973,8 +973,8 @@ export class ScriptService {
     const where = ['scripts_fts MATCH ?', "s.status = 'active'", 's.active_version IS NOT NULL'];
     const params: Array<string | number> = [match];
     for (const tag of tags) {
-      where.push('s.tags_json LIKE ?');
-      params.push(`%${JSON.stringify(tag)}%`);
+      where.push("s.tags_json LIKE ? ESCAPE '\\'");
+      params.push(likeContainsPattern(JSON.stringify(tag)));
     }
     params.push(limit);
     return this.db
@@ -995,13 +995,15 @@ export class ScriptService {
     const where: string[] = ["s.status = 'active'", 's.active_version IS NOT NULL'];
     const params: Array<string | number> = [];
     if (query !== '') {
-      where.push('(s.name LIKE ? OR s.description LIKE ? OR s.tags_json LIKE ?)');
-      const like = `%${query}%`;
+      where.push(
+        "(s.name LIKE ? ESCAPE '\\' OR s.description LIKE ? ESCAPE '\\' OR s.tags_json LIKE ? ESCAPE '\\')",
+      );
+      const like = likeContainsPattern(query);
       params.push(like, like, like);
     }
     for (const tag of tags) {
-      where.push('s.tags_json LIKE ?');
-      params.push(`%${JSON.stringify(tag)}%`);
+      where.push("s.tags_json LIKE ? ESCAPE '\\'");
+      params.push(likeContainsPattern(JSON.stringify(tag)));
     }
     params.push(limit);
     return this.db

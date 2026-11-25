@@ -432,7 +432,11 @@ export function validateToolArguments(
     }
   }
   for (const key of Object.keys(record)) {
-    const property = schema.properties[key];
+    // `constructor`/`toString` are not schema properties; hasOwn keeps the
+    // prototype chain out of the lookup.
+    const property = Object.hasOwn(schema.properties, key)
+      ? schema.properties[key]
+      : undefined;
     if (property === undefined) {
       return {
         ok: false,

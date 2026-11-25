@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -107,6 +108,41 @@ test('the store writes atomically, reads back, and rejects escaping refs', async
 
   await assert.rejects(() => store.write('../state.db', 'x'), /invalid payload ref/u);
   assert.equal(resolveLogRef(root, '../state.db'), null);
+});
+
+test('refs allow only safe segment characters', () => {
+  const root = logRoot();
+  assert.equal(resolveLogRef(root, 'payload/ok_name-1.2.json'), join(root, 'payload/ok_name-1.2.json'));
+
+  for (const bad of ['payload/a:b.json', 'payload/a b.json', 'payload/中文.json', 'payload//x.json', 'payload/./x.json', 'payload/..']) {
+    assert.equal(resolveLogRef(root, bad), null, `expected ${JSON.stringify(bad)} to be refused`);
+  }
+});
+
+test('concurrent writes to one ref do not share a temp path', async () => {
+  const root = logRoot();
+  const store = new PayloadStore(root);
+  const ref = toolPayloadRef('2026-11-23', 'es_1', 8, 1, 'Bash', 'result');
+
+  await Promise.all([store.write(ref, 'first'), store.write(ref, 'second')]);
+  const text = await store.read(ref);
+  assert.ok(text === 'first' || text === 'second');
+
+  const leftovers = (await readdir(root, { recursive: true })).filter((name) => name.endsWith('.tmp'));
+  assert.deepEqual(leftovers, []);
+});
+
+test('rejects invalid limit and offset instead of clamping', async () => {
+  const root = logRoot();
+  const store = new PayloadStore(root);
+  const ref = toolPayloadRef('2026-11-23', 'es_1', 9, 1, 'Bash', 'call');
+  await store.write(ref, '0123456789');
+
+  for (const limit of [-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    await assert.rejects(() => readPayload(root, ref, { mode: 'range', limit }), RangeError);
+  }
+  await assert.rejects(() => readPayload(root, ref, { mode: 'range', offset: -1 }), RangeError);
+  await assert.rejects(() => readPayload(root, ref, { mode: 'head', offset: Number.NaN }), RangeError);
 });
 
 test('readPayload serves full, head, tail and range slices', async () => {

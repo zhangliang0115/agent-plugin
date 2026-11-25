@@ -16,6 +16,12 @@ export const PING_INTERVAL_MS = 15_000;
 /** ±20% jitter so many pools do not ping in lockstep. */
 export const PING_JITTER_RATIO = 0.2;
 
+/** A persisting monitor-level failure warns at most once per minute. */
+export const HEALTH_WARN_INTERVAL_MS = 60_000;
+
+/** `onFailure` id for a failure that is not tied to one pooled server. */
+const MONITOR_FAILURE_ID = '*';
+
 /** The slice of a pool entry the monitor needs. */
 export interface HealthTarget {
   id: string;
@@ -45,7 +51,10 @@ export interface HealthMonitorOptions {
   jitterRatio?: number;
   random?: () => number;
   timers?: HealthTimerApi;
-  /** Called after a transport failure was recorded, for audit/logging. */
+  /**
+   * Called after a transport failure was recorded, for audit/logging. Also
+   * receives monitor-level failures under id `'*'`, rate-limited.
+   */
   onFailure?: (serverId: string, error: unknown) => void;
 }
 
@@ -88,6 +97,7 @@ export class HealthMonitor {
   private running = false;
   private ticking = false;
   private timer: unknown = null;
+  private lastFailureWarnAt: number | null = null;
 
   constructor(options: HealthMonitorOptions) {
     const intervalMs = options.intervalMs ?? PING_INTERVAL_MS;
@@ -171,6 +181,24 @@ export class HealthMonitor {
     }
   }
 
+  /**
+   * A rejected tick (a throwing `entries()` or listener) must neither stop the
+   * loop nor disappear silently: report it through `onFailure`, capped at one
+   * warning per {@link HEALTH_WARN_INTERVAL_MS}.
+   */
+  private reportFailure(error: unknown): void {
+    const at = Date.now();
+    if (this.lastFailureWarnAt !== null && at - this.lastFailureWarnAt < HEALTH_WARN_INTERVAL_MS) {
+      return;
+    }
+    this.lastFailureWarnAt = at;
+    try {
+      this.onFailure?.(MONITOR_FAILURE_ID, error);
+    } catch {
+      // Logging is best-effort; the loop must keep scheduling.
+    }
+  }
+
   private schedule(): void {
     if (!this.running) return;
     const delay = this.nextDelayMs();
@@ -178,7 +206,10 @@ export class HealthMonitor {
       this.timer = null;
       void this.tick().then(
         () => this.schedule(),
-        () => this.schedule(),
+        (error: unknown) => {
+          this.reportFailure(error);
+          this.schedule();
+        },
       );
     }, delay);
   }

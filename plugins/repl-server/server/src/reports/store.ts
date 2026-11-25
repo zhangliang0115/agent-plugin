@@ -143,6 +143,9 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
   }
 
   function list(filter: ReportFilter): ReportListPage {
+    if (!Number.isSafeInteger(filter.limit) || filter.limit < 1) {
+      throw new RangeError('report list limit must be a positive safe integer');
+    }
     const where: string[] = [];
     const params: Array<string | number> = [];
 
@@ -210,7 +213,7 @@ export function createDbReportStore(db: DatabaseSync): ReportStore {
   }
 
   function claimPendingAlerts(now: string, limit: number): StoredReport[] {
-    if (limit <= 0) return [];
+    if (!Number.isSafeInteger(limit) || limit <= 0) return [];
     return withTransaction(db, () => {
       const rows = db
         .prepare(

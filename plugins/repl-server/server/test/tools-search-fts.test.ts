@@ -429,6 +429,25 @@ test('max defaults to 10 and the protocol caps it at 50', () => {
   assert.equal(searchTools(snapshot, { query: 'bulk', max: 50 }).length, 50);
 });
 
+test('a negative or non-finite max falls back to the default limit', () => {
+  const db = openMemoryDb();
+  insertServer(db, { id: 'bulk', transport: 'builtin' });
+  for (let index = 0; index < 12; index += 1) {
+    insertTool(db, 'bulk', `bulk_${String(index).padStart(2, '0')}`, {
+      description: 'limit fixture tool',
+    });
+  }
+  refreshFts(db, 'bulk');
+  const snapshot = buildCatalogSnapshot(db);
+  for (const max of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      searchTools(snapshot, { query: 'bulk', max }).length,
+      10,
+      `max=${String(max)} must fall back to the default`,
+    );
+  }
+});
+
 test('the SQL prefilter matches the snapshot: no protocol tools, disabled or hidden-stale', () => {
   const db = openMemoryDb();
   insertServer(db, { id: 'ops', summary: 'Ops', category: 'ops' });
