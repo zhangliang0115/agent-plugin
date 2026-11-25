@@ -101,7 +101,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | POST | `/script-candidates/:id/accept` | 接受候选，生成 draft 脚本 | 同步 |
 | POST | `/script-candidates/:id/reject` | 拒绝候选 | 同步 |
 
-**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 7 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
+**资源采样**：`/overview` 的 `resources` 返回 `{ intervalMs, current, series }`。每项采样含 `ts`、`selfRssBytes`、`childRssBytes`、`childCount`、`totalRssBytes`、`selfCpuPercent`、`childCpuPercent`、`totalCpuPercent`；默认每 10s 采样一次、保留 30 分钟。主进程值来自 `process.memoryUsage().rss` 与两次 `process.cpuUsage()` 的差值（单核百分比）；worker 是 `worker_threads`，其内存/CPU 计入主进程。子进程统计本进程的全部后代（keeper、`claude mcp serve`、第三方 MCP server、eval 派生的进程），按 `ps` 的 `%cpu` 求和，口径不是区间瞬时值。`ps` 失败时沿用上一次子进程值，只记限频 warn。每次采样同时追加到 `~/.agents/repl-server/log/metrics-YYYY-MM-DD.jsonl`（UTC 日期，0600，`event=resource_sample`），供后续离线分析；保留由统一的清理服务负责（`log/` 整体 90 天 / 2 GiB，按天整删），写盘失败只记限频 warn，不影响采样。
 
 **实时并发**：`/overview` 的 `bindings` 返回每个 binding 的 `label`、`execSessions`、`inFlightEvals`、`inFlightCalls`、`queuedCalls`；未绑定客户端归到 `binding: null`。前三项来自执行会话注册表，后两项来自池闸门，页面每 5 秒随 `/overview` 刷新。
 
@@ -202,10 +202,10 @@ HTTP 映射：400 校验、404 不存在、409 revision 冲突或 SERVER_BUSY、
 - `timeoutMs`：整数 1..60000，默认 10000；越界或非整数 400 `INVALID_FIELD`。
 - 未知字段 400 `UNKNOWN_FIELD`；请求体不是对象 400 `INVALID_BODY`，非法 JSON 400 `INVALID_JSON`。
 - `serverId` 不存在 404 `SERVER_NOT_FOUND`；`name` 不存在 404 `TOOL_NOT_FOUND`。
-- `__builtin__` 下的顶层工具返回 400 `TOOL_TEST_UNSUPPORTED`：它们没有可复用的 pool/serve 执行路径。
+- `__builtin__` 只开放只读工具测试：`search_tools`、`describe_tools`、`search_scripts`；其余内置工具返回 400 `TOOL_TEST_UNSUPPORTED`。只读工具用管理端身份走 `callTool`，不写 `tool_usage`。
 - 服务端未接线执行器时 503 `TOOL_TEST_UNAVAILABLE`（正常装配不会出现）。
 
-执行路径与模型调用相同：第三方 server 走连接池（`server` 为该 server），`__official__` 走 `claude mcp serve`。测试不使用 binding，`__official__` 的 workspace 取服务进程当前目录。`timeoutMs` 是整个调用的硬期限：超时返回 200，不悬挂请求。
+执行路径与模型调用相同：第三方 server 走连接池（`server` 为该 server），`__official__` 走 `claude mcp serve`，只读内置工具走顶层 `callTool`。测试不使用 binding，`__official__` 的 workspace 取服务进程当前目录。`timeoutMs` 是整个调用的硬期限：超时返回 200，不悬挂请求。
 
 成功 200：
 
@@ -233,7 +233,7 @@ HTTP 映射：400 校验、404 不存在、409 revision 冲突或 SERVER_BUSY、
 
 副作用：
 
-- 这是真实调用，写操作会生效；只应由管理员手工触发。
+- 这是真实调用，写操作会生效；只应由管理员手工触发。内置工具只开放只读测试，不会产生业务写入。
 - 成功和失败都写一条审计事件 `event: "tool_test"`，字段：`server`、`tool`、`ok`、`durationMs`、`argsBytes`、`resultBytes`（成功时）、`error`（失败时，含 `code` / `message`）。不写原始 `args` 和结果正文，避免密钥或大结果进入日志。
 - **不计入 `tool_usage`**：测试不经过 eval 的 `tool_result` 路径，`callCount` / `successCount` / `lastCalledAt` 只反映模型与脚本的真实调用。
 - 不改变 catalog、revision 或工具启停状态。
@@ -282,7 +282,7 @@ data: {"id":"op_...","state":"ok"}
 - `/logs/sessions`：按最近活动排序。
 - `/logs/frames?mcp=&id=`：请求与响应配对返回，额外支持 `tool` / `protocol` / `result` 多值筛选。
 - `/logs/payload?ref=&mode=&offset=&limit=`：入参是行上的 `argsRef`/`resultRef`/`paramsRef`/`resultTailRef` 等字段值，`mode` 取 `full|head|tail|range`；返回 `{ ref, mode, total, start, end, truncated, body }`，`body` 是 UTF-8 文本。缺参 400，越界或缺失 404（`PAYLOAD_NOT_FOUND`）。`ref` 只允许落在 `log/` 之内。
-- 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 7 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。
+- 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 90 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。
 - `/logs/stats?from=&to=&groupBy=`：工具调用量（仅 `tool_result`）、错误率、p50/p95、排队均值；响应另带 `retention`（上次清理时间、删除天数/文件数、当前 `log/` 体积）。`p50`/`p95` 是**执行时长**（`ms - queueMs`），`queueAvgMs` 单列排队，所以一个堵在闸门上的调用不会把工具本身算成慢。
 - `/logs/stream`：SSE，新增事件实时推送。
 - `/logs/export`：按当前筛选导出 JSONL。
@@ -530,7 +530,7 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `INVALID_TAGS` | 422 | PUT `/tags`：条目格式、重复 key、动作键或系统托管项被改动 |
 | `TAG_POLICY_VIOLATION` | 422 | 创建/PATCH server、写工具标签、AI 标注 apply：违反 server 0–2 / 工具叠加 1–4 / 不重复 / 禁动作键 |
 | `SERVER_NOT_FOUND` / `TOOL_NOT_FOUND` | 404 | 工具目录写端点与工具测试端点 |
-| `TOOL_TEST_UNSUPPORTED` | 400 | `POST /tools/:serverId/:name/test`：`__builtin__` 顶层工具没有可复用执行路径 |
+| `TOOL_TEST_UNSUPPORTED` | 400 | `POST /tools/:serverId/:name/test`：`__builtin__` 中非只读工具没有管理端测试路径（只读测试仅限 `search_tools` / `describe_tools` / `search_scripts`） |
 | `TOOL_TEST_UNAVAILABLE` | 503 | 同上：服务端未接线测试执行器 |
 | `SCRIPT_NOT_FOUND` / `SCRIPT_VERSION_NOT_FOUND` | 404 | 脚本库端点 |
 | `SCRIPT_RUN_NOT_FOUND` / `SCRIPT_RUN_EXPIRED` | 404 | 脚本库来源执行 |

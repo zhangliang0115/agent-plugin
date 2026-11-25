@@ -838,6 +838,30 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
       // Same transport as the gateway, but outside its eval/audit path: no
       // `tool_result` is emitted, so `tool_usage` stays model/script-only.
       testTool: async ({ serverId, name, args, signal, deadline }) => {
+        if (serverId === BUILTIN_SERVER_ID) {
+          const identity: RequestIdentity = {
+            identity: 'unbound',
+            binding: null,
+            client: 'admin-tool-test',
+            clientName: '管理端',
+            clientVersion: '',
+            mcp: 'admin-tool-test',
+          };
+          const surface = toolSurfaceFor(identity);
+          return await callTool(name, args, {
+            identity,
+            gateway,
+            catalog,
+            tasks,
+            tasksDeclared: false,
+            requestId: null,
+            scripts,
+            visibility: surface.visibility,
+            searchToolsDefinition: surface.searchToolsDefinition,
+            toolTextSearch,
+            // No onUsage: admin tests must not move the built-in counters.
+          });
+        }
         const call: ToolCallRequest = {
           evalId: 0,
           epoch: 0,

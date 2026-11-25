@@ -8,6 +8,13 @@
  * @module
  */
 
+/** Keep in sync with the server's read-only builtin test allow list. */
+export const TESTABLE_BUILTIN_TOOLS: ReadonlySet<string> = new Set([
+  'search_tools',
+  'describe_tools',
+  'search_scripts',
+]);
+
 export interface ToolTestFailure {
   code: string;
   message: string;

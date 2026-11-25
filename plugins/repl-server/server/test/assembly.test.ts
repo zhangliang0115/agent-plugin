@@ -317,10 +317,27 @@ test('admin tool test reuses the gateway transport without counting usage', asyn
     assert.ok(failedUsage);
     assert.equal(failedUsage.callCount, 0);
 
-    const builtin = await post('/tools/__builtin__/search_tools/test', {});
-    assert.equal(builtin.status, 400);
-    const builtinBody = (await builtin.json()) as { error: { code: string } };
-    assert.equal(builtinBody.error.code, 'TOOL_TEST_UNSUPPORTED');
+    const builtin = await post('/tools/__builtin__/search_tools/test', {
+      args: { query: 'query' },
+    });
+    assert.equal(builtin.status, 200);
+    const builtinBody = (await builtin.json()) as {
+      ok: boolean;
+      result: { isError: boolean; content: Array<{ type: string; text: string }> };
+    };
+    assert.equal(builtinBody.ok, true);
+    assert.equal(builtinBody.result.isError, false);
+    assert.match(builtinBody.result.content[0]?.text ?? '', /fake\.query/);
+    const builtinUsage = getTool(app.assembly.db, BUILTIN_SERVER_ID, 'search_tools');
+    assert.ok(builtinUsage);
+    assert.equal(builtinUsage.callCount, 0, 'admin builtin tests do not count as usage');
+
+    const unsupported = await post('/tools/__builtin__/run_script/test', {
+      args: { code: 'return 1' },
+    });
+    assert.equal(unsupported.status, 400);
+    const unsupportedBody = (await unsupported.json()) as { error: { code: string } };
+    assert.equal(unsupportedBody.error.code, 'TOOL_TEST_UNSUPPORTED');
 
     // `__official__` tools are bare: the call reaches the serve transport with
     // no `server`, exactly like a model call through the gateway.

@@ -13,7 +13,12 @@ import type {
   ScriptRequest,
   TaskSnapshot,
 } from '../src/ports.ts';
-import { ScriptError, ScriptService, SCRIPT_CODE_MAX_BYTES } from '../src/scripts/service.ts';
+import {
+  ScriptError,
+  ScriptService,
+  SCRIPT_CODE_MAX_BYTES,
+  SCRIPT_RUN_RETENTION_DAYS,
+} from '../src/scripts/service.ts';
 import { callTool, type ToolCallContext } from '../src/tools/call.ts';
 import type { CallToolResult } from '../src/tools/registry.ts';
 import { McpTaskStore } from '../src/tasks/mcp-tasks.ts';
@@ -633,7 +638,7 @@ test('script runs archive the workspace default, mode, args and preview, then ex
   archiveRun(f, { runId: 'run_default', workspace: '' });
   const run = f.service.getRun('run_default');
   assert.equal(run?.workspace, 'default');
-  assert.equal(run?.expiresAt, new Date(NOW + 30 * 86_400_000).toISOString());
+  assert.equal(run?.expiresAt, new Date(NOW + SCRIPT_RUN_RETENTION_DAYS * 86_400_000).toISOString());
 
   archiveRun(f, {
     runId: 'run_scripted',
@@ -649,7 +654,7 @@ test('script runs archive the workspace default, mode, args and preview, then ex
   assert.deepEqual(scripted?.args, { x: 1 });
   assert.equal(scripted?.argsPreview, '{"x":1}');
 
-  now += 31 * 86_400_000;
+  now += (SCRIPT_RUN_RETENTION_DAYS + 1) * 86_400_000;
   assert.equal(f.service.pruneExpiredRuns(), 2);
   assert.equal(f.service.getRun('run_default'), null);
 });

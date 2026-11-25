@@ -68,7 +68,7 @@ export interface AuditRuntimeOptions {
   payloadDir?: string;
   /** Retention counters surfaced by `/logs/stats`, when a sweep is running. */
   retention?: () => unknown;
-  /** Days kept by this writer's own prune. Default 7 (`LOG_RETENTION_DAYS`). */
+  /** Days kept by this writer's own prune. Default 90 (`LOG_RETENTION_DAYS`). */
   retentionDays?: number;
   /** Byte budget for this writer's own prune. Default 2 GiB. */
   maxTotalBytes?: number;

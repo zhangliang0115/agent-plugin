@@ -42,6 +42,11 @@ import {
   formatPercent,
   formatTimestamp,
 } from '../../lib/format.ts';
+import {
+  creatorLabel,
+  creatorNamesFromClients,
+  type CreatorNames,
+} from '../../lib/creator-name.ts';
 import { argsSummary } from '../../lib/script-info.ts';
 import { versionEditBody } from '../../lib/script-edit.ts';
 import { argsObjectFrom } from '../../lib/schema-args.ts';
@@ -74,6 +79,18 @@ const { Text } = Typography;
 const LIST_LIMIT = 200;
 const RUN_LIMIT = 100;
 
+/** Stored rate first, then the counter fallback; `null` until the first run. */
+function scriptSuccessRate(
+  summary: Pick<ScriptSummary, 'successRate' | 'runCount' | 'successCount'>,
+): number | null {
+  return (
+    successRateFraction(summary.successRate) ??
+    (summary.runCount !== null && summary.successCount !== null && summary.runCount > 0
+      ? summary.successCount / summary.runCount
+      : null)
+  );
+}
+
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '全部状态' },
   { value: 'active', label: '启用' },
@@ -93,6 +110,7 @@ export function ScriptsPage(): React.ReactElement {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
+  const [creatorNames, setCreatorNames] = useState<CreatorNames>(() => new Map());
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -119,6 +137,19 @@ export function ScriptsPage(): React.ReactElement {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .get<unknown>('/clients')
+      .then((payload) => {
+        if (alive) setCreatorNames(creatorNamesFromClients(payload));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [api]);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ScriptDetail | null>(null);
@@ -551,7 +582,7 @@ export function ScriptsPage(): React.ReactElement {
     {
       title: '名称',
       key: 'name',
-      width: 170,
+      width: 140,
       ellipsis: true,
       render: (_value, script) => script.name ?? '—',
     },
@@ -566,19 +597,19 @@ export function ScriptsPage(): React.ReactElement {
     {
       title: '标签',
       key: 'tags',
-      width: 180,
+      width: 140,
       render: (_value, script) => <TagsCell tags={script.tags} />,
     },
     {
       title: '模式',
       key: 'mode',
-      width: 135,
+      width: 110,
       render: (_value, script) => modeLabel(script.mode),
     },
     {
       title: '激活版本',
       key: 'activeVersion',
-      width: 105,
+      width: 85,
       render: (_value, script) =>
         script.activeVersion === null ? (
           <span className="muted">—</span>
@@ -589,50 +620,93 @@ export function ScriptsPage(): React.ReactElement {
     {
       title: '状态',
       key: 'status',
-      width: 100,
+      width: 85,
       render: (_value, script) =>
         script.status === null ? <span className="muted">—</span> : <StateTag state={script.status} />,
     },
     {
       title: '创建人',
       key: 'createdBy',
-      width: 110,
+      width: 120,
       ellipsis: true,
-      render: (_value, script) => script.createdBy ?? <span className="muted">—</span>,
+      render: (_value, script) => {
+        const label = creatorLabel(script.createdBy, creatorNames);
+        return label === null ? <span className="muted">—</span> : label;
+      },
     },
     {
-      title: '使用次数',
+      title: (
+        <Tooltip title="终身累计：成功且非测试的执行次数；失败和测试不计入">
+          <span>累计使用</span>
+        </Tooltip>
+      ),
       key: 'useCount',
+      width: 80,
+      align: 'right',
+      render: (_value, script) => <span className="mono">{formatNumber(script.useCount)}</span>,
+    },
+    {
+      title: (
+        <Tooltip title="script_runs 归档：包含测试和失败，保留 90 天">
+          <span>近90天执行</span>
+        </Tooltip>
+      ),
+      key: 'runCount',
       width: 90,
       align: 'right',
-      render: (_value, script) => formatNumber(script.useCount),
+      render: (_value, script) => (
+        <span className="mono">
+          {script.runCount === null ? <span className="muted">—</span> : formatNumber(script.runCount)}
+        </span>
+      ),
     },
     {
-      title: '执行统计',
-      key: 'runStats',
-      width: 190,
+      title: '成功次数',
+      key: 'successCount',
+      width: 70,
+      align: 'right',
+      render: (_value, script) => (
+        <span className="mono">
+          {script.successCount === null ? (
+            <span className="muted">—</span>
+          ) : (
+            formatNumber(script.successCount)
+          )}
+        </span>
+      ),
+    },
+    {
+      title: '失败次数',
+      key: 'failedCount',
+      width: 70,
+      align: 'right',
       render: (_value, script) => {
-        const rate =
-          script.successRate !== null
-            ? successRateFraction(script.successRate)
-            : script.runCount !== null && script.successCount !== null && script.runCount > 0
-              ? script.successCount / script.runCount
-              : null;
         const failed = failedRunCount(script);
-        if (script.runCount === null && rate === null) return <span className="muted">—</span>;
         return (
           <span className="mono">
-            {script.runCount === null ? null : `${formatNumber(script.runCount)} 次`}
-            {rate === null ? null : ` · 成功 ${formatPercent(rate)}`}
-            {failed === null ? null : ` · 失败 ${formatNumber(failed)}`}
+            {failed === null ? <span className="muted">—</span> : formatNumber(failed)}
           </span>
         );
       },
     },
     {
+      title: (
+        <Tooltip title="近 90 天成功次数 ÷ 执行次数">
+          <span>成功率</span>
+        </Tooltip>
+      ),
+      key: 'successRate',
+      width: 70,
+      align: 'right',
+      render: (_value, script) => {
+        const rate = scriptSuccessRate(script);
+        return <span className="mono">{rate === null ? '—' : formatPercent(rate)}</span>;
+      },
+    },
+    {
       title: '最近使用',
       key: 'lastUsedAt',
-      width: 170,
+      width: 140,
       render: (_value, script) => (
         <span className="mono">{formatTimestamp(script.lastUsedAt)}</span>
       ),
@@ -821,7 +895,9 @@ export function ScriptsPage(): React.ReactElement {
         <Descriptions.Item label="使用次数">{formatNumber(detail.useCount)}</Descriptions.Item>
         <Descriptions.Item label="最近使用">{formatTimestamp(detail.lastUsedAt)}</Descriptions.Item>
         <Descriptions.Item label="更新时间">{formatTimestamp(detail.updatedAt)}</Descriptions.Item>
-        <Descriptions.Item label="创建人">{detail.createdBy ?? '—'}</Descriptions.Item>
+        <Descriptions.Item label="创建人">
+          {creatorLabel(detail.createdBy, creatorNames) ?? '—'}
+        </Descriptions.Item>
         <Descriptions.Item label="创建时间">{formatTimestamp(detail.createdAt)}</Descriptions.Item>
         <Descriptions.Item label="来源执行" span={2}>
           <span className="mono">{detail.sourceRunId ?? '—'}</span>
@@ -1030,7 +1106,7 @@ export function ScriptsPage(): React.ReactElement {
   const historyPanel = (
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Text type="secondary" style={{ fontSize: 11.5 }}>
-        执行历史来自 script_runs（保留 30 天）；只有带 MCP 请求记录的执行可以点开请求详情，测试执行没有请求详情。
+        执行历史来自 script_runs（保留 90 天）；只有带 MCP 请求记录的执行可以点开请求详情，测试执行没有请求详情。
       </Text>
       {runsError === null ? null : (
         <Alert type="warning" showIcon message="执行历史不可用" description={runsError} />
@@ -1127,7 +1203,7 @@ export function ScriptsPage(): React.ReactElement {
                     dataSource={scripts}
                     columns={columns}
                     pagination={{ pageSize: 20, showSizeChanger: false }}
-                    // Fixed column widths sum to 1 250; x reserves room for the flexible
+                    // Fixed column widths sum to 1 200; x reserves room for the flexible
                     // description column. `max-content` let one long description stretch
                     // the table past 4 500px, so keep the measured minimum width instead.
                     scroll={{ x: 1_360 }}
@@ -1474,21 +1550,23 @@ function StatsSummary({
 }): React.ReactElement {
   const runCount = detail.runCount ?? fallback?.runCount ?? null;
   const successCount = detail.successCount ?? fallback?.successCount ?? null;
-  const rate =
-    successRateFraction(detail.successRate ?? fallback?.successRate ?? null) ??
-    (runCount !== null && successCount !== null && runCount > 0 ? successCount / runCount : null);
+  const rate = scriptSuccessRate({
+    successRate: detail.successRate ?? fallback?.successRate ?? null,
+    runCount,
+    successCount,
+  });
   return (
-    <Card size="small" title="执行统计">
+    <Card size="small" title="执行统计（近 90 天）">
       <Descriptions column={4} size="small">
         <Descriptions.Item label="执行次数">{formatNumber(runCount)}</Descriptions.Item>
-        <Descriptions.Item label="成功">{formatNumber(successCount)}</Descriptions.Item>
-        <Descriptions.Item label="失败">
+        <Descriptions.Item label="成功次数">{formatNumber(successCount)}</Descriptions.Item>
+        <Descriptions.Item label="失败次数">
           {formatNumber(failedRunCount({ runCount, successCount }))}
         </Descriptions.Item>
         <Descriptions.Item label="成功率">{formatPercent(rate)}</Descriptions.Item>
       </Descriptions>
       <Text type="secondary" style={{ fontSize: 11.5 }}>
-        统计来自 script_runs（保留 30 天）；测试执行不计入使用次数。逐次记录在「执行历史」。
+        统计来自 script_runs（保留 90 天，含测试与失败）；「累计使用」只计成功且非测试的执行。逐次记录在「执行历史」。
       </Text>
     </Card>
   );

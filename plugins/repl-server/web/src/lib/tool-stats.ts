@@ -7,7 +7,6 @@
  * @module
  */
 
-import { formatNumber, formatPercent } from './format.ts';
 import { successRateFraction } from './script-api.ts';
 
 /** UTF-8 JSON byte sizes of what the model can see for one tool (not token counts). */
@@ -69,17 +68,6 @@ export function toolSuccessRate(
 }
 
 /** Failed calls (`callCount - successCount`), clamped so bad input stays readable. */
-function toolFailedCount(stats: Pick<ToolStats, 'callCount' | 'successCount'>): number {
+export function toolFailedCount(stats: Pick<ToolStats, 'callCount' | 'successCount'>): number {
   return Math.max(0, stats.callCount - stats.successCount);
-}
-
-/** `N 次 · 成功 x% · 失败 n`; `—` when the tool has never been called. */
-export function toolUsageText(
-  stats: Pick<ToolStats, 'callCount' | 'successCount' | 'successRate'>,
-): string {
-  if (stats.callCount <= 0) return '—';
-  const rate = toolSuccessRate(stats);
-  return `${formatNumber(stats.callCount)} 次 · 成功 ${
-    rate === null ? '—' : formatPercent(rate)
-  } · 失败 ${formatNumber(toolFailedCount(stats))}`;
 }

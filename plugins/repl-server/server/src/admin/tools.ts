@@ -187,6 +187,13 @@ export interface AdminToolsDeps {
   audit?: (event: Record<string, unknown> & { event: string }) => void;
 }
 
+/** Builtins with a read-only admin test path; writes and run_script stay hidden. */
+export const TESTABLE_BUILTIN_TOOLS: ReadonlySet<string> = new Set([
+  'search_tools',
+  'describe_tools',
+  'search_scripts',
+]);
+
 const TOOL_PATCH_FIELDS: ReadonlySet<string> = new Set([
   'description',
   'enabled',
@@ -675,11 +682,11 @@ export function createAdminToolsHandler(deps: AdminToolsDeps): AdminHandler {
     const input = parseToolTestBody(request);
     const server = assertServerExists(await deps.servers.get(serverId), serverId);
     assertToolExists(await deps.tools.get(serverId, name), serverId, name);
-    if (server.id === BUILTIN_SERVER_ID) {
+    if (server.id === BUILTIN_SERVER_ID && !TESTABLE_BUILTIN_TOOLS.has(name)) {
       throw new AdminApiError(
         400,
         'TOOL_TEST_UNSUPPORTED',
-        `built-in tool ${name} has no reusable pool/serve execution path`,
+        `built-in tool ${name} has no admin test path; testable: ${[...TESTABLE_BUILTIN_TOOLS].join(', ')}`,
         { serverId, tool: name },
       );
     }

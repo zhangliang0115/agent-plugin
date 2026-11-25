@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { toolStatsFrom, toolSuccessRate, toolUsageText } from '../src/lib/tool-stats.ts';
+import { toolFailedCount, toolStatsFrom, toolSuccessRate } from '../src/lib/tool-stats.ts';
 
 const EMPTY = {
   callCount: 0,
@@ -59,14 +59,9 @@ test('toolSuccessRate accepts fractions, percentages and the counter fallback', 
   assert.equal(toolSuccessRate({ callCount: 0, successCount: 0, successRate: null }), null);
 });
 
-test('toolUsageText renders the Chinese summary and an empty fallback', () => {
-  assert.equal(
-    toolUsageText({ callCount: 12, successCount: 11, successRate: 0.9166666666666666 }),
-    '12 次 · 成功 91.7% · 失败 1',
-  );
-  assert.equal(
-    toolUsageText({ callCount: 12, successCount: 10, successRate: null }),
-    '12 次 · 成功 83.3% · 失败 2',
-  );
-  assert.equal(toolUsageText({ callCount: 0, successCount: 0, successRate: null }), '—');
+test('toolFailedCount clamps counters so a bad success count stays readable', () => {
+  assert.equal(toolFailedCount({ callCount: 12, successCount: 11 }), 1);
+  assert.equal(toolFailedCount({ callCount: 12, successCount: 10 }), 2);
+  assert.equal(toolFailedCount({ callCount: 0, successCount: 0 }), 0);
+  assert.equal(toolFailedCount({ callCount: 1, successCount: 2 }), 0);
 });

@@ -17,6 +17,7 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
+import type { TableProps } from 'antd';
 import {
   BookOutlined,
   CloudDownloadOutlined,
@@ -38,9 +39,25 @@ import { ToolSchemaDoc } from '../components/ToolSchemaDoc.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
 import { ApiError, isTimeoutError, timeoutSignal } from '../../lib/api.ts';
-import { formatBytes, formatDuration, formatJson, formatTimestamp } from '../../lib/format.ts';
-import { toolStatsFrom, toolUsageText, type ToolStats } from '../../lib/tool-stats.ts';
-import { toolTestResultFrom, type ToolTestResult } from '../../lib/tool-test.ts';
+import {
+  formatBytes,
+  formatDuration,
+  formatJson,
+  formatNumber,
+  formatPercent,
+  formatTimestamp,
+} from '../../lib/format.ts';
+import {
+  toolFailedCount,
+  toolStatsFrom,
+  toolSuccessRate,
+  type ToolStats,
+} from '../../lib/tool-stats.ts';
+import {
+  TESTABLE_BUILTIN_TOOLS,
+  toolTestResultFrom,
+  type ToolTestResult,
+} from '../../lib/tool-test.ts';
 import { navigate } from '../router.ts';
 
 type ToolConcurrency = 'parallel' | 'serial' | 'exclusive';
@@ -333,12 +350,12 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
     );
   }, [query, tools]);
 
-  const columns = useMemo(
+  const columns = useMemo<TableProps<ToolRecord>['columns']>(
     () => [
       {
         title: '工具',
         dataIndex: 'name',
-        width: 210,
+        width: 180,
         render: (value: string, tool: ToolRecord) => (
           <div>
             {tool.displayName !== null && tool.displayName !== value ? <div>{tool.displayName}</div> : null}
@@ -364,7 +381,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '启用',
         dataIndex: 'enabled',
-        width: 72,
+        width: 64,
         render: (value: boolean, tool: ToolRecord) => {
           const pending = (inlinePending[inlineKey(tool, 'enabled')] ?? 0) > 0;
           return (
@@ -384,7 +401,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '并发',
         dataIndex: 'concurrency',
-        width: 90,
+        width: 80,
         render: (value: ToolConcurrency, tool: ToolRecord) => (
           <div onClick={(event) => event.stopPropagation()}>
             <CategoryPillEditor
@@ -403,7 +420,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '标签（含继承）',
         dataIndex: 'tags',
-        width: 200,
+        width: 160,
         render: (value: string[], tool: ToolRecord) => (
           <TagPillEditor
             dictionary={tagDefinitions}
@@ -417,7 +434,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       },
       {
         title: '暴露',
-        width: 70,
+        width: 64,
         render: (_value: unknown, tool: ToolRecord) => {
           if (tool.effective === undefined) {
             return tool.stale ? <Tag color="gold">stale</Tag> : <span className="muted">—</span>;
@@ -442,19 +459,54 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         },
       },
       {
-        title: '使用情况',
-        key: 'usage',
-        width: 190,
-        render: (_value: unknown, tool: ToolRecord) => (
-          <span className="mono" title={toolUsageText(tool)}>
-            {toolUsageText(tool)}
-          </span>
+        title: (
+          <Tooltip title="模型与脚本的真实调用，终身累计；管理端工具测试不计入">
+            <span>使用次数</span>
+          </Tooltip>
         ),
+        key: 'callCount',
+        width: 86,
+        align: 'right',
+        render: (_value: unknown, tool: ToolRecord) => (
+          <span className="mono">{formatNumber(tool.callCount)}</span>
+        ),
+      },
+      {
+        title: '成功次数',
+        key: 'successCount',
+        width: 76,
+        align: 'right',
+        render: (_value: unknown, tool: ToolRecord) => (
+          <span className="mono">{formatNumber(tool.successCount)}</span>
+        ),
+      },
+      {
+        title: '失败次数',
+        key: 'failedCount',
+        width: 76,
+        align: 'right',
+        render: (_value: unknown, tool: ToolRecord) => (
+          <span className="mono">{formatNumber(toolFailedCount(tool))}</span>
+        ),
+      },
+      {
+        title: (
+          <Tooltip title="成功次数 ÷ 使用次数">
+            <span>成功率</span>
+          </Tooltip>
+        ),
+        key: 'successRate',
+        width: 76,
+        align: 'right',
+        render: (_value: unknown, tool: ToolRecord) => {
+          const rate = toolSuccessRate(tool);
+          return <span className="mono">{rate === null ? '—' : formatPercent(rate)}</span>;
+        },
       },
       {
         title: '最近使用',
         key: 'lastCalledAt',
-        width: 150,
+        width: 140,
         render: (_value: unknown, tool: ToolRecord) => (
           <span className="mono">{formatTimestamp(tool.lastCalledAt)}</span>
         ),
@@ -462,7 +514,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
       {
         title: '模型字节',
         key: 'modelBytes',
-        width: 84,
+        width: 76,
         render: (_value: unknown, tool: ToolRecord) => (
           <Tooltip
             title={
@@ -491,7 +543,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openToolEditor(tool)}>
               编辑
             </Button>
-            {tool.serverId === '__builtin__' ? null : (
+            {tool.serverId === '__builtin__' && !TESTABLE_BUILTIN_TOOLS.has(tool.name) ? null : (
               <Tooltip title="测试工具（会真实调用）">
                 <Button
                   size="small"
@@ -1010,7 +1062,7 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
             columns={columns}
             pagination={false}
             tableLayout="fixed"
-            // Fixed columns sum to 1 230px; the description takes the rest. The 1 360px
+            // Fixed columns sum to 1 242px; the description takes the rest. The 1 360px
             // minimum keeps 1 725px viewports scroll-free while narrower ones scroll.
             scroll={{ x: 1_360 }}
             locale={{
@@ -1114,10 +1166,18 @@ export function ToolsPage({ serverId }: { serverId?: string | null }): React.Rea
         {testTool === null ? null : (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Alert
-              type="warning"
+              type={testTool.serverId === '__builtin__' ? 'info' : 'warning'}
               showIcon
-              message="会真实调用外部工具，可能产生副作用"
-              description="不要用生产环境的写操作测试；服务端默认超时 10 秒。"
+              message={
+                testTool.serverId === '__builtin__'
+                  ? '会真实调用内置只读工具'
+                  : '会真实调用外部工具，可能产生副作用'
+              }
+              description={
+                testTool.serverId === '__builtin__'
+                  ? '仅支持 search_tools / describe_tools / search_scripts，不会写入业务数据。'
+                  : '不要用生产环境的写操作测试；服务端默认超时 10 秒。'
+              }
             />
             <div>
               <Typography.Text type="secondary">工具说明</Typography.Text>

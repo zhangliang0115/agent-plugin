@@ -9,11 +9,11 @@ import { openStateDb } from '../src/db/migrate.ts';
 import { hashScriptCode, type ScriptCandidateSuggester } from '../src/scripts/analysis/index.ts';
 import { ScriptCandidatesService } from '../src/scripts/candidates.ts';
 import { normalizeCandidateSuggestion } from '../src/scripts/candidate-suggester.ts';
-import { ScriptService } from '../src/scripts/service.ts';
+import { ScriptService, SCRIPT_RUN_RETENTION_DAYS } from '../src/scripts/service.ts';
 
 const NOW = Date.UTC(2026, 10, 24, 6, 0, 0);
 const NOW_ISO = new Date(NOW).toISOString();
-const OLD_ISO = new Date(NOW - 50 * 86_400_000).toISOString();
+const OLD_ISO = new Date(NOW - (SCRIPT_RUN_RETENTION_DAYS + 10) * 86_400_000).toISOString();
 
 const echo = (text: string): string => `return tools.demo.echo({ text: '${text}' });`;
 const LIST_CODE = 'return tools.demo.list({ limit: 5 });';

@@ -189,7 +189,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 - `scriptName` 按全局唯一名称解析为内部 `scriptId` 后继续执行：名称只用于定位，不做 ID/名称互相回退；名称不存在返回 `SCRIPT_NOT_FOUND`（消息带名称），解析后仍走与 ID 相同的状态、版本、权限与参数校验，审计与运行历史记录解析出的真实 `scriptId`，但工具 schema 与结果只出现名称。
 - 脚本模式（`scriptName` 或 legacy `scriptId` 解析出的 id）：省略 `scriptVersion` 用 active 版本，没有 active 返回 `SCRIPT_NOT_ACTIVE`；`exact` 版本不接受参数，`parameterized` 版本按 `inputSchema` 校验 `args`；draft 只能显式带 `scriptVersion` 执行，且只允许 owner（`createdBy` 等于调用方 `binding ?? mcp`）或 admin 测试，其他调用方返回 `SCRIPT_FORBIDDEN`；active 版本对全局开放。脚本库是全局命名空间，`workspace` 只决定执行会话，不参与脚本可见性。
 - `activateOnSuccess` 目标版本必须是 draft；同步和异步都支持：成功 settle 时在写入 `script_runs` 的同一事务里激活，失败保持 draft；settle 时版本已非 draft（被并发激活/归档）则不改状态、执行结果仍正常返回并记录实际状态；settle 时调用方不是 owner/admin 时同样只跳过激活（`activationSkipped: "forbidden"`），执行结果不变。成功后该版本变为 active、旧 active 变为 superseded。
-- `run_script` 每次执行都会归档到 `script_runs`（保留 30 天）：成功的 code 模式保存源码，脚本模式保存 `scriptId` / `scriptVersion` / `scriptMode` / `args`，并把 `args` 的 JSON 摘要写入 `args_preview`（上限 512 字符）；摘要先脱敏再截断，完整 `args` 仍按原文存 `args_json`（已知风险）。`eval_start` / `eval_end` / `async_dispatch` 的 `argsPreview` 同样是脱敏值；扫描到疑似密钥时另带 `secretWarnings`（按 `field` / `kind` / `severity` / `count` 聚合，不含原文），只作提示，不阻断执行。归档写失败只记日志，不回滚执行结果。
+- `run_script` 每次执行都会归档到 `script_runs`（保留 90 天）：成功的 code 模式保存源码，脚本模式保存 `scriptId` / `scriptVersion` / `scriptMode` / `args`，并把 `args` 的 JSON 摘要写入 `args_preview`（上限 512 字符）；摘要先脱敏再截断，完整 `args` 仍按原文存 `args_json`（已知风险）。`eval_start` / `eval_end` / `async_dispatch` 的 `argsPreview` 同样是脱敏值；扫描到疑似密钥时另带 `secretWarnings`（按 `field` / `kind` / `severity` / `count` 聚合，不含原文），只作提示，不阻断执行。归档写失败只记日志，不回滚执行结果。
 - `timeout`：可选，正整数毫秒；省略表示不设截止时间（同步与 `async: true` 相同），没有默认值。显式值超过 L2 上限时**钳到上限**而不是报错：同步 600000，`async: true` 7200000。单次同步执行切片仍受 L0（5s）保护，超时会终止该切片。0、负数或非有限值返回 `INVALID_ARGUMENT`。
 - `workspace` 取 realpath 后参与执行会话 key：已绑定客户端按 `(binding, workspace)` 识别，跨传输会话复用；未绑定客户端按 `(Mcp-Session-Id, workspace)` 识别。换 workspace 新建执行会话，变量与 `state` 不继承。
 - `visibleTools` 内置工具用裸名，MCP 工具用 `<server>.<tool>`；只收窄，不放大。
@@ -410,7 +410,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | `REPORT_UNAVAILABLE` | 服务未接线（只可能出现在测试） |
 | `SCRIPT_RUN_NOT_FOUND` | `runId` 不存在或归档未写入 |
 | `SCRIPT_RUN_NOT_SUCCESSFUL` | 来源执行失败或没有可复用代码 |
-| `SCRIPT_RUN_EXPIRED` | 来源归档超过 30 天 |
+| `SCRIPT_RUN_EXPIRED` | 来源归档超过 90 天 |
 | `SCRIPT_NOT_FOUND` | `scriptName` 没有对应脚本（legacy `scriptId` 不存在时同样返回） |
 | `SCRIPT_VERSION_NOT_FOUND` | 版本不存在 |
 | `SCRIPT_VERSION_NOT_DRAFT` | `activateOnSuccess` 目标不是 draft |

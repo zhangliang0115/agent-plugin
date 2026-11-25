@@ -299,7 +299,7 @@ test('an omitted body defaults to empty args and a 10s budget', async () => {
   assert.ok(calls[0]!.deadline <= Date.now() + 10_000);
 });
 
-test('missing server or tool is 404; __builtin__ is rejected as unsupported', async () => {
+test('missing server or tool is 404; only read-only builtins are testable', async () => {
   const servers = [
     serverRecord('pg'),
     serverRecord(BUILTIN_SERVER_ID),
@@ -308,6 +308,7 @@ test('missing server or tool is 404; __builtin__ is rejected as unsupported', as
   const tools = [
     toolRecord('pg', 'query'),
     toolRecord(BUILTIN_SERVER_ID, 'search_tools'),
+    toolRecord(BUILTIN_SERVER_ID, 'run_script'),
     toolRecord(OFFICIAL_SERVER_ID, 'Read'),
   ];
   const calls: ToolTestCall[] = [];
@@ -329,13 +330,17 @@ test('missing server or tool is 404; __builtin__ is rejected as unsupported', as
   assert.equal(errorCode(missingTool), 'TOOL_NOT_FOUND');
 
   const builtin = await call(handler, makeRequest(BUILTIN_SERVER_ID, 'search_tools'));
-  assert.equal(builtin.status, 400);
-  assert.equal(errorCode(builtin), 'TOOL_TEST_UNSUPPORTED');
-  assert.equal(calls.length, 0);
+  assert.equal(builtin.status, 200);
+  assert.equal(calls.length, 1, 'read-only builtins use the builtin test path');
+
+  const unsupported = await call(handler, makeRequest(BUILTIN_SERVER_ID, 'run_script'));
+  assert.equal(unsupported.status, 400);
+  assert.equal(errorCode(unsupported), 'TOOL_TEST_UNSUPPORTED');
+  assert.equal(calls.length, 1, 'write/run builtins never reach the executor');
 
   const official = await call(handler, makeRequest(OFFICIAL_SERVER_ID, 'Read'));
   assert.equal(official.status, 200);
-  assert.equal(calls.length, 1, 'official tools run through the serve path');
+  assert.equal(calls.length, 2, 'official tools run through the serve path');
 });
 
 test('without testTool the route fails closed with TOOL_TEST_UNAVAILABLE', async () => {

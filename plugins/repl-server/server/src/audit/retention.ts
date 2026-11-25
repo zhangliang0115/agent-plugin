@@ -21,12 +21,11 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DATED_FILE = /^(?:events|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 
 /**
- * Budget for the whole `log/` domain. Full bodies make the old 14 天 / 200 MiB
- * pair unusable: 200 MiB would fill in hours and silently shrink the window to
- * a day or two, so the trade is a shorter window against a bigger cap
- * (`09 §一`).
+ * Budget for the whole `log/` domain: 90 days or 2 GiB, whichever is reached
+ * first. The byte cap trims the oldest in-window days when the days alone would
+ * exceed it (`09 §一`).
  */
-export const LOG_RETENTION_DAYS = 7;
+export const LOG_RETENTION_DAYS = 90;
 export const LOG_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 
 /** Warn once a day at this share of the budget, before the sweep has to delete. */
@@ -39,7 +38,7 @@ export interface RetentionOptions {
   /** The `log/` directory. Nothing outside it is ever touched. */
   logDir: string;
   log?: LogFn;
-  /** Days kept; older days are deleted whole. Default 7. */
+  /** Days kept; older days are deleted whole. Default 90. */
   retentionDays?: number;
   /** Budget for everything below `log/`. Default 2 GiB. */
   maxTotalBytes?: number;
@@ -186,8 +185,8 @@ export function createRetention(options: RetentionOptions): Retention {
 
   /**
    * Trims `boots/` reports. They carry no date in the name, so age comes from
-   * `mtime`; the newest `BOOTS_KEEP` survive regardless of age so a debugging
-   * session never loses the report it just looked at.
+   * `mtime`; a report survives only while it is within the newest `BOOTS_KEEP`
+   * and not older than the retention cutoff.
    */
   async function pruneBoots(at: number): Promise<{ files: number; bytes: number }> {
     const dir = join(options.logDir, 'boots');

@@ -50,7 +50,7 @@ import {
  */
 export const SCRIPT_CODE_MAX_BYTES = 1 << 20;
 /** Archive retention for `script_runs` (design 10 §5.1). */
-export const SCRIPT_RUN_RETENTION_DAYS = 30;
+export const SCRIPT_RUN_RETENTION_DAYS = 90;
 /** Versioned test executions that succeed may be activated automatically. */
 export const SCRIPT_NAME_MAX = 120;
 export const SCRIPT_DESCRIPTION_MAX = 2000;

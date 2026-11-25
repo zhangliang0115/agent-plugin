@@ -142,9 +142,9 @@ const FACTS: readonly Fact[] = [
   {
     id: 'log.retention.sampling',
     doc: 'admin',
-    // The resource-sampling paragraph restated this budget independently and had
-    // drifted to 14 天 / 200 MiB while §6 said 7 天 / 2 GiB. The unit is part of the
-    // match so a wrong unit reports "文档 X ≠ 代码 Y" instead of blaming the pattern.
+    // The resource-sampling paragraph restates this budget independently and has
+    // drifted before. The unit is part of the match so a wrong unit reports
+    // "文档 X ≠ 代码 Y" instead of blaming the pattern.
     pattern: /`log\/` 整体 (\d+) 天 \/ (\d+) (MiB|GiB)/,
     expected: [LOG_RETENTION_DAYS, LOG_MAX_TOTAL_BYTES / (1024 ** 3), 'GiB'],
     note: 'log/ 保留预算（资源采样段）',

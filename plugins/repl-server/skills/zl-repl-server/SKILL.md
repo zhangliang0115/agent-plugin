@@ -86,7 +86,7 @@ wait_tasks({ taskIds: ['<evalTaskId>'], timeoutMs: 270000 })
 模型侧只用 `scriptName`。`scriptId` 是系统内部编号，旧客户端才传，不要写进你的调用。
 
 - `search_scripts({ query?, tags?, limit? })` 只返回 active 脚本，带 `scriptName`、`activeVersion`、`inputSchema`、`exampleArgs`。执行用 `run_script({ scriptName, args })`；不传 `scriptVersion` 时使用当前 active 版本。
-- 保存 exact：先成功执行一段 `code`，结果 XML 的 `run` 属性就是 `runId`；再调 `save_script({ runId, mode: 'exact', name, description, tags? })`，生成 active 的零参数脚本。exact 不接受 `code`、非空 `inputSchema` 或 `exampleArgs`，代码取自来源执行；来源 run 必须成功且未过期（归档保留 30 天）。
+- 保存 exact：先成功执行一段 `code`，结果 XML 的 `run` 属性就是 `runId`；再调 `save_script({ runId, mode: 'exact', name, description, tags? })`，生成 active 的零参数脚本。exact 不接受 `code`、非空 `inputSchema` 或 `exampleArgs`，代码取自来源执行；来源 run 必须成功且未过期（归档保留 90 天）。
 - 保存 parameterized：`save_script({ mode: 'parameterized', name, description, code, inputSchema, exampleArgs?, changelog? })` 生成 **draft**。用 `run_script({ scriptName, scriptVersion, args, activateOnSuccess: true })` 测试，成功时该 draft 自动转 active，失败保持 draft。`activateOnSuccess` 只对 draft 有效，对非 draft 版本传会报 `SCRIPT_VERSION_NOT_DRAFT`。
 - 更新已有脚本：传 `scriptName` 定位。只改 `name` / `description` / `tags` 是原地更新，不产生版本，也不需要 `baseVersion`；改 `code` / `inputSchema`（或传 `runId`）必须带 `baseVersion`（与当前版本号一致），会追加一个 draft，需要重新测试激活。每个脚本的 `mode` 创建后固定，改 mode 报 `SCRIPT_MODE_CONFLICT`，只能新建脚本。
 
