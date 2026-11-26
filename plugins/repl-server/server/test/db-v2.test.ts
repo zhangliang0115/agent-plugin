@@ -115,12 +115,12 @@ const REPORT_INDEX_NAMES = [
   'reports_alert_idx',
 ];
 
-test('a fresh database runs v1 through v9 and exposes every feature set', (t) => {
+test('a fresh database runs v1 through v11 and exposes every feature set', (t) => {
   const { db } = openFixture(t);
 
-  assert.equal(SCHEMA_VERSION, 9);
-  assert.equal(readUserVersion(db), 9);
-  assert.equal(getMeta(db, 'schema_version'), '9');
+  assert.equal(SCHEMA_VERSION, 11);
+  assert.equal(readUserVersion(db), 11);
+  assert.equal(getMeta(db, 'schema_version'), '11');
   assert.equal(count(db, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"), 1);
   assert.equal(count(db, 'SELECT count(*) AS n FROM servers'), 2, 'v1 seeds survive');
 
@@ -204,8 +204,8 @@ test('an existing v1 database upgrades in place and keeps its rows', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 9);
-  assert.equal(getMeta(db, 'schema_version'), '9');
+  assert.equal(readUserVersion(db), 11);
+  assert.equal(getMeta(db, 'schema_version'), '11');
   assert.equal(getMeta(db, 'revision'), '5', 'the migrations must not reseed the catalog revision');
 
   const server = getServer(db, 'legacy');
@@ -249,8 +249,8 @@ test('repeated migrate is idempotent on an already migrated database', (t) => {
     }
   });
 
-  assert.equal(migrate(second), 9);
-  assert.equal(readUserVersion(second), 9);
+  assert.equal(migrate(second), 11);
+  assert.equal(readUserVersion(second), 11);
   assert.equal(count(second, 'SELECT count(*) AS n FROM reports'), 1);
   assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2, 'no duplicate seed rows');
   assert.equal(count(second, 'SELECT count(*) AS n FROM meta'), 2);
@@ -286,8 +286,8 @@ test('a v3 database backfills client_name/client_version from the legacy client 
     }
   });
 
-  assert.equal(readUserVersion(db), 9);
-  assert.equal(getMeta(db, 'schema_version'), '9');
+  assert.equal(readUserVersion(db), 11);
+  assert.equal(getMeta(db, 'schema_version'), '11');
   assert.equal(getMeta(db, 'revision'), '7', 'the migration must not reseed the catalog revision');
 
   const read = (id: string): { name: string; version: string } => {
@@ -316,8 +316,8 @@ test('v5 rewrites seed categories and leaves user servers untouched', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 9);
-  assert.equal(getMeta(db, 'schema_version'), '9');
+  assert.equal(readUserVersion(db), 11);
+  assert.equal(getMeta(db, 'schema_version'), '11');
   assert.equal(getMeta(db, 'revision'), '3', 'the migration must not reseed the catalog revision');
   assert.ok(columns(db, 'client_bindings').includes('token_plain'));
 
@@ -349,10 +349,10 @@ test('v5 rewrites seed categories and leaves user servers untouched', (t) => {
 test('a database newer than the supported schema is rejected', (t) => {
   const { file } = emptyFile(t);
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA user_version = 10');
+  db.exec('PRAGMA user_version = 12');
   db.close();
 
-  assert.throws(() => openStateDb(file), /newer than supported 9/);
+  assert.throws(() => openStateDb(file), /newer than supported 11/);
 });
 
 test('a v8 database gains tool_usage and keeps its tool rows', (t) => {
@@ -382,8 +382,8 @@ test('a v8 database gains tool_usage and keeps its tool rows', (t) => {
     }
   });
 
-  assert.equal(readUserVersion(db), 9);
-  assert.equal(getMeta(db, 'schema_version'), '9');
+  assert.equal(readUserVersion(db), 11);
+  assert.equal(getMeta(db, 'schema_version'), '11');
   assert.equal(
     count(db, "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'tool_usage'"),
     1,
@@ -394,6 +394,44 @@ test('a v8 database gains tool_usage and keeps its tool rows', (t) => {
   assert.equal(kept.callCount, 0);
   assert.equal(kept.successCount, 0);
   assert.equal(kept.lastCalledAt, null);
+});
+
+test('a v9 database gains client_bindings.agent and backfills it from labels', (t) => {
+  const { dir } = emptyFile(t);
+  const file = join(dir, 'state-v9.db');
+  const v9 = openStateDb(file);
+  const insert = v9.prepare(`
+    INSERT INTO client_bindings (id, label, token_hash, created_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  insert.run('cb_kiro', 'Kiro 1.5', 'hash-kiro', LEGACY_TIME);
+  insert.run('cb_cc', 'Claude Code', 'hash-cc', LEGACY_TIME);
+  insert.run('cb_other', 'Laptop', 'hash-other', LEGACY_TIME);
+  // Roll the database back to v9: the column is gone, the marker follows.
+  v9.exec('ALTER TABLE client_bindings DROP COLUMN agent');
+  v9.prepare("UPDATE meta SET value = '9' WHERE key = 'schema_version'").run();
+  v9.exec('PRAGMA user_version = 9');
+  v9.close();
+
+  const db = openStateDb(file);
+  t.after(() => {
+    try {
+      db.close();
+    } catch {
+      // closed by the test
+    }
+  });
+
+  const rows = db.prepare('SELECT id, agent FROM client_bindings ORDER BY id').all();
+  assert.deepEqual(
+    rows.map((row) => ({ id: String(row['id']), agent: row['agent'] })),
+    [
+      { id: 'cb_cc', agent: 'claude-code' },
+      { id: 'cb_kiro', agent: 'kiro' },
+      { id: 'cb_other', agent: null },
+    ],
+  );
+  assert.equal(readUserVersion(db), 11);
 });
 
 test('server discoveryJson round-trips as opaque JSON text', (t) => {

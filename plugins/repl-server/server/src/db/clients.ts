@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
+import type { AgentKind } from '../ports.ts';
 import { withTransaction } from './migrate.ts';
 import {
   DbValidationError,
@@ -39,6 +40,7 @@ export interface BindingQuota {
 export interface ClientBindingRecord {
   id: string;
   label: string;
+  agent: AgentKind | null;
   tokenHash: string;
   defaultWorkspace: string | null;
   allowedServers: string[] | null;
@@ -51,6 +53,7 @@ export interface ClientBindingRecord {
 export interface CreateClientBindingInput {
   id?: string;
   label: string;
+  agent?: AgentKind | null;
   /** Plaintext token. Generated when omitted; kept locally so the admin UI can show it. */
   token?: string;
   defaultWorkspace?: string | null;
@@ -61,6 +64,7 @@ export interface CreateClientBindingInput {
 
 export interface ClientBindingPatch {
   label?: string;
+  agent?: AgentKind | null;
   defaultWorkspace?: string | null;
   allowedServers?: string[] | null;
   allowedTags?: string[] | null;
@@ -130,6 +134,7 @@ export function createClientBinding(
   input: CreateClientBindingInput,
 ): CreatedClientBinding {
   const label = requireLabel(input.label);
+  const agent = requireAgent(input.agent);
   const token = input.token ?? randomBytes(32).toString('base64url');
   if (typeof token !== 'string' || token.length === 0) {
     throw new DbValidationError('token must not be empty');
@@ -150,13 +155,14 @@ export function createClientBinding(
     if (clash) throw new DbValidationError('token is already bound to another client', 'CONFLICT');
     db.prepare(`
       INSERT INTO client_bindings (
-        id, label, token_hash, token_plain, default_workspace,
+        id, label, agent, token_hash, token_plain, default_workspace,
         allowed_servers_json, allowed_tags_json, quota_json,
         created_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     `).run(
       id,
       label,
+      agent,
       tokenHash,
       token,
       defaultWorkspace,
@@ -210,6 +216,7 @@ export function updateClientBinding(
     const current = getClientBinding(db, id);
     if (!current) return null;
     const label = patch.label !== undefined ? requireLabel(patch.label) : current.label;
+    const agent = patch.agent === undefined ? current.agent : requireAgent(patch.agent);
     const defaultWorkspace =
       patch.defaultWorkspace === undefined
         ? current.defaultWorkspace
@@ -227,11 +234,12 @@ export function updateClientBinding(
     const quota = patch.quota === undefined ? current.quota : requireQuota(patch.quota);
     db.prepare(`
       UPDATE client_bindings
-      SET label = ?, default_workspace = ?, allowed_servers_json = ?,
+      SET label = ?, agent = ?, default_workspace = ?, allowed_servers_json = ?,
           allowed_tags_json = ?, quota_json = ?
       WHERE id = ?
     `).run(
       label,
+      agent,
       defaultWorkspace,
       serializeNullableArray(allowedServers),
       serializeNullableArray(allowedTags),
@@ -255,10 +263,24 @@ export function touchBinding(db: DatabaseSync, id: string, at = isoNow()): boole
   return Number(result.changes) > 0;
 }
 
+function requireAgent(value: unknown): AgentKind | null {
+  if (value === undefined || value === null) return null;
+  if (value === 'claude-code' || value === 'kiro') return value;
+  throw new DbValidationError('agent must be claude-code, kiro, or null');
+}
+
+function readAgent(row: DbRow): AgentKind | null {
+  const value = row['agent'];
+  if (value === null || value === undefined) return null;
+  if (value === 'claude-code' || value === 'kiro') return value;
+  throw new DbValidationError('client_bindings.agent is invalid');
+}
+
 function toBinding(row: DbRow): ClientBindingRecord {
   return {
     id: requireText(row, 'id'),
     label: requireText(row, 'label'),
+    agent: readAgent(row),
     tokenHash: requireText(row, 'token_hash'),
     defaultWorkspace: readText(row, 'default_workspace'),
     allowedServers: readNullableStringArray(row, 'allowed_servers_json'),

@@ -22,7 +22,7 @@
 
 ## 工具面
 
-模型看到 7 个工具：
+模型看到 6 或 7 个工具（有效声明 MCP tasks 扩展的客户端没有 `wait_tasks`；binding 的 `agent` 配成 `kiro` 时该声明被否决）：
 
 ```text
 run_script({ code?, scriptName?, scriptVersion?, args?, activateOnSuccess?, timeout?, async?, workspace?, visibleTools?, excludeTags? })
@@ -38,7 +38,7 @@ search_scripts({ query?, tags?, limit? })
 
 ## 配套 skill
 
-给 agent 的使用说明在 `skills/zl-repl-server/SKILL.md`：工具发现、`run_script`、长任务、脚本库复用与失败处理。`learn-ai` 仓库的 `cc-plugins/repl-server` 是同一 skill 的安装包装；改内容时两处同步。
+给 agent 的使用说明在 `skills/zl-repl-server/SKILL.md`：工具发现、`run_script`、长任务、脚本库复用与失败处理。运行期还通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）以 `skill://zl-repl-server/SKILL.md` 对外提供同一份说明，见 [`docs/protocol.md`](docs/protocol.md) §3.5。`learn-ai` 仓库的 `cc-plugins/repl-server` 是同一 skill 的安装包装；改内容时两处同步。
 
 ## 开发
 

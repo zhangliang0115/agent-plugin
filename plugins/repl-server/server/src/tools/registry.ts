@@ -69,7 +69,7 @@ export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox ag
 
 - Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
 - Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
-- Pass async: true for long jobs, then collect the task with wait_tasks.
+- Pass async: true for long jobs: with MCP tasks support the client polls the task; otherwise collect it with wait_tasks.
 - timeout is milliseconds, not seconds; omit it for no deadline. One MCP tool call usually takes tens to hundreds of milliseconds.
 - Instead of code, pass scriptName (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
 - Results carry a run="<id>" attribute; save_script turns a successful run into a reusable script.
@@ -84,7 +84,7 @@ const DESCRIBE_TOOLS_DESCRIPTION =
   'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names are listed in unknown; known tools still return. More than 10 names fails validation. Get names from search_tools.';
 
 const WAIT_TASKS_DESCRIPTION =
-  'Wait until the given eval tasks started with async: true finish, consume their results, and return events plus a pending count. taskIds is required: pass one or more task ids; the call never collects other tasks of the session.';
+  'Wait until the given tasks started by run_script with async: true finish, consume their results, and return events plus a pending count. taskIds is required: pass the taskId values returned by run_script; the call never collects other tasks of the session.';
 
 const REPORT_PROBLEM_DESCRIPTION =
   'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
@@ -293,6 +293,8 @@ export interface ListToolsOptions {
   runScriptDescription?: string;
   searchToolsDescription?: string;
   searchToolsSchema?: ToolInputSchema;
+  /** False for clients that declared MCP tasks: they collect via tasks/get, not wait_tasks. */
+  includeWaitTasks?: boolean;
 }
 
 /**
@@ -301,15 +303,20 @@ export interface ListToolsOptions {
  */
 export function listTools(options: ListToolsOptions = {}): readonly ToolDefinition[] {
   const { runScriptDescription, searchToolsDescription, searchToolsSchema } = options;
+  const definitions =
+    options.includeWaitTasks === false
+      ? TOOL_DEFINITIONS.filter((tool) => tool.name !== 'wait_tasks')
+      : TOOL_DEFINITIONS;
   if (
     (runScriptDescription === undefined || runScriptDescription === RUN_SCRIPT_DESCRIPTION)
     && searchToolsDescription === undefined
     && searchToolsSchema === undefined
+    && definitions === TOOL_DEFINITIONS
   ) {
-    return TOOL_DEFINITIONS;
+    return definitions;
   }
   return Object.freeze(
-    TOOL_DEFINITIONS.map((tool) => {
+    definitions.map((tool) => {
       if (tool.name === 'run_script' && runScriptDescription !== undefined) {
         return Object.freeze({ ...tool, description: runScriptDescription });
       }

@@ -54,11 +54,34 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | 请求头 | 宽松（默认） | 严格 |
 |---|---|---|
 | 客户端 token，命中绑定 | `bound` | `bound` |
+| OAuth access token（本机授权服务器签发） | `unbound` | `unbound` |
 | 全局 `mcp-token` | `unbound` | 401 |
 | 无 `Authorization` | `unbound` | 401 |
 | 未知/格式错 token | 401 | 401 |
 
-每个请求重查绑定；删除或轮换后旧会话立即 401。
+每个请求重查绑定；删除或轮换后旧会话立即 401。OAuth access token 只在进程内有效，服务重启后客户端重新授权。
+
+### 2.1 本地 OAuth 授权
+
+服务端同时是一个最小的 OAuth 2.1 授权服务器，给 MCP 客户端提供自动认证。所有端点只对 loopback 开放，且走与 `/mcp` 相同的 Host 允许列表。
+
+| 端点 | 方法 | 作用 |
+|---|---|---|
+| `/.well-known/oauth-protected-resource` | GET | PRM（RFC 9728）：`resource` 为 `<base>/mcp`，`authorization_servers` 为 `<base>` |
+| `/.well-known/oauth-authorization-server` | GET | AS 元数据（RFC 8414） |
+| `/register` | POST | 动态客户端注册，返回 `client_id` |
+| `/authorize` | GET | 授权页（客户端名、redirect URI、resource） |
+| `/authorize` | POST | 允许/拒绝；允许时 302 回 `redirect_uri` 带 `code` 和 `state` |
+| `/token` | POST | `authorization_code` 与 `refresh_token` 两种 grant |
+
+约束：
+
+- 严格与宽松模式下，`/mcp` 的 401 都带 `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"`，客户端据此发现授权服务器。
+- 授权码一次性、60 秒有效，绑定 `client_id`、`redirect_uri` 和 PKCE S256 校验；`resource` 参数存在时必须等于 `<base>/mcp`。
+- 授权页列出 `client_bindings`，选中的绑定随 token 生效：之后的请求拿完整 binding（配额、可见范围、默认 workspace），审计记 binding；不选则 `unbound`。绑定随后被删除时，token 降级为 `unbound` 而不是失效。
+- access token 与 refresh token 均为 365 天；refresh 轮换后旧 refresh 立即失效。
+- 授权写入 `state.db` 的 `oauth_authorizations`（schema v11），服务重启后仍然有效；启动时清理到期行。客户端注册（含 redirect URI）仍在内存，上限 64 个；重连的客户端重新注册、拿新的 `client_id`，旧 token 不受影响。
+- `<base>` 默认 `http://127.0.0.1:<port>`；`/authorize` 的 `<base>` 与 PRM 一致，避免 issuer 随 Host 头漂移。
 
 ## 3. 方法
 
@@ -85,7 +108,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
   "result": {
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
-    "capabilities": { "tools": {}, "extensions": { "io.modelcontextprotocol/tasks": {} } },
+    "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
     "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.2.0" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
@@ -96,7 +119,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 ### 3.2 legacy `initialize`
 
-只给不实现 discover 的客户端。接受 `2025-11-25`（legacy 稳定版）与 `2026-07-28`（modern，兼容入口）两个版本，响应回显请求的 `protocolVersion`。无论请求哪个版本，响应都是 legacy 形状：`protocolVersion` + 顶层 `serverInfo`，没有 `supportedVersions`、`resultType`；`capabilities.tools` 为空对象，不声明 modern 的 tasks 扩展，`instructions` 同样返回。
+只给不实现 discover 的客户端。接受 `2025-11-25`（legacy 稳定版）与 `2026-07-28`（modern，兼容入口）两个版本，响应回显请求的 `protocolVersion`。无论请求哪个版本，响应都是 legacy 形状：`protocolVersion` + 顶层 `serverInfo`，没有 `supportedVersions`、`resultType`；`capabilities.tools` 为空对象，不声明 modern 的 tasks 与 skills 扩展，`instructions` 同样返回。
 
 **未知版本回退**：`protocolVersion` 缺失、非字符串或空字符串返回 `-32602`；其余不支持的版本按 2025-11-25 规范回退到服务端支持的最新 legacy 版本 `2025-11-25`，结果里的 `protocolVersion` 用回退值，不再返回 `-32600`。回退只适用于 `initialize`，`server/discover` 的 `_meta` 版本 pin 仍只接受 `2026-07-28`。
 
@@ -104,19 +127,19 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 ### 3.3 `tools/list`
 
-返回 7 个工具，顺序固定：`run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`、`save_script`、`search_scripts`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
+返回 6 或 7 个工具，顺序固定：**有效声明** tasks 的客户端看不到 `wait_tasks`（6 个），其余客户端 7 个。有效声明 = 本次请求在 `_meta` 里声明了 `io.modelcontextprotocol/tasks`，且该客户端绑定的 `agent` 不是 `kiro`。完整顺序是 `run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`、`save_script`、`search_scripts`，有效声明时只去掉 `wait_tasks`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
 
 - `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。固定核心提示独立工具调用可用 `Promise.all` 并行。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
-- `annotations`：`run_script`、`report_problem` 与 `save_script` 不设；`search_tools`、`describe_tools`、`search_scripts` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks` 只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
+- `annotations`：`run_script`、`report_problem` 与 `save_script` 不设；`search_tools`、`describe_tools`、`search_scripts` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks`（仅无有效 tasks 声明的客户端可见）只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
 - 结果顶层带 `ttlMs: 0`、`cacheScope: "private"`：2026-07-28 的列表结果必须带缓存提示；工具可见性按 binding 与目录变化，不做客户端缓存
 
-**方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。不支持 resources/prompts/logging/subscriptions；未知方法 `-32601`；批量请求不支持。
+**方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/read`、`skills/list`、`skills/get`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。`resources/*` 只发布本 server 的技能文件（见 §3.5），不支持 prompts/logging/subscriptions；`resources/directory/read` 不实现；未知方法 `-32601`；批量请求不支持。
 
 ### 3.4 `tools/call`
 
-七种工具名。只有 `run_script` 可能返回 task；其余六个永远同步返回 `resultType: "complete"`。七个工具都是 MCP 顶层工具，不在 `run_script` 的 `tools` 对象里，脚本内不可调用；`run_script` 的 description 会写明发现类工具在脚本之外使用。`report_problem`、`save_script`、`search_scripts` 不占 eval 预算。
+六或七种工具名（取决于客户端是否声明 tasks）。只有 `run_script` 可能返回 task；其余工具永远同步返回 `resultType: "complete"`。这些工具都是 MCP 顶层工具，不在 `run_script` 的 `tools` 对象里，脚本内不可调用；`run_script` 的 description 会写明发现类工具在脚本之外使用。`report_problem`、`save_script`、`search_scripts` 不占 eval 预算。
 
 #### 同步结果
 
@@ -135,15 +158,18 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 - 不返回 `structuredContent`，不声明 `outputSchema`。
 - 失败时 `isError: true`，`content[0].text` 仍是 `<repl-output>`，正文含 `<error>`。
 
-#### task 结果
+#### 异步结果
 
-判定只看输入：
+判定逐请求读 `_meta["io.modelcontextprotocol/clientCapabilities"].extensions`，再叠加客户端绑定的 `agent`：绝不向未声明 tasks 的客户端返回 `task`：
 
 | 条件 | 返回 |
 |---|---|
-| `async: true` | 普通 `CallToolResult`，XML 带 `async="true" task="<evalTaskId>"` |
-| 客户端本次请求声明 tasks，且 `async` 未传/false，且 `timeout > 30000` | `CreateTaskResult` |
+| 有效声明 tasks（请求已声明且 `agent` 不是 `kiro`），且 `async: true` | `CreateTaskResult`（`taskId` 由客户端轮询） |
+| 其余 `async: true`（未声明，或 `agent = kiro`） | `resultType: "complete"`，带同一组 task 字段和 `content` |
+| 有效声明 tasks，且 `async` 未传/false，且 `timeout > 30000` | `CreateTaskResult` |
 | 其余 | 同步 `CallToolResult` |
+
+两条异步路径在派发时都创建 MCP task，`taskId` 统一是客户端可见的 `t_...`；`wait_tasks` 与 `tasks/get` 都接收它。core 内部的 eval 任务 id 不再出现在任何客户端可见字段里。
 
 `CreateTaskResult`：
 
@@ -159,7 +185,53 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
+不能消费 `task` 的客户端（Kiro，或本次请求未声明 tasks）拿到字段相同的 complete 结果：
+
+```json
+{
+  "resultType": "complete",
+  "taskId": "t_01J...",
+  "status": "working",
+  "createdAt": "2026-11-18T06:00:00.000Z",
+  "lastUpdatedAt": "2026-11-18T06:00:00.000Z",
+  "ttlMs": 9000000,
+  "pollIntervalMs": 500,
+  "content": [
+    {
+      "type": "text",
+      "text": "<repl-output eval=\"7\" run=\"<uuid>\" async=\"true\" task=\"t_01J...\"></repl-output>"
+    }
+  ],
+  "isError": false
+}
+```
+
+`content` 不是可选装饰：`resultType: "complete"` 的 `CallToolResult` 必须带 `content`，Kiro 1.5.49 的 `decodeResult` 会按 `CallToolResult` 校验并拒绝缺字段的结果。`agent = kiro` 的绑定即使请求声明了 tasks，也走这一行：Kiro 不支持 tasks 扩展，返回 `task` 会被它判为不支持的结果类型。
+
 `ttlMs` 是任务映射的进程安全保留期（9000000 ms），从创建时刻起算；脚本本身没有运行时长上限。
+
+### 3.5 技能与 `resources`
+
+server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自己的使用说明，只服务内置的 `skills/zl-repl-server/SKILL.md`：不聚合上游 server 的技能，不做目录配置，`resources/directory/read` 不实现，扩展对象为空 `{}`。该扩展只属于 modern `server/discover`；legacy `initialize` 不声明。
+
+构建把整个 `skills/` 目录复制到 `dist/skills/`；运行时从模块所在目录向上逐级查找 `<dir>/skills/zl-repl-server/SKILL.md`，找到即用。找不到时 catalog 为空：`skills/list`、`resources/list` 返回空数组，`skills/get` 与 `resources/read` 一律 `-32602`，server 照常启动。
+
+四个方法的结果都带 `resultType: "complete"`、`ttlMs: 300000`、`cacheScope: "public"`：
+
+| 方法 | params | result |
+|---|---|---|
+| `skills/list` | 任意（忽略 `cursor`） | `{ "resultType", "skills": Skill[], "ttlMs", "cacheScope" }` |
+| `skills/get` | `{ "uri": string }` | `{ "resultType", "skill": Skill, "ttlMs", "cacheScope" }` |
+| `resources/list` | 任意 | `{ "resultType", "resources": Resource[], "ttlMs", "cacheScope" }` |
+| `resources/read` | `{ "uri": string }` | `{ "resultType", "contents": [{ "uri", "mimeType", "text"?, "blob"? }], "ttlMs", "cacheScope" }` |
+
+- `Skill`：`{ "uri", "frontmatter", "resources": [{ "uri", "digest", "size" }] }`。本 server 的唯一技能 uri 是 `skill://zl-repl-server/SKILL.md`；支持文件用 `skill://zl-repl-server/<相对路径>`。
+- `frontmatter` 保留 SKILL.md 的全部字段（当前 `name`、`description`、`argument-hint`）。解析器只支持单行 `key: value` 标量（成对引号会被去掉）；出现缩进续行或多行/嵌套字段时报错，需要换 YAML 解析器。
+- `resources` 是完整文件清单：SKILL.md 加目录内全部支持文件，递归扫描、跳过隐藏文件、SKILL.md 排第一。`digest` 为 `sha256:<64 位小写 hex>`，`size` 为原始字节数。构建会复制整个目录，所以清单必须覆盖目录内所有文件。
+- `resources/list` 每项：SKILL.md 为 `{ "uri", "name": frontmatter.name, "description": frontmatter.description, "mimeType": "text/markdown" }`；其他文件为 `{ "uri", "name": basename, "mimeType" }`。
+- `resources/read`：UTF-8 文本返回 `text`，非 UTF-8 返回 `blob`（base64）。`mimeType` 按扩展名：`.md` → `text/markdown`、`.json` → `application/json`、`.py` → `text/x-python`、`.sh` → `text/x-sh`、`.ts` → `text/typescript`；其余 UTF-8 用 `text/plain`，非 UTF-8 用 `application/octet-stream`。
+- `uri` 缺失、空字符串或不是字符串：`skills/get` 与 `resources/read` 返回 `-32602`，消息为 `<method> requires a non-empty uri string`。
+- `uri` 合法但不是本 server 服务的技能/资源：`skills/get` 返回 `-32602`（`No skill is served at <uri>`），`resources/read` 返回 `-32602`（`No resource is served at <uri>`）。`resources/directory/read` 仍是未知方法 `-32601`。
 
 ## 4. 工具 schema
 
@@ -243,6 +315,8 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 ### `wait_tasks`
 
+仅对无有效 tasks 声明的客户端暴露。有效声明了 tasks 的客户端调用它返回 `-32602`，应改用 `tasks/get`。
+
 ```json
 {
   "type": "object",
@@ -269,7 +343,9 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 }
 ```
 
-- `taskIds` 必填，1 个或多个：只等这些任务，没有按 owner 全量收取的兜底，所以正常调用不会误取别人的任务。owner 是 `bindingId ?? mcpSessionId`：已绑定客户端跨传输会话、跨 workspace 可见（同一 binding 下的多个项目共用一个 owner，知道 `taskId` 即可收取，属有意决策，与 `tasks/get` 同作用域）；未绑定客户端随传输 id 隔离。
+- `taskIds` 必填，1 个或多个，元素是 `run_script` 异步回执里的 `t_...`（不是 core 内部的 eval 任务 id）：只等这些任务，没有按 owner 全量收取的兜底，所以正常调用不会误取别人的任务。owner 是 `bindingId ?? mcpSessionId`：已绑定客户端跨传输会话、跨 workspace 可见（同一 binding 下的多个项目共用一个 owner，知道 `taskId` 即可收取，属有意决策，与 `tasks/get` 同作用域）；未绑定客户端随传输 id 隔离。
+- 任一个 `taskId` 未知、已过期或属于其他 owner，整次调用返回工具层错误 `TASK_NOT_FOUND`、`isError: true`，不会走 gateway，也不会消耗其它结果。
+- 事件里的 `taskId` 改写回对应的 `t_...`，`evalId` 仍是执行会话内的数字 id。
 - 事件额外带 `runId`；脚本执行还带 `entryMode`、`scriptId`、`scriptVersion`、`scriptMode`、`argsPreview`（code 模式没有后五项）。`argsPreview` 是 `args` 的 JSON 摘要，上限 512 字符；完整参数只留在 `script_runs.args_json`。
 - 结果消费一次；重复取返回 `ALREADY_CONSUMED`。
 - 未知 id：`{ "ok": false, "error": { "code": "UNKNOWN_TASK", "unknownIds": [] } }`，同时 `isError: true`。
@@ -377,7 +453,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 - `eval`：执行会话内的 `evalId`
 - `run`：本次执行的 `runId`（UUID v4），每次执行都不同；异步回执在派发时就有
-- `async` / `task`：`async: true` 的派发回执
+- `async` / `task`：无有效 tasks 声明的客户端 `async: true` 的派发回执；`task` 是 MCP task id（`t_...`），与结果顶层的 `taskId` 相同。有效声明 tasks 时改为 `CreateTaskResult`，信封只出现在 `tasks/get` 的 `result.content` 里
 - `reset="1"`：worker 重建后的第一条结果
 - `restored`：`state` 恢复成功
 - `truncated="1"`：服务端在返回前按 L5 上限截断字段/日志/媒体后置位。截断必须在 server 内先做——客户端再截断会让模型看到断裂的 JSON 片段（01 §8.1）；媒体超限的数量另由 `imagesOmitted` / `documentsOmitted` 体现
@@ -391,7 +467,8 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 | `INVALID_ARGUMENT` | schema 校验失败、timeout 非正整数、`describe_tools` 超过 10 个名字 |
 | `WS_INVALID` | workspace 不存在或不是目录 |
 | `CAPACITY_EXCEEDED` | 执行会话/绑定配额已满且无可淘汰 |
-| `UNKNOWN_TASK` | `wait_tasks` 的 id 不存在 |
+| `TASK_NOT_FOUND` | `wait_tasks` 的 `taskId` 未知、过期或属于其他 owner |
+| `UNKNOWN_TASK` | `wait_tasks` 已解析到 MCP task，但对应 eval 任务不存在 |
 | `ALREADY_CONSUMED` | 同一任务结果被二次收取 |
 | `TASK_EXPIRED` | 任务超过 TTL |
 | `MCP_QUEUE_FULL` | 第三方池的 binding 队列已满 |
@@ -459,5 +536,6 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 3. 声明 tasks 且 `timeout > 30000` 得到 `CreateTaskResult`
 4. `tasks/get` 轮询到 `completed`
 5. `tasks/cancel` 返回 `resultType: "complete"`
-6. `async: true` 得到普通结果 + `evalTaskId`
-7. `wait_tasks` 全部完成、指定 id、二次收取、未知 id
+6. 无有效 tasks 声明的客户端 `async: true` 得到 `resultType: "complete"` + 同一 `taskId`；有效声明的得到 `CreateTaskResult`
+7. `wait_tasks` 按 `taskIds` 收取、事件里的 `taskId` 映射回 MCP id、二次收取、未知 id 返回 `TASK_NOT_FOUND`
+8. `agent = kiro` 的绑定即使请求声明 tasks 也走 complete 路径，且 `tools/list` 仍暴露 `wait_tasks`

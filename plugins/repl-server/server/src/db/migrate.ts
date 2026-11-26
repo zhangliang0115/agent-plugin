@@ -11,6 +11,8 @@ import {
   createSchemaV7,
   createSchemaV8,
   createSchemaV9,
+  createSchemaV10,
+  createSchemaV11,
   SCHEMA_VERSION,
 } from './schema.ts';
 
@@ -95,6 +97,14 @@ export function migrate(db: DatabaseSync): number {
     if (current < 9) {
       applyV9(db);
       current = 9;
+    }
+    if (current < 10) {
+      applyV10(db);
+      current = 10;
+    }
+    if (current < 11) {
+      applyV11(db);
+      current = 11;
     }
   });
   return current;
@@ -239,4 +249,18 @@ function applyV9(db: DatabaseSync): void {
   createSchemaV9(db);
   db.prepare("UPDATE meta SET value = '9' WHERE key = 'schema_version'").run();
   db.exec('PRAGMA user_version = 9');
+}
+
+/** Adds the per-binding agent family and backfills it from existing labels. */
+function applyV10(db: DatabaseSync): void {
+  createSchemaV10(db);
+  db.prepare("UPDATE meta SET value = '10' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 10');
+}
+
+/** Adds the OAuth authorization table; table only, no data move. */
+function applyV11(db: DatabaseSync): void {
+  createSchemaV11(db);
+  db.prepare("UPDATE meta SET value = '11' WHERE key = 'schema_version'").run();
+  db.exec('PRAGMA user_version = 11');
 }

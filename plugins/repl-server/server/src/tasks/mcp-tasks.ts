@@ -55,9 +55,11 @@ export type ToolDispatchMode = 'sync' | 'async' | 'task';
 
 /**
  * Frozen decision table (docs/protocol.md §3.4). Only `run_script` can become a task:
- * - `async: true` always returns a normal CallToolResult carrying an evalTaskId, never a task.
- * - A client that declared tasks gets a CreateTaskResult when `async` is absent/false and the
- *   requested timeout is above 30000.
+ * - `async: true` returns a CreateTaskResult when the client has an effective tasks
+ *   declaration; otherwise it returns a complete CallToolResult carrying the same MCP
+ *   taskId for `wait_tasks`.
+ * - A client with an effective declaration gets a CreateTaskResult when `async` is
+ *   absent/false and the requested timeout is above 30000.
  * - Everything else stays synchronous, including `timeout: 30000` exactly.
  */
 export function resolveDispatchMode(
@@ -67,7 +69,7 @@ export function resolveDispatchMode(
 ): ToolDispatchMode {
   if (toolName !== 'run_script') return 'sync';
   const record = isRecord(args) ? args : {};
-  if (record.async === true) return 'async';
+  if (record.async === true) return tasksDeclared ? 'task' : 'async';
   const timeout = typeof record.timeout === 'number' ? record.timeout : TASK_TIMEOUT_THRESHOLD_MS;
   if (tasksDeclared && timeout > TASK_TIMEOUT_THRESHOLD_MS) return 'task';
   return 'sync';

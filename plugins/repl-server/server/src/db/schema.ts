@@ -1,7 +1,7 @@
 /** SQLite schema versions for the repl-server config store, plus shared row helpers. @module */
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 11;
 
 /**
  * DDL for schema v1. `tools` is a regular rowid table; `tools_fts` is an
@@ -35,6 +35,7 @@ CREATE TABLE servers (
 CREATE TABLE client_bindings (
   id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
+  agent TEXT,
   token_hash TEXT NOT NULL UNIQUE,
   default_workspace TEXT,
   allowed_servers_json TEXT,
@@ -382,6 +383,50 @@ CREATE TABLE IF NOT EXISTS tool_usage (
 
 export function createSchemaV9(db: DatabaseSync): void {
   db.exec(SCHEMA_V9_SQL);
+}
+
+/**
+ * Adds the configured agent family to client bindings. Existing rows are
+ * backfilled from their label; unmatched bindings stay NULL (standard path).
+ */
+export function createSchemaV10(db: DatabaseSync): void {
+  const columns = new Set(
+    db
+      .prepare('PRAGMA table_info(client_bindings)')
+      .all()
+      .map((row) => String(row['name'])),
+  );
+  if (!columns.has('agent')) {
+    db.exec('ALTER TABLE client_bindings ADD COLUMN agent TEXT');
+  }
+  db.exec(`
+    UPDATE client_bindings SET agent = CASE
+      WHEN lower(label) LIKE '%kiro%' THEN 'kiro'
+      WHEN lower(label) LIKE '%claude%' THEN 'claude-code'
+      ELSE NULL
+    END
+    WHERE agent IS NULL
+  `);
+}
+
+/**
+ * Persists OAuth authorizations so a daemon restart does not send every client
+ * back through the consent page. One row per issued access token.
+ */
+export function createSchemaV11(db: DatabaseSync): void {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS oauth_authorizations (
+  access_hash TEXT PRIMARY KEY,
+  client_id TEXT NOT NULL,
+  client_name TEXT NOT NULL,
+  binding_id TEXT,
+  refresh_hash TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  refresh_expires_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS oauth_authorizations_client ON oauth_authorizations(client_id);
+`);
 }
 
 /** Raised when repository input violates a storage invariant. */

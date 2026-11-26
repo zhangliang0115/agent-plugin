@@ -155,6 +155,51 @@ test('_meta clientInfo is split into clientName and clientVersion on the identit
   assert.equal(partial.result.clientVersion, '');
 });
 
+test('a Kiro binding vetoes a declared tasks capability; other agents keep it', async (t) => {
+  const contextDispatcher = new JsonRpcDispatcher<McpContext>();
+  contextDispatcher.register('tools/call', (_params, context) => ({
+    identity: context.identity,
+    tasksDeclared: context.tasksDeclared,
+  }));
+  const params = {
+    name: 'run_script',
+    arguments: {},
+    _meta: {
+      'io.modelcontextprotocol/clientCapabilities': {
+        extensions: { 'io.modelcontextprotocol/tasks': {} },
+      },
+    },
+  };
+
+  async function call(agent: 'kiro' | 'claude-code') {
+    const { server, base } = await listen({
+      dispatcher: contextDispatcher,
+      identity: {
+        mode: 'loose',
+        bindings: { findByTokenHash: async () => ({ id: `cb_${agent}`, agent }) },
+      },
+    });
+    t.after(() => server.close());
+    const response = await rpc(
+      base,
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params },
+      undefined,
+      { authorization: 'Bearer client-token' },
+    );
+    return (await response.json()) as {
+      result: { identity: { agent: string | null }; tasksDeclared: boolean };
+    };
+  }
+
+  const kiro = await call('kiro');
+  assert.equal(kiro.result.identity.agent, 'kiro');
+  assert.equal(kiro.result.tasksDeclared, false, 'Kiro keeps the complete-result path');
+
+  const claude = await call('claude-code');
+  assert.equal(claude.result.identity.agent, 'claude-code');
+  assert.equal(claude.result.tasksDeclared, true);
+});
+
 test('an unknown session header is rejected', async (t) => {
   const { server, base } = await listen();
   t.after(() => server.close());

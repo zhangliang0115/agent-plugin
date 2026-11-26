@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createLog, type LogFn } from './log.ts';
 import { isAllowedHost, type HostAllowlist } from './auth/tokens.ts';
 import { resolveIdentity, toRequestIdentity, type IdentityConfig } from './auth/identity.ts';
+import { handleOAuthRoutes } from './auth/oauth-http.ts';
+import type { OAuthStore } from './auth/oauth.ts';
 import { parseClientInfo } from './client-info.ts';
 import type { JsonRpcDispatcher } from './mcp/jsonrpc.ts';
 import type { Catalog, ExecutionGateway, RequestIdentity } from './ports.ts';
@@ -17,6 +19,7 @@ export interface McpContext {
   gateway: ExecutionGateway;
   catalog: Catalog;
   tasks: McpTaskStore;
+  /** Effective capability: declared by this request and not vetoed by the binding's agent. */
   tasksDeclared: boolean;
   transportId: string;
   /** JSON-RPC id of this request; `null` for notifications. Stamped into eval audits. */
@@ -56,6 +59,16 @@ export interface AppOptions {
    * admin client list uses it to show live binding/client per `Mcp-Session-Id`.
    */
   onSessionActivity?: (transportId: string, identity: RequestIdentity) => void;
+  /** Local OAuth authorization server; discovery and consent routes mount when present. */
+  oauth?: {
+    store: OAuthStore;
+    /** Origin clients call; defaults to the request Host header. */
+    baseUrl?: string;
+    /** Bindings offered on the consent page. */
+    listBindings?: () => Promise<ReadonlyArray<{ id: string; label: string; agent?: string | null }>>;
+    /** Validates a binding id submitted with the consent form. */
+    hasBinding?: (id: string) => boolean | Promise<boolean>;
+  };
   health?: () => Record<string, unknown>;
   log?: LogFn;
 }
@@ -125,6 +138,35 @@ export function createApp(options: AppOptions): Server {
         sendJson(res, 403, {
           error: { code: 'FORBIDDEN_HOST', message: `host not allowed: ${req.headers.host ?? '<missing>'}` },
         });
+        return;
+      }
+
+      const oauthPath =
+        url.pathname.startsWith('/.well-known/')
+        || url.pathname === '/register'
+        || url.pathname === '/authorize'
+        || url.pathname === '/token';
+      if (oauthPath) {
+        if (!isAllowedHost(req.headers.host, options.allowedHosts)) {
+          sendJson(res, 403, {
+            error: { code: 'FORBIDDEN_HOST', message: `host not allowed: ${req.headers.host ?? '<missing>'}` },
+          });
+          return;
+        }
+        if (options.oauth !== undefined) {
+          const baseUrl = options.oauth.baseUrl ?? `http://${req.headers.host ?? '127.0.0.1:8787'}`;
+          if (
+            await handleOAuthRoutes(req, res, url, {
+              store: options.oauth.store,
+              baseUrl,
+              ...(options.oauth.listBindings === undefined ? {} : { listBindings: options.oauth.listBindings }),
+              ...(options.oauth.hasBinding === undefined ? {} : { hasBinding: options.oauth.hasBinding }),
+            })
+          ) {
+            return;
+          }
+        }
+        sendJson(res, 404, { error: { code: 'NOT_FOUND', message: 'unknown path' } });
         return;
       }
 
@@ -237,11 +279,19 @@ export function createApp(options: AppOptions): Server {
         options.identity,
       );
       if (!outcome.ok) {
+        // RFC 9728 §5: the challenge points at the protected-resource metadata
+        // so an OAuth-capable client can discover the authorization server.
+        const challenge =
+          options.oauth === undefined
+            ? outcome.wwwAuthenticate
+            : outcome.wwwAuthenticate === 'Bearer'
+              ? `Bearer resource_metadata="${options.oauth.baseUrl ?? `http://${req.headers.host ?? '127.0.0.1:8787'}`}/.well-known/oauth-protected-resource"`
+              : `${outcome.wwwAuthenticate}, resource_metadata="${options.oauth.baseUrl ?? `http://${req.headers.host ?? '127.0.0.1:8787'}`}/.well-known/oauth-protected-resource"`;
         sendJson(
           res,
           outcome.status,
           { error: outcome.error },
-          { 'www-authenticate': outcome.wwwAuthenticate },
+          { 'www-authenticate': challenge },
         );
         return;
       }
@@ -265,7 +315,9 @@ export function createApp(options: AppOptions): Server {
         gateway: options.gateway,
         catalog: options.catalog,
         tasks: options.tasks,
-        tasksDeclared: declaredTasks(message),
+        // A binding configured as Kiro keeps the complete-result path even if the
+        // request declared tasks; everything else follows the per-request declaration.
+        tasksDeclared: declaredTasks(message) && identity.agent !== 'kiro',
         transportId,
         requestId:
           typeof messageId === 'string' || typeof messageId === 'number' ? messageId : null,

@@ -64,7 +64,11 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
     supportedVersions: ['2026-07-28'],
     capabilities: {
       tools: {},
-      extensions: { 'io.modelcontextprotocol/tasks': {} },
+      resources: {},
+      extensions: {
+        'io.modelcontextprotocol/tasks': {},
+        'io.modelcontextprotocol/skills': {},
+      },
     },
     _meta: {
       'io.modelcontextprotocol/serverInfo': { name: 'repl-server', version: SERVER_VERSION },
@@ -197,6 +201,10 @@ test('the method table exposes exactly the frozen v1 methods in order', () => {
     'ping',
     'tools/list',
     'tools/call',
+    'resources/list',
+    'resources/read',
+    'skills/list',
+    'skills/get',
     'tasks/get',
     'tasks/cancel',
     'tasks/update',

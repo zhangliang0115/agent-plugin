@@ -51,6 +51,7 @@ import { handleAdminHttp } from './admin/http-adapter.ts';
 import { createSearchPreview, createCatalogService, type CatalogService } from './catalog/index.ts';
 import { createApp, type AppOptions, type McpContext } from './app.ts';
 import { resolveIdentityConfig } from './assembly-identity.ts';
+import { OAuthStore } from './auth/oauth.ts';
 import {
   DbClientBindingStore,
   DbServerStore,
@@ -58,7 +59,18 @@ import {
   DbToolStore,
 } from './assembly-stores.ts';
 import { openStateDb, migrate } from './db/migrate.ts';
-import { findBindingByToken, getClientBinding } from './db/clients.ts';
+import {
+  findBindingByToken,
+  getClientBinding,
+  listClientBindings,
+  type ClientBindingRecord,
+} from './db/clients.ts';
+import {
+  deleteOAuthAuthorization,
+  listOAuthAuthorizations,
+  pruneOAuthAuthorizations,
+  saveOAuthAuthorization,
+} from './db/oauth.ts';
 import { BUILTIN_SERVER_ID, OFFICIAL_SERVER_ID, listServers } from './db/servers.ts';
 import { countToolsByServer, markAbsentToolsStale, recordToolUsage, upsertTool } from './db/tools.ts';
 import { seedBuiltinTools } from './tools/builtin-seed.ts';
@@ -400,6 +412,15 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   const serverStore = new DbServerStore(db);
   const toolStore = new DbToolStore(db);
   const bindingStore = new DbClientBindingStore(db);
+  // Authorizations survive restarts: the consent page is expensive enough without
+  // making users repeat it every time the daemon restarts. Built here because the
+  // admin clients handler reads it before the app options are assembled.
+  pruneOAuthAuthorizations(db);
+  const oauthStore = new OAuthStore({
+    list: () => listOAuthAuthorizations(db),
+    save: (row) => saveOAuthAuthorization(db, row),
+    remove: (accessHash) => deleteOAuthAuthorization(db, accessHash),
+  });
   const settingsStore = new DbSettingsStore(db);
   // One merged snapshot at startup: defaults ← stored settings ← env. Every
   // component below is built from it, so a stored value is live before the
@@ -914,6 +935,7 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
     }),
     createAdminClientsHandler({
       bindings: bindingStore,
+      oauthAuthorizations: async () => oauthStore.listAuthorizations(),
       sessions: sessionRegistry,
       onBindingChanged: async (bindingId) => {
         const affected = gateway.sessions
@@ -1028,6 +1050,8 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           runScriptDescription: surface.runScriptDescription,
           searchToolsDescription: surface.searchToolsDefinition.description,
           searchToolsSchema: surface.searchToolsDefinition.inputSchema,
+          // Clients with the tasks extension collect results via tasks/get.
+          includeWaitTasks: !context.tasksDeclared,
         }),
       };
     },
@@ -1140,12 +1164,26 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   // auto-logs in loopback peers; direct remote clients still need a token.
   const adminAutoLogin = options.adminAutoLogin ?? true;
 
+  const oauthBaseUrl = `http://127.0.0.1:${options.port ?? 8787}`;
+  const bindingRow = (id: string): ClientBindingRecord | null => getClientBinding(db, id);
+
   const appOptions: AppOptions = {
     allowedHosts: options.allowedHosts,
+    oauth: {
+      store: oauthStore,
+      baseUrl: oauthBaseUrl,
+      listBindings: async () =>
+        listClientBindings(db).map((row) => ({ id: row.id, label: row.label, agent: row.agent })),
+      hasBinding: (id) => bindingRow(id) !== null,
+    },
     identity: resolveIdentityConfig({
       mode: options.strictAuth === true ? 'strict' : 'loose',
       globalToken: tokens.mcpToken,
       bindings: { findByToken: (token) => findBindingByToken(db, token) },
+      oauth: {
+        inspect: (token) => oauthStore.inspect(token),
+        lookupBinding: (id) => bindingRow(id),
+      },
     }),
     sessions,
     gateway,

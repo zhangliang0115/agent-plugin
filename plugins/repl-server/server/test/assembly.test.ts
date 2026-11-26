@@ -482,6 +482,43 @@ test('assembled server answers discover, tools/list and search_tools', async (t)
     'search_scripts',
   ]);
 
+  // Declaring the tasks extension switches collection to tasks/get, so wait_tasks
+  // disappears from the list and is rejected at call time.
+  const tasksMeta = {
+    _meta: {
+      'io.modelcontextprotocol/clientCapabilities': {
+        extensions: { 'io.modelcontextprotocol/tasks': {} },
+      },
+    },
+  };
+  const tasksList = await rpc(
+    app.base,
+    { jsonrpc: '2.0', id: 21, method: 'tools/list', params: tasksMeta },
+    session,
+  );
+  const tasksTools = (await tasksList.json()) as { result: { tools: Array<{ name: string }> } };
+  assert.deepEqual(tasksTools.result.tools.map((tool) => tool.name), [
+    'run_script',
+    'search_tools',
+    'describe_tools',
+    'report_problem',
+    'save_script',
+    'search_scripts',
+  ]);
+
+  const blocked = await rpc(
+    app.base,
+    {
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/call',
+      params: { name: 'wait_tasks', arguments: { taskIds: ['t_missing'] }, ...tasksMeta },
+    },
+    session,
+  );
+  const blockedBody = (await blocked.json()) as { error?: { code: number } };
+  assert.equal(blockedBody.error?.code, -32602);
+
   const search = await rpc(
     app.base,
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'search_tools', arguments: {} } },

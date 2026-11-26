@@ -10,14 +10,14 @@ repl-server 是一个 MCP server：模型在持久 JavaScript 沙箱里调用本
 
 ## 工具面
 
-顶层 7 个工具，顺序固定。它们都不在脚本的 `tools` 对象里，脚本内不可调用。
+顶层 6 或 7 个工具，顺序固定；声明 MCP tasks 的客户端没有 `wait_tasks`。它们都不在脚本的 `tools` 对象里，脚本内不可调用。
 
 | 工具 | 用途 | 性质 |
 |---|---|---|
 | `run_script` | 执行代码或已保存脚本 | 有副作用，非只读 |
 | `search_tools` | 按名字/描述/标签找工具，返回规范名 | 只读 |
 | `describe_tools` | 取 1–10 个工具的输入 schema | 只读 |
-| `wait_tasks` | 收取 `async: true` 的任务结果 | 消费结果，非幂等 |
+| `wait_tasks` | 阻塞收取 `async: true` 的任务结果，到期返回 `pending`；仅不支持 MCP tasks 的客户端可见 | 消费结果，非幂等 |
 | `report_problem` | 上报 repl-server 或其暴露工具的问题 | 写一条记录 |
 | `save_script` | 从成功执行保存脚本，或更新脚本 | 写脚本库 |
 | `search_scripts` | 查脚本库里 active 的脚本 | 只读 |
@@ -51,34 +51,34 @@ return { count: data.total_count };
 
 ## 长任务
 
-有两套非阻塞路径，返回的 task id 不是同一种，不能混用。
+先看工具列表里有没有 `wait_tasks`，它决定用哪种方式收结果。两条路径的 `taskId` 是同一个 `t_...`，差别只在谁去取结果。
 
-### 1. `async: true` + `wait_tasks`
+### 有 `wait_tasks`：用 `async: true` + `wait_tasks`
 
-任何客户端都可用。
+`run_script({ async: true })` 立即返回 `resultType: "complete"`：顶层带 `taskId`、`status`、`createdAt`、`lastUpdatedAt`、`ttlMs`、`pollIntervalMs`，`content[0].text` 是带 `async="true" task="<taskId>"` 的 `<repl-output>`。`wait_tasks` 会等到任务结束或 `timeoutMs` 到期，适合必须拿到结果才能继续的串行流程。
 
 ```js
 run_script({ code, async: true })
-// 立即返回普通 CallToolResult，XML 带 async="true" task="<evalTaskId>"
-wait_tasks({ taskIds: ['<evalTaskId>'], timeoutMs: 270000 })
+// 立即返回，顶层 taskId = "t_..."
+wait_tasks({ taskIds: ['t_...'], timeoutMs: 270000 })
 ```
 
-- `wait_tasks` 的 `taskIds` 必填，只等指定的任务，不会顺带收取别人的任务；`timeoutMs` 范围 1000–600000，默认 270000。
-- 返回 `{ ok, timedOut, events, pending }`，事件带 `runId`，脚本执行还带脚本版本和 `argsPreview`。
+- `taskIds` 必填，元素就是回执里的 `t_...`；只等这些任务，不会顺带收取别人的任务。`timeoutMs` 范围 1000–600000，默认 270000。
+- 返回 `{ ok, timedOut, events, pending }`；事件里的 `taskId` 是传进去的对应 `t_...`，带 `runId`，脚本执行还带脚本版本和 `argsPreview`。`timedOut: true` 表示任务仍在跑，用同一个 `taskIds` 再等一次。
 - 结果只消费一次：重复收取返回 `ALREADY_CONSUMED`；需要新结果就重新 `run_script`。
-- 未知 id 返回 `{ ok: false, error: { code: "UNKNOWN_TASK", unknownIds } }`，同时 `isError: true`。
+- 任一个 `taskIds` 未知、过期或属于其他客户端，整次调用返回 `isError: true`，`error.code = "TASK_NOT_FOUND"`。
 
-### 2. MCP tasks 扩展
+### 没有 `wait_tasks`：客户端支持 MCP tasks，用标准 `tasks/get`
 
-这是 MCP 协议层的非阻塞任务扩展，不是 `async: true` 的别名。
+服务端返回标准 `CreateTaskResult`（`{ resultType: "task", taskId: "t_...", ... }`），客户端自己按 `pollIntervalMs` 用 `tasks/get` 轮询，终态把 `completed.result` 交给你；你不需要、也不能调 `wait_tasks`。这是 MCP 协议层的任务扩展，不是 `async: true` 的别名。
 
 - 服务端在 `server/discover` 的 `capabilities.extensions` 里声明 `io.modelcontextprotocol/tasks`。
 - 客户端在 `tools/call` 的 `params._meta["io.modelcontextprotocol/clientCapabilities"].extensions` 里放同名 key，表示本次请求支持 tasks。
-- 触发条件只针对 `run_script`：`async` 未传或为 false，且 `timeout > 30000`（严格大于；省略 timeout 按 30000 判定，不会触发）。`async: true` 永远走路径 1。
+- 触发条件只针对 `run_script`：`async: true`，或 `async` 未传/为 false 且 `timeout > 30000`（严格大于；省略 timeout 按 30000 判定，不会触发）。
 - 不阻塞，直接返回 `{ resultType: "task", taskId: "t_...", status: "working", ttlMs, pollIntervalMs, ... }`。
-- 用 `tasks/get({ taskId })` 按 `pollIntervalMs` 轮询；它是幂等读取，不消费 `wait_tasks` 队列。终态看 `completed` / `failed` / `cancelled`，`completed.result` 是普通 `CallToolResult`。
+- 用 `tasks/get({ taskId })` 按 `pollIntervalMs` 轮询；它是幂等读取。终态看 `completed` / `failed` / `cancelled`，`completed.result` 是普通 `CallToolResult`。
 - `tasks/cancel({ taskId })` 做协作式中止；已结束的任务返回当前终态。`tasks/update` 不产生 `input_required`，空确认即可，一般不用调用。
-- `t_...` 是 MCP task id，只能给 `tasks/get` / `tasks/cancel` / `tasks/update`；`wait_tasks` 只认 `async: true` 返回的 `evalTaskId`。两者不能互换。
+- 同一个 `t_...` 也能交给 `wait_tasks`（如果工具面里有它），但每端只用一条路径取结果，不要两边交替。
 - task 映射保留 2.5 小时，`pollIntervalMs` 默认 500ms；任务按 owner（`bindingId ?? mcpSessionId`）隔离，绑定客户端可跨传输会话和 workspace 取回，未绑定客户端随 MCP 会话。
 
 ## 脚本库

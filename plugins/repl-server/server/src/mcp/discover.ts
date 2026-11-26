@@ -17,6 +17,7 @@ export const INITIALIZE_PROTOCOL_VERSIONS: readonly string[] = [
   DISCOVER_PROTOCOL_VERSION,
 ];
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
+export const SKILLS_EXTENSION = 'io.modelcontextprotocol/skills';
 export const SERVER_NAME = 'repl-server';
 export const SERVER_VERSION = VERSION;
 export const DISCOVER_TTL_MS = 3_600_000;
@@ -38,7 +39,7 @@ export const INSTRUCTIONS = [
   '',
   'Workflow:',
   '- Outside the script: search_tools finds canonical names, describe_tools returns schemas. Inside: only tools.* and tools.mcp.*.',
-  '- Long jobs: pass async:true and collect with wait_tasks.',
+  '- Long jobs: async:true; tasks-aware clients poll the task, others use wait_tasks.',
   '- Do not guess tool names. Unknown names fail.',
   '',
   'Results:',
@@ -61,7 +62,11 @@ export interface DiscoverResult {
   supportedVersions: string[];
   capabilities: {
     tools: Record<string, never>;
-    extensions: { 'io.modelcontextprotocol/tasks': Record<string, never> };
+    resources: Record<string, never>;
+    extensions: {
+      'io.modelcontextprotocol/tasks': Record<string, never>;
+      'io.modelcontextprotocol/skills': Record<string, never>;
+    };
   };
   _meta: { 'io.modelcontextprotocol/serverInfo': ServerInfo };
   instructions: string;
@@ -106,7 +111,8 @@ export function discoverResult(options: StaticInstructionsOptions = {}): Discove
     supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
     capabilities: {
       tools: {},
-      extensions: { [TASKS_EXTENSION]: {} },
+      resources: {},
+      extensions: { [TASKS_EXTENSION]: {}, [SKILLS_EXTENSION]: {} },
     },
     _meta: { 'io.modelcontextprotocol/serverInfo': serverInfo() },
     instructions: options.instructions ?? INSTRUCTIONS,

@@ -80,7 +80,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const first = openStateDb(file);
   try {
-    assert.equal(readUserVersion(first), 9);
+    assert.equal(readUserVersion(first), 11);
     assert.equal(count(first, 'SELECT count(*) AS n FROM servers'), 2);
     const seeds = first
       .prepare('SELECT id, transport, category FROM servers ORDER BY id')
@@ -121,7 +121,7 @@ test('migration creates the current schema once and seeds the fixed servers', (t
 
   const second = openStateDb(file);
   try {
-    assert.equal(readUserVersion(second), 9);
+    assert.equal(readUserVersion(second), 11);
     assert.equal(count(second, 'SELECT count(*) AS n FROM servers'), 2);
     assert.equal(
       count(second, "SELECT count(*) AS n FROM meta WHERE key = 'schema_version'"),
@@ -153,7 +153,7 @@ test('V3 backfills untouched seed rows and preserves edited ones', (t) => {
 
   const upgraded = openStateDb(file);
   try {
-    assert.equal(readUserVersion(upgraded), 9);
+    assert.equal(readUserVersion(upgraded), 11);
     const official = upgraded
       .prepare("SELECT label, category, tags_json FROM servers WHERE id = '__official__'")
       .get();

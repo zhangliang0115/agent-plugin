@@ -136,8 +136,10 @@ test('clientDeclaredTasks reads the per-request extension declaration', () => {
 });
 
 test('resolveDispatchMode implements the frozen decision table', () => {
+  assert.equal(resolveDispatchMode('run_script', { async: true }, true), 'task');
+  assert.equal(resolveDispatchMode('run_script', { async: true, timeout: 1000 }, true), 'task');
   assert.equal(resolveDispatchMode('run_script', { async: true }, false), 'async');
-  assert.equal(resolveDispatchMode('run_script', { async: true, timeout: 1000 }, true), 'async');
+  assert.equal(resolveDispatchMode('run_script', { async: true, timeout: 35000 }, false), 'async');
   assert.equal(resolveDispatchMode('run_script', { timeout: 35000 }, true), 'task');
   assert.equal(resolveDispatchMode('run_script', { async: false, timeout: 35000 }, true), 'task');
   assert.equal(resolveDispatchMode('run_script', { timeout: 30000 }, true), 'sync');

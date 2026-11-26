@@ -221,6 +221,7 @@ function toAdminBinding(row: ClientBindingRecord): AdminClientBinding {
   return {
     id: row.id,
     label: row.label,
+    agent: row.agent,
     defaultWorkspace: row.defaultWorkspace,
     allowedServers: row.allowedServers,
     allowedTags: row.allowedTags,

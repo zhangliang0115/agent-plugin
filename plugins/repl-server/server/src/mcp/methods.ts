@@ -3,6 +3,12 @@
 import { createDiscoverHandler, createInitializeHandler, type DiscoverOptions } from './discover.ts';
 import { JsonRpcError, JSON_RPC_INTERNAL_ERROR } from './errors.ts';
 import { JsonRpcDispatcher, type JsonRpcHandler } from './jsonrpc.ts';
+import {
+  resourcesListHandler,
+  resourcesReadHandler,
+  skillsGetHandler,
+  skillsListHandler,
+} from './skills.ts';
 
 /** Methods served by the MCP endpoint, in the order exposed by `methods()`. */
 export const METHOD_TABLE = [
@@ -12,6 +18,10 @@ export const METHOD_TABLE = [
   'ping',
   'tools/list',
   'tools/call',
+  'resources/list',
+  'resources/read',
+  'skills/list',
+  'skills/get',
   'tasks/get',
   'tasks/cancel',
   'tasks/update',
@@ -54,6 +64,11 @@ export function createMethodTable<Context = undefined>(
   dispatcher.register('ping', () => ({ resultType: 'complete' }));
   dispatcher.register('tools/list', options.toolsList ?? notWired('tools/list'));
   dispatcher.register('tools/call', options.toolsCall ?? notWired('tools/call'));
+  // Static skill content: wired directly, not through MethodTableOptions.
+  dispatcher.register('resources/list', resourcesListHandler);
+  dispatcher.register('resources/read', resourcesReadHandler);
+  dispatcher.register('skills/list', skillsListHandler);
+  dispatcher.register('skills/get', skillsGetHandler);
   dispatcher.register('tasks/get', options.tasksGet ?? notWired('tasks/get'));
   dispatcher.register('tasks/cancel', options.tasksCancel ?? notWired('tasks/cancel'));
   dispatcher.register('tasks/update', options.tasksUpdate ?? notWired('tasks/update'));

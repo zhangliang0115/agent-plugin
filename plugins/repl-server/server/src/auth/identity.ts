@@ -1,5 +1,5 @@
 /** Client identity for `/mcp`: token → `client_bindings` row, with the frozen loose/strict matrix. @module */
-import type { RequestIdentity } from '../ports.ts';
+import type { AgentKind, RequestIdentity } from '../ports.ts';
 
 import { parseBearer, sha256Hex, timingSafeEqualString } from './tokens.ts';
 
@@ -10,6 +10,8 @@ export type AuthMode = 'loose' | 'strict';
 export interface ClientBinding {
   id: string;
   label?: string;
+  /** Configured agent family; `null` keeps the standard result path. */
+  agent?: AgentKind | null;
   /** SHA-256 hex of the plaintext token; the store looks rows up by it. */
   tokenHash?: string;
   defaultWorkspace?: string | null;
@@ -52,9 +54,15 @@ export interface IdentityConfig {
   /** Global `mcp-token`; loose mode maps it to `unbound`, strict mode rejects it. */
   globalToken?: string | null;
   bindings: ClientBindingLookup;
+  /** Access tokens issued by the local OAuth authorization server. */
+  oauth?: {
+    inspect(token: string): { clientId: string; bindingId: string | null } | undefined;
+    /** Resolves the binding chosen on the consent page into the full row. */
+    lookupBinding?(id: string): ClientBinding | null | Promise<ClientBinding | null>;
+  };
 }
 
-export type IdentityReason = 'client_token' | 'global_token' | 'no_token';
+export type IdentityReason = 'client_token' | 'global_token' | 'oauth_token' | 'no_token';
 
 export type IdentityFailureReason =
   | 'missing_token'
@@ -135,6 +143,32 @@ export async function resolveIdentity(
   const tokenHash = sha256Hex(bearer.token);
   const binding = await findBinding(config.bindings, bearer.token, tokenHash);
   if (binding === null || binding === undefined || typeof binding.id !== 'string' || binding.id === '') {
+    const oauth = config.oauth?.inspect(bearer.token);
+    if (oauth !== undefined) {
+      // The consent page may have attached a binding; a deleted binding degrades
+      // to unbound rather than rejecting a token the client still holds.
+      if (oauth.bindingId !== null && config.oauth?.lookupBinding !== undefined) {
+        const bound = await config.oauth.lookupBinding(oauth.bindingId);
+        if (bound !== null && bound !== undefined && typeof bound.id === 'string' && bound.id !== '') {
+          return allow({
+            identity: 'bound',
+            binding: bound,
+            reason: 'oauth_token',
+            client,
+            clientName,
+            clientVersion,
+          });
+        }
+      }
+      return allow({
+        identity: 'unbound',
+        binding: null,
+        reason: 'oauth_token',
+        client,
+        clientName,
+        clientVersion,
+      });
+    }
     return deny('unknown_token', 'unknown client token');
   }
   // The store is expected to match on the token; verify the stored hash again in constant time.
@@ -177,6 +211,7 @@ export function toRequestIdentity(outcome: IdentityAllowed, ids: IdentityIds): R
     client: outcome.client,
     clientName: outcome.clientName,
     clientVersion: outcome.clientVersion,
+    agent: outcome.binding?.agent ?? null,
     mcp: ids.mcp,
   };
   if (ids.exec !== undefined) identity.exec = ids.exec;

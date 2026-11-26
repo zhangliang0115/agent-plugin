@@ -40,6 +40,7 @@ class MemoryBindingStore implements ClientBindingStore {
     const row: StoredBinding = {
       id: `cb_${this.counter}`,
       label: input.label,
+      agent: input.agent,
       defaultWorkspace: input.defaultWorkspace,
       allowedServers: input.allowedServers,
       allowedTags: input.allowedTags,
@@ -176,6 +177,7 @@ test('POST /clients returns the plaintext token and keeps it out of the list', a
     handler,
     makeRequest('POST', '/admin/api/clients', {
       label: 'claude-code-work',
+      agent: 'claude-code',
       defaultWorkspace: '/repo/a',
       allowedServers: ['pg'],
       allowedTags: ['read', 'write'],
@@ -191,6 +193,7 @@ test('POST /clients returns the plaintext token and keeps it out of the list', a
   const client = body['client'] as Record<string, unknown>;
   assert.equal(client['id'], 'cb_1');
   assert.equal(client['label'], 'claude-code-work');
+  assert.equal(client['agent'], 'claude-code');
   assert.deepEqual(client['allowedServers'], ['pg']);
   assert.equal('tokenHash' in client, false);
   assert.equal(store.tokenHashes.length, 1);
@@ -225,6 +228,13 @@ test('POST /clients validates the binding shape', async () => {
   );
   assert.equal(relative.status, 400);
   assert.equal(errorCode(relative), 'INVALID_FIELD');
+
+  const badAgent = await call(
+    handler,
+    makeRequest('POST', '/clients', { label: 'x', agent: 'cursor' }),
+  );
+  assert.equal(badAgent.status, 400);
+  assert.equal(errorCode(badAgent), 'INVALID_FIELD');
 
   const badQuota = await call(
     handler,
@@ -341,6 +351,7 @@ test('PUT /clients/:id updates the binding and destroys its execution sessions',
     handler,
     makeRequest('PUT', '/admin/api/clients/cb_1', {
       label: 'work-laptop',
+      agent: 'kiro',
       allowedServers: null,
       allowedTags: ['read'],
       quota: null,
@@ -351,6 +362,7 @@ test('PUT /clients/:id updates the binding and destroys its execution sessions',
   assert.equal(body['affectedSessions'], 2);
   const client = body['client'] as Record<string, unknown>;
   assert.equal(client['label'], 'work-laptop');
+  assert.equal(client['agent'], 'kiro');
   assert.equal(client['allowedServers'], null);
   assert.deepEqual(client['allowedTags'], ['read']);
   assert.equal(client['quota'], null);

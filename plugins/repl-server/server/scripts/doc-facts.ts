@@ -23,6 +23,7 @@ import {
   LOG_RETENTION_DAYS,
 } from '../src/audit/retention.ts';
 import { MAX_ASYNC_EVAL_MS, MAX_SYNC_EVAL_MS } from '../src/exec/gateway.ts';
+import { SCRIPT_RUN_RETENTION_DAYS } from '../src/scripts/service.ts';
 import {
   TASK_POLL_INTERVAL_MS,
   TASK_TIMEOUT_THRESHOLD_MS,
@@ -91,6 +92,20 @@ const FACTS: readonly Fact[] = [
     pattern: /L0（(\d+)s）/,
     expected: [LIMITS.syncMs / 1000],
     note: '同步执行切片',
+  },
+  {
+    id: 'script.run.retention',
+    doc: 'protocol',
+    pattern: /归档到 `script_runs`（保留 (\d+) 天）/,
+    expected: [SCRIPT_RUN_RETENTION_DAYS],
+    note: '执行归档保留期',
+  },
+  {
+    id: 'script.run.expired',
+    doc: 'protocol',
+    pattern: /来源归档超过 (\d+) 天/,
+    expected: [SCRIPT_RUN_RETENTION_DAYS],
+    note: '脚本来源过期错误',
   },
   {
     id: 'task.ttl.sample',

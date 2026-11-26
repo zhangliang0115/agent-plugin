@@ -21,6 +21,7 @@ import { searchTools, type SearchToolsInput, type ToolVisibility } from './searc
 import type { ToolTextSearch } from './search-fts.ts';
 import {
   McpTaskStore,
+  TaskMethodError,
   ownerOf,
   resolveDispatchMode,
   type CreateTaskResult,
@@ -91,6 +92,7 @@ interface SearchScriptsArguments {
 }
 
 interface WaitTasksArguments {
+  /** MCP task ids (`t_...`) returned by the asynchronous run_script calls. */
   taskIds: string[];
   timeoutMs?: number;
 }
@@ -130,10 +132,36 @@ function runScriptFailure(code: string, message: string): CallToolResult {
   };
 }
 
-function asyncAcknowledgement(evalId: number, evalTaskId: string, runId: string): CallToolResult {
+/**
+ * Same task identity and timestamps as `CreateTaskResult`, in a `complete` result
+ * because the client cannot consume `resultType: "task"` (Kiro, or no declaration).
+ * `content` is required here, so the envelope repeats the task id.
+ */
+export interface AsyncCallToolResult extends CallToolResult {
+  readonly taskId: string;
+  readonly status: 'working';
+  readonly createdAt: string;
+  readonly lastUpdatedAt: string;
+  readonly ttlMs: number;
+  readonly pollIntervalMs: number;
+}
+
+function asyncAcknowledgement(
+  evalId: number,
+  task: CreateTaskResult,
+  runId: string,
+): AsyncCallToolResult {
   return {
     resultType: 'complete',
-    content: [{ type: 'text', text: renderEnvelope({ evalId, runId, async: true, evalTaskId }) }],
+    taskId: task.taskId,
+    status: task.status,
+    createdAt: task.createdAt,
+    lastUpdatedAt: task.lastUpdatedAt,
+    ttlMs: task.ttlMs,
+    pollIntervalMs: task.pollIntervalMs,
+    content: [
+      { type: 'text', text: renderEnvelope({ evalId, runId, async: true, evalTaskId: task.taskId }) },
+    ],
     isError: false,
   };
 }
@@ -290,8 +318,10 @@ async function runScriptCall(input: unknown, ctx: ToolCallContext): Promise<Tool
 
   try {
     const dispatched = await ctx.gateway.dispatchScript(request);
-    if (mode === 'task') return ctx.tasks.create(ownerOf(ctx.identity), dispatched.taskId);
-    return asyncAcknowledgement(dispatched.evalId, dispatched.taskId, dispatched.runId);
+    // Every async dispatch gets an MCP task id; only the result shape differs by client.
+    const task = ctx.tasks.create(ownerOf(ctx.identity), dispatched.taskId);
+    if (mode === 'task') return task;
+    return asyncAcknowledgement(dispatched.evalId, task, dispatched.runId);
   } catch (error) {
     return failureFromError(error);
   }
@@ -435,21 +465,54 @@ function isWaitTasksFailure(value: unknown): boolean {
   return typeof value === 'object' && value !== null && (value as { ok?: unknown }).ok === false;
 }
 
+/** The gateway's events carry core eval ids; clients only ever saw the MCP task ids. */
+function withMcpTaskIds(value: unknown, byEvalId: ReadonlyMap<string, string>): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  const events = (value as { events?: unknown }).events;
+  if (!Array.isArray(events)) return value;
+  return {
+    ...value,
+    events: events.map((event) => {
+      if (typeof event !== 'object' || event === null) return event;
+      const taskId = byEvalId.get(String((event as { taskId?: unknown }).taskId));
+      return taskId === undefined ? event : { ...event, taskId };
+    }),
+  };
+}
+
 async function waitTasksCall(input: unknown, ctx: ToolCallContext): Promise<CallToolResult> {
   const validation = validateToolArguments('wait_tasks', input);
   if (!validation.ok) return toolFailure(validation.code, validation.message);
 
   const args = validation.value as unknown as WaitTasksArguments;
   const owner = ownerOf(ctx.identity);
+  const evalTaskIds: string[] = [];
+  const byEvalId = new Map<string, string>();
+  for (const taskId of args.taskIds) {
+    let record;
+    try {
+      record = ctx.tasks.resolve(owner, taskId);
+    } catch (error) {
+      if (error instanceof TaskMethodError) return toolFailure(error.taskCode, error.message);
+      return toolFailure(errorCode(error), errorMessage(error));
+    }
+    evalTaskIds.push(record.evalTaskId);
+    byEvalId.set(record.evalTaskId, taskId);
+  }
+
   let value: unknown;
   try {
-    value = await ctx.gateway.waitTasks(owner, args.taskIds, args.timeoutMs ?? WAIT_TASKS_DEFAULT_MS);
+    value = await ctx.gateway.waitTasks(
+      owner,
+      evalTaskIds,
+      args.timeoutMs ?? WAIT_TASKS_DEFAULT_MS,
+    );
   } catch (error) {
     const failure = waitTasksFailure(error);
     if (failure === undefined) return toolFailure(errorCode(error), errorMessage(error));
     value = failure;
   }
-  return jsonResult(value, isWaitTasksFailure(value));
+  return jsonResult(withMcpTaskIds(value, byEvalId), isWaitTasksFailure(value));
 }
 
 export async function callTool(
@@ -459,6 +522,12 @@ export async function callTool(
 ): Promise<ToolCallResponse> {
   // MCP makes `arguments` optional; tools with required fields reject the empty object in validation.
   const args = input === undefined ? {} : input;
+  if (name === 'wait_tasks' && ctx.tasksDeclared === true) {
+    throw new JsonRpcError(
+      JSON_RPC_INVALID_PARAMS,
+      'wait_tasks is only for clients without the MCP tasks extension; this client declared it, so use tasks/get with the taskId returned by run_script',
+    );
+  }
   let response: ToolCallResponse;
   switch (name) {
     case 'run_script':
@@ -485,7 +554,8 @@ export async function callTool(
     default:
       throw new UnknownToolError(name);
   }
-  // A task result means the dispatch was accepted; its outcome arrives via wait_tasks.
+  // A task result means the dispatch was accepted; its outcome arrives via tasks/get,
+  // or via wait_tasks for clients without the tasks extension.
   ctx.onUsage?.(name, response.resultType === 'task' || response.isError !== true);
   return response;
 }

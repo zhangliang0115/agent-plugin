@@ -242,6 +242,7 @@ test('identity: toRequestIdentity projects the binding id and session ids', asyn
     client: 'claude-code/2.1.327',
     clientName: 'claude-code',
     clientVersion: '2.1.327',
+    agent: null,
     mcp: 'mcp_1',
     exec: 'es_1',
   });
@@ -264,8 +265,23 @@ test('identity: toRequestIdentity projects the binding id and session ids', asyn
     client: '',
     clientName: '',
     clientVersion: '',
+    agent: null,
     mcp: 'mcp_2',
   });
+
+  const kiro = toRequestIdentity(
+    {
+      ok: true,
+      identity: 'bound',
+      binding: { id: 'cb_k', agent: 'kiro' },
+      reason: 'client_token',
+      client: '',
+      clientName: '',
+      clientVersion: '',
+    },
+    { mcp: 'mcp_3' },
+  );
+  assert.equal(kiro.agent, 'kiro');
 });
 
 // --- admin gate -------------------------------------------------------------
@@ -476,4 +492,58 @@ test('admin: an unauthenticated request never reaches the CSRF checks', () => {
   );
   assert.equal(result.status, 401);
   assert.equal(result.error.code, 'UNAUTHORIZED');
+});
+
+test('identity: an OAuth token inherits the binding chosen on the consent page', async () => {
+  const config = {
+    mode: 'strict' as const,
+    globalToken: null,
+    bindings: { findByToken: () => null },
+    oauth: {
+      inspect: (token: string) =>
+        token === 'at_bound' ? { clientId: 'oauth-client', bindingId: 'cb_oauth' } : undefined,
+      lookupBinding: (id: string) => (id === 'cb_oauth' ? { id, label: 'claude code' } : null),
+    },
+  };
+  const outcome = await resolveIdentity({ authorization: 'Bearer at_bound' }, config);
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.equal(outcome.identity, 'bound');
+    assert.equal(outcome.binding?.id, 'cb_oauth');
+    assert.equal(outcome.reason, 'oauth_token');
+  }
+});
+
+test('identity: a deleted binding degrades an OAuth token to unbound', async () => {
+  const config = {
+    mode: 'strict' as const,
+    globalToken: null,
+    bindings: { findByToken: () => null },
+    oauth: {
+      inspect: () => ({ clientId: 'oauth-client', bindingId: 'cb_gone' }),
+      lookupBinding: () => null,
+    },
+  };
+  const outcome = await resolveIdentity({ authorization: 'Bearer at_x' }, config);
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.equal(outcome.identity, 'unbound');
+    assert.equal(outcome.binding, null);
+    assert.equal(outcome.reason, 'oauth_token');
+  }
+});
+
+test('identity: an unbound OAuth token still passes strict mode', async () => {
+  const config = {
+    mode: 'strict' as const,
+    globalToken: null,
+    bindings: { findByToken: () => null },
+    oauth: { inspect: () => ({ clientId: 'oauth-client', bindingId: null }) },
+  };
+  const outcome = await resolveIdentity({ authorization: 'Bearer at_free' }, config);
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.equal(outcome.identity, 'unbound');
+    assert.equal(outcome.reason, 'oauth_token');
+  }
 });

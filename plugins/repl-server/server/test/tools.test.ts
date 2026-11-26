@@ -50,6 +50,18 @@ test('tools/list exposes the seven tools in the frozen order', () => {
   assert.deepEqual([...TOOL_ORDER], names);
 });
 
+test('tools/list omits wait_tasks for clients that declared MCP tasks', () => {
+  const names = listTools({ includeWaitTasks: false }).map((tool) => tool.name);
+  assert.deepEqual(names, [
+    'run_script',
+    'search_tools',
+    'describe_tools',
+    'report_problem',
+    'save_script',
+    'search_scripts',
+  ]);
+});
+
 test('every tool is alwaysLoad and only run_script, report_problem and save_script lack annotations', () => {
   for (const tool of listTools()) {
     assert.equal(tool._meta['anthropic/alwaysLoad'], true);

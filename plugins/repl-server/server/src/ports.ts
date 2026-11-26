@@ -21,6 +21,10 @@ export interface ProcessLedger {
   removePool(serverId: string): Promise<void>;
 }
 
+/** Configured client family; decides which standard result shape it can consume. */
+export type AgentKind = 'claude-code' | 'kiro';
+export const AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'kiro'];
+
 /** Identity resolved from the request token. `binding` is null for unbound clients. */
 export interface RequestIdentity {
   identity: 'bound' | 'unbound';
@@ -31,6 +35,8 @@ export interface RequestIdentity {
   clientName?: string;
   /** Parsed `clientInfo.version`; display only, empty when unreported. */
   clientVersion?: string;
+  /** Configured by the binding; `null` means no override. */
+  agent?: AgentKind | null;
   mcp: string;
   exec?: string;
 }

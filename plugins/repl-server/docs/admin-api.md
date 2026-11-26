@@ -51,7 +51,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | GET | `/categories` | 分类字典；未保存过返回内置默认（10 项），显式保存 `[]` 后返回空数组。字段与校验规则见设计 03 §九 | 同步 |
 | PUT | `/categories` | 全量替换；`If-Match` 语义同 `/tags` | 同步 |
 | GET | `/search` | 用同一检索器预览 | 同步 |
-| GET | `/clients` | 绑定列表 + 全部传输会话（含 `clientName` / `clientVersion`）；每个绑定的 `activeSessions` 只计 15 分钟内活跃的会话，窗口由 `activeWindowMs` 回显 | 同步 |
+| GET | `/clients` | 绑定列表 + 全部传输会话（含 `clientName` / `clientVersion`）+ `oauthAuthorizations`（OAuth 客户端名、`bindingId`、`createdAt`、`accessExpiresAt`、`refreshExpiresAt`）；每个绑定的 `activeSessions` 只计 15 分钟内活跃的会话，窗口由 `activeWindowMs` 回显 | 同步 |
 | POST | `/clients` | 创建绑定并返回 token 明文；token 同时存本机 `state.db`，管理端可再次查看/复制，轮换后旧 token 立即失效 | 同步 |
 | PUT | `/clients/:id` | 默认 workspace、可见范围、配额；**销毁该 binding 的执行会话（跨传输会话）** | 同步 |
 | DELETE | `/clients/:id` | 删除绑定，token 立即失效；同样销毁该 binding 的执行会话 | 同步 |
@@ -297,7 +297,7 @@ clientVersion     客户端自报版本，精确匹配；可多选
 client            旧参数：按 `name/version` 原始标签精确匹配，保留兼容
 binding           token 身份；可多选
 exec, evalId      执行会话 / eval；只给 `evalId` 不给 `exec` 时返回 400，因为它在会话内才唯一
-taskId            异步任务；匹配事件里的 `evalTaskId`
+taskId            异步任务；匹配审计事件里的 core eval 任务 id（与客户端可见的 MCP `taskId` 不是同一个值）
 runId             一次执行；匹配事件里的 `runId`
 scriptId          保存脚本；匹配事件里的 `scriptId`（`eval_start` / `eval_end` / `async_dispatch` / `script_saved`）
 tool, server      工具与来源；可多选（`server` 同时匹配 `serverId`）

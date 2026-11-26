@@ -46,9 +46,13 @@ type ClientQuotaKey =
 
 type ClientQuota = Partial<Record<ClientQuotaKey, number>>;
 
+type AgentKind = 'claude-code' | 'kiro';
+
 interface ClientBinding {
   id: string;
   label: string;
+  /** `null` follows the per-request task declaration. */
+  agent: AgentKind | null;
   defaultWorkspace: string | null;
   allowedServers: string[] | null;
   allowedTags: string[] | null;
@@ -78,6 +82,7 @@ interface ClientsResponse {
 
 interface ClientFormValues {
   label: string;
+  agent?: AgentKind;
   defaultWorkspace?: string;
   allowedServers?: string[];
   allowedTags?: string[];
@@ -185,6 +190,7 @@ export function ClientsPage(): React.ReactElement {
           <div>
             <div>{value}</div>
             <div className="mono muted">{client.id}</div>
+            {client.agent === null ? null : <div className="muted">{client.agent}</div>}
           </div>
         ),
       },
@@ -356,6 +362,7 @@ export function ClientsPage(): React.ReactElement {
     if (client === null) {
       form.setFieldsValue({
         label: '',
+        agent: undefined,
         defaultWorkspace: '',
         allowedServers: [],
         allowedTags: [],
@@ -368,6 +375,7 @@ export function ClientsPage(): React.ReactElement {
     }
     form.setFieldsValue({
       label: client.label,
+      agent: client.agent ?? undefined,
       defaultWorkspace: client.defaultWorkspace ?? '',
       allowedServers: client.allowedServers ?? [],
       allowedTags: client.allowedTags ?? [],
@@ -392,6 +400,7 @@ export function ClientsPage(): React.ReactElement {
     }
     const body: Record<string, unknown> = {
       label,
+      agent: values.agent ?? null,
       defaultWorkspace: nullIfEmpty(values.defaultWorkspace),
       allowedServers:
         values.allowedServers === undefined || values.allowedServers.length === 0
@@ -636,6 +645,20 @@ export function ClientsPage(): React.ReactElement {
             ]}
           >
             <Input placeholder="work-laptop" />
+          </Form.Item>
+          <Form.Item
+            name="agent"
+            label="agent"
+            extra="kiro 不支持 MCP tasks 扩展，异步 run_script 返回 complete；留空按请求声明判断。"
+          >
+            <Select
+              allowClear
+              placeholder="未设置"
+              options={[
+                { value: 'claude-code', label: 'claude-code' },
+                { value: 'kiro', label: 'kiro' },
+              ]}
+            />
           </Form.Item>
           <Form.Item
             name="defaultWorkspace"

@@ -11,6 +11,7 @@ import type {
   ScriptRequest,
   TaskSnapshot,
 } from '../src/ports.ts';
+import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../src/mcp/errors.ts';
 import { callTool, UnknownToolError, type ToolCallContext, type ToolCallResponse } from '../src/tools/call.ts';
 import {
   buildSearchToolsDefinition,
@@ -21,6 +22,7 @@ import type { ToolVisibility } from '../src/tools/search.ts';
 import {
   isCreateTaskResult,
   McpTaskStore,
+  TASK_POLL_INTERVAL_MS,
   TASK_TTL_MS,
   type CreateTaskResult,
 } from '../src/tasks/mcp-tasks.ts';
@@ -250,8 +252,8 @@ test('argument validation failures are tool-layer errors', async () => {
   assert.equal(h.gateway.runCalls.length, 0);
 });
 
-test('async: true always returns a normal result with an evalTaskId', async () => {
-  const h = harness({ tasksDeclared: true });
+test('async: true returns the async envelope for clients without tasks support', async () => {
+  const h = harness();
   h.gateway.dispatched = { taskId: 'ev_42', evalId: 12, runId: 'run_42' };
 
   const result = asCallResult(
@@ -259,10 +261,16 @@ test('async: true always returns a normal result with an evalTaskId', async () =
   );
   assert.deepEqual(result, {
     resultType: 'complete',
+    taskId: 't_1',
+    status: 'working',
+    createdAt: '2026-11-18T06:00:00.000Z',
+    lastUpdatedAt: '2026-11-18T06:00:00.000Z',
+    ttlMs: TASK_TTL_MS,
+    pollIntervalMs: TASK_POLL_INTERVAL_MS,
     content: [
       {
         type: 'text',
-        text: '<repl-output eval="12" run="run_42" async="true" task="ev_42"></repl-output>',
+        text: '<repl-output eval="12" run="run_42" async="true" task="t_1"></repl-output>',
       },
     ],
     isError: false,
@@ -273,7 +281,22 @@ test('async: true always returns a normal result with an evalTaskId', async () =
   assert.ok(request !== undefined);
   assert.equal(request.timeoutMs, 5000);
   assert.equal(request.async, true);
-  assert.equal(h.tasks.size, 0, 'async: true never creates an MCP task');
+  assert.equal(h.tasks.size, 1, 'every async dispatch gets an MCP task id');
+});
+
+test('async: true returns a CreateTaskResult for clients that declared tasks', async () => {
+  const h = harness({ tasksDeclared: true });
+  h.gateway.dispatched = { taskId: 'ev_42', evalId: 12, runId: 'run_42' };
+
+  const result = await callTool('run_script', { code: 'x', async: true, timeout: 5000 }, h.ctx);
+  assert.equal(isCreateTaskResult(result), true);
+  if (!isCreateTaskResult(result)) throw new Error('unreachable');
+  assert.equal(result.taskId, 't_1');
+  assert.equal(result.status, 'working');
+  assert.equal(h.gateway.runCalls.length, 0);
+  assert.equal(h.gateway.dispatchCalls.length, 1);
+  assert.equal(h.gateway.dispatchCalls[0]?.async, true);
+  assert.equal(h.tasks.size, 1);
 });
 
 test('async: true without timeout has no deadline', async () => {
@@ -499,8 +522,22 @@ test('search_tools rejects server, category and tags outside the per-request enu
   assert.equal(h.catalog.calls, 1, 'only the accepted call reaches the catalog');
 });
 
-test('wait_tasks forwards the owner, task ids and timeout, and passes the result through', async () => {
+test('wait_tasks is rejected for clients that declared MCP tasks', async () => {
+  const h = harness({ tasksDeclared: true });
+
+  await assert.rejects(
+    callTool('wait_tasks', { taskIds: ['t_1'] }, h.ctx),
+    (error: unknown) =>
+      error instanceof JsonRpcError
+      && error.code === JSON_RPC_INVALID_PARAMS
+      && /tasks\/get/.test(error.message),
+  );
+  assert.equal(h.gateway.waitCalls.length, 0);
+});
+
+test('wait_tasks resolves the MCP task id, forwards the eval id and timeout, and rewrites events', async () => {
   const h = harness();
+  const task = h.tasks.create('mcp_1', 'ev_1');
   h.gateway.waitResult = {
     ok: true,
     timedOut: false,
@@ -508,15 +545,20 @@ test('wait_tasks forwards the owner, task ids and timeout, and passes the result
     pending: 0,
   };
 
-  const result = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_1'] }, h.ctx));
+  const result = asCallResult(await callTool('wait_tasks', { taskIds: [task.taskId] }, h.ctx));
   assert.equal(result.isError, false);
-  assert.deepEqual(parseText(result), h.gateway.waitResult);
+  assert.deepEqual(parseText(result), {
+    ok: true,
+    timedOut: false,
+    events: [{ taskId: task.taskId, evalId: 3, status: 'completed', result: 'ok', elapsedMs: 12 }],
+    pending: 0,
+  });
   assert.deepEqual(h.gateway.waitCalls, [
     { owner: 'mcp_1', taskIds: ['ev_1'], timeoutMs: 270_000 },
   ]);
 
   const explicit = asCallResult(
-    await callTool('wait_tasks', { taskIds: ['ev_1'], timeoutMs: 1500 }, h.ctx),
+    await callTool('wait_tasks', { taskIds: [task.taskId], timeoutMs: 1500 }, h.ctx),
   );
   assert.equal(explicit.isError, false);
   assert.deepEqual(h.gateway.waitCalls[1], {
@@ -526,23 +568,63 @@ test('wait_tasks forwards the owner, task ids and timeout, and passes the result
   });
 
   const bound = harness({ identity: BOUND_IDENTITY });
-  await callTool('wait_tasks', { taskIds: ['ev_1'] }, bound.ctx);
+  const boundTask = bound.tasks.create('cb_1', 'ev_1');
+  await callTool('wait_tasks', { taskIds: [boundTask.taskId] }, bound.ctx);
   assert.equal(bound.gateway.waitCalls[0]?.owner, 'cb_1', 'bound clients are keyed by binding');
+
+  const second = h.tasks.create('mcp_1', 'ev_2');
+  h.gateway.waitResult = {
+    ok: true,
+    timedOut: false,
+    events: [
+      { taskId: 'ev_1', evalId: 3, status: 'completed', result: 'a', elapsedMs: 12 },
+      { taskId: 'ev_2', evalId: 4, status: 'failed', result: 'b', elapsedMs: 20 },
+    ],
+    pending: 0,
+  };
+  const many = parseText(
+    asCallResult(await callTool('wait_tasks', { taskIds: [task.taskId, second.taskId] }, h.ctx)),
+  ) as { events: Array<{ taskId: string }> };
+  assert.deepEqual(
+    many.events.map((event) => event.taskId),
+    [task.taskId, second.taskId],
+    'each event maps back to its own MCP task id',
+  );
+});
+
+test('wait_tasks reports unknown and foreign task ids as TASK_NOT_FOUND', async () => {
+  const h = harness();
+  const missing = asCallResult(await callTool('wait_tasks', { taskIds: ['t_404'] }, h.ctx));
+  assert.equal(missing.isError, true);
+  assert.deepEqual(parseText(missing), {
+    ok: false,
+    error: { code: 'TASK_NOT_FOUND', message: 'task t_404 was not found' },
+  });
+
+  const foreign = h.tasks.create('cb_other', 'ev_1');
+  const denied = asCallResult(await callTool('wait_tasks', { taskIds: [foreign.taskId] }, h.ctx));
+  assert.equal(denied.isError, true);
+  assert.equal((parseText(denied) as { error: { code: string } }).error.code, 'TASK_NOT_FOUND');
+  assert.equal(h.gateway.waitCalls.length, 0);
 });
 
 test('wait_tasks marks ok:false results and thrown task errors as isError', async () => {
   const h = harness();
+  const task = h.tasks.create('mcp_1', 'ev_1');
   h.gateway.waitResult = { ok: false, error: { code: 'ALREADY_CONSUMED' } };
-  const consumed = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_1'] }, h.ctx));
+  const consumed = asCallResult(await callTool('wait_tasks', { taskIds: [task.taskId] }, h.ctx));
   assert.equal(consumed.isError, true);
   assert.deepEqual(parseText(consumed), { ok: false, error: { code: 'ALREADY_CONSUMED' } });
 
   const thrown = harness();
+  const thrownTask = thrown.tasks.create('mcp_1', 'ev_1');
   thrown.gateway.waitError = Object.assign(new Error('unknown task'), {
     code: 'UNKNOWN_TASK',
     data: { unknownIds: ['ev_missing'] },
   });
-  const unknown = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_missing'] }, thrown.ctx));
+  const unknown = asCallResult(
+    await callTool('wait_tasks', { taskIds: [thrownTask.taskId] }, thrown.ctx),
+  );
   assert.equal(unknown.isError, true);
   assert.deepEqual(parseText(unknown), {
     ok: false,
@@ -550,10 +632,13 @@ test('wait_tasks marks ok:false results and thrown task errors as isError', asyn
   });
 
   const dataOnly = harness();
+  const dataTask = dataOnly.tasks.create('mcp_1', 'ev_1');
   dataOnly.gateway.waitError = Object.assign(new Error('expired'), {
     data: { code: 'TASK_EXPIRED' },
   });
-  const expired = asCallResult(await callTool('wait_tasks', { taskIds: ['ev_1'] }, dataOnly.ctx));
+  const expired = asCallResult(
+    await callTool('wait_tasks', { taskIds: [dataTask.taskId] }, dataOnly.ctx),
+  );
   assert.equal(expired.isError, true);
   assert.deepEqual(parseText(expired), { ok: false, error: { code: 'TASK_EXPIRED' } });
 });
@@ -574,7 +659,7 @@ test('wait_tasks validation errors are tool-layer errors', async () => {
   assert.match(emptyError.error.message, /at least 1 item/);
 
   const result = asCallResult(
-    await callTool('wait_tasks', { taskIds: ['ev_1'], timeoutMs: 999 }, h.ctx),
+    await callTool('wait_tasks', { taskIds: ['t_1'], timeoutMs: 999 }, h.ctx),
   );
   assert.equal(result.isError, true);
   assert.equal((parseText(result) as { error: { code: string } }).error.code, 'INVALID_ARGUMENT');

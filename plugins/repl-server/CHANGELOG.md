@@ -2,6 +2,9 @@
 
 ## 未发布
 ### 新增
+- 本地 OAuth 2.1 授权服务器（`docs/protocol.md` §2.1）：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/register`（动态注册）、`/authorize`（授权页）、`/token`（授权码 + PKCE S256、refresh 轮换）；`/mcp` 的 401 带 `resource_metadata`，MCP 客户端可以自动发现并完成授权。授权页可从 `client_bindings` 选择归属，token 继承完整绑定配置；选择不绑定时为 `unbound`。
+- OAuth 授权持久化（`oauth_authorizations`，schema v11）：token 在服务重启后仍有效，access 与 refresh 均为 365 天；管理端 `GET /admin/api/clients` 的 `oauthAuthorizations` 字段列出在线授权的客户端、绑定与到期时间。
+- MCP Skills 扩展（`io.modelcontextprotocol/skills`）：`server/discover` 声明 `resources` 与 skills 扩展，新增 `skills/list`、`skills/get`、`resources/list`、`resources/read` 发布内置 `skills/zl-repl-server/SKILL.md`（完整文件清单、sha256 摘要、5 分钟公共缓存）；构建把 `skills/` 复制到 `dist/skills/`，legacy `initialize` 的 capabilities 不变。
 - 文档校验脚本：`pnpm docs:check` 校验版本副本（7 处）、`docs/protocol.md` 的数值（7 类事实，直接读运行时常量，正则失配也算失败）与 `docs/admin-api.md` 的端点表（根段级双向比对 `server/src/admin/*.ts`）；`pnpm docs:version` 按 `plugin.meta.json` 回写全部副本。
 - `docs/admin-api.md`：管理端 `/admin/api/*` 的 L1 契约，从设计 03 §四、06 §五 抽出（鉴权、59 条端点总表、请求/响应形状、生效时机、SSE、审计查询、报告与告警端点、HTTP 错误码）；同时补上代码已服务但原表缺的 `/csrf`、`/session`、`/tags`、`/categories`。
 - `core/src/version.ts` 改为由 `server/scripts/version.ts` 生成，`VERSION` 不再有第二处字面量。
@@ -11,12 +14,15 @@
 - `reports` 表保留策略：90 天 / 10000 行，只清 `closed` 且告警不在 `pending`/`sending` 的行，随生命周期 sweep 每小时执行（设计 06 §十 #3）。
 - 显式 `timeout` 增加 L2 上限：同步 600s、异步 7200s，超出钳到上限；省略仍表示不设截止。
 ### 变更
+- 异步派发统一使用 MCP task id：`run_script` 的所有异步路径都创建 MCP task，`wait_tasks` 的 `taskIds` 元素改为传 `t_...`（原为 core 的 eval 任务 id），事件里的 `taskId` 也映射回对应的 `t_...`；core 的 eval 任务 id 不再出现在客户端可见字段里。
+- 有效声明 MCP tasks 的客户端（请求声明且 binding 的 `agent` 不是 `kiro`），`run_script({ async: true })` 返回 `CreateTaskResult`，由客户端自己 `tasks/get` 轮询；其余客户端得到字段相同的 `resultType: "complete"` 结果（含 `content`），用 `wait_tasks` 收取。`wait_tasks` 只对无有效声明的客户端暴露，有效声明方调用返回 `-32602`。
+- `client_bindings` 新增 `agent`（`claude-code` / `kiro` / null，schema v10），管理 API 与客户端页面可编辑；迁移按 label 回填。`agent = kiro` 用于否决请求里的 tasks 声明，因为 Kiro 会拒绝 `resultType: "task"`，且其 complete 校验要求 `content`。
 - `wait_tasks` 不再声明 `idempotentHint`：它消费结果，重试返回 `ALREADY_CONSUMED`（与设计 01 §4.2 一致）。
 - `TASK_TTL_MS` / `TASK_POLL_INTERVAL_MS` 改为引用 `LIMITS`，去掉与 `core/src/constants.ts` 的重复字面量。
 ### 文档
 - `docs/protocol.md` 校正 `truncated="1"`（服务端先截断，01 §8.1）、`timeout` 上限、`wait_tasks` 注解、SDK 边界（零依赖）；`docs/plan.md` 的 `srv-00-sdk-spike` 标为已取消。
 - `docs/protocol.md` 改为把管理端形状指向 `docs/admin-api.md`，不再指向设计 06–08。
-- `docs/protocol.md` 明确 `wait_tasks` 的 owner 作用域：已绑定客户端跨传输会话、跨 workspace 可见（`taskIds` 必填且无按 owner 全量收取的兜底），与 `tasks/get` 同作用域；设计 02 §4.4「归属」同步为 binding 级并记录理由。
+- `docs/protocol.md` 明确 `wait_tasks` 的 owner 作用域：已绑定客户端跨传输会话、跨 workspace 可见（`taskId` 必填且无按 owner 全量收取的兜底），与 `tasks/get` 同作用域；设计 02 §4.4「归属」同步为 binding 级并记录理由。
 
 ## 0.2.0（2026-11-22）
 ### 新增

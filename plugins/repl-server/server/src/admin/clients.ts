@@ -17,6 +17,7 @@
 import { randomBytes } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
+import { AGENT_KINDS, type AgentKind } from '../ports.ts';
 import {
   AdminApiError,
   adminHandler,
@@ -51,6 +52,8 @@ export type ClientQuota = Partial<Record<ClientQuotaKey, number>>;
 export interface ClientBinding {
   id: string;
   label: string;
+  /** Configured agent family; `null` keeps the standard result path. */
+  agent: AgentKind | null;
   defaultWorkspace: string | null;
   /** `null` means every server; an array means any-of. */
   allowedServers: string[] | null;
@@ -63,6 +66,7 @@ export interface ClientBinding {
 
 export interface ClientBindingInput {
   label: string;
+  agent: AgentKind | null;
   defaultWorkspace: string | null;
   allowedServers: string[] | null;
   allowedTags: string[] | null;
@@ -71,6 +75,7 @@ export interface ClientBindingInput {
 
 export interface ClientBindingPatch {
   label?: string;
+  agent?: AgentKind | null;
   defaultWorkspace?: string | null;
   allowedServers?: string[] | null;
   allowedTags?: string[] | null;
@@ -116,12 +121,22 @@ export interface AdminClientsDeps {
   /** Destroys every live execution session of the binding; returns how many were removed. */
   onBindingChanged: (bindingId: string, change: BindingChange) => Promise<number> | number;
   sessions?: SessionRegistry;
+  /** Live OAuth authorizations, surfaced next to the static-token bindings. */
+  oauthAuthorizations?: () => Promise<ReadonlyArray<{
+    clientId: string;
+    clientName: string;
+    bindingId: string | null;
+    createdAt: string;
+    accessExpiresAt: string;
+    refreshExpiresAt: string | null;
+  }>>;
   /** Test hook; defaults to 32 random bytes as base64url. */
   tokenFactory?: () => string;
 }
 
 const CLIENT_FIELDS: ReadonlySet<string> = new Set([
   'label',
+  'agent',
   'defaultWorkspace',
   'allowedServers',
   'allowedTags',
@@ -135,6 +150,14 @@ function readNullableWorkspace(value: unknown, field: string): string | null {
   const text = expectString(value, field, { max: 4096 });
   if (!isAbsolute(text)) throw invalidField(field, 'must be an absolute path');
   return text;
+}
+
+function readAgent(value: unknown, field: string): AgentKind | null {
+  if (value === null) return null;
+  if (typeof value === 'string' && (AGENT_KINDS as readonly string[]).includes(value)) {
+    return value as AgentKind;
+  }
+  throw invalidField(field, 'must be claude-code, kiro, or null');
 }
 
 function readNullableStringList(value: unknown, field: string): string[] | null {
@@ -166,6 +189,7 @@ function parseCreateInput(body: Record<string, unknown>): ClientBindingInput {
 
   return {
     label: expectString(body['label'], 'label', { max: 128 }),
+    agent: 'agent' in body ? readAgent(body['agent'], 'agent') : null,
     defaultWorkspace:
       'defaultWorkspace' in body ? readNullableWorkspace(body['defaultWorkspace'], 'defaultWorkspace') : null,
     allowedServers:
@@ -180,6 +204,7 @@ function parsePatch(body: Record<string, unknown>): ClientBindingPatch {
   const patch: ClientBindingPatch = {};
 
   if ('label' in body) patch.label = expectString(body['label'], 'label', { max: 128 });
+  if ('agent' in body) patch.agent = readAgent(body['agent'], 'agent');
   if ('defaultWorkspace' in body) {
     patch.defaultWorkspace = readNullableWorkspace(body['defaultWorkspace'], 'defaultWorkspace');
   }
@@ -226,6 +251,7 @@ function publicBinding(binding: ClientBinding): ClientBinding {
   return {
     id: binding.id,
     label: binding.label,
+    agent: binding.agent,
     defaultWorkspace: binding.defaultWorkspace,
     allowedServers:
       binding.allowedServers === null ? null : [...binding.allowedServers],
@@ -286,9 +312,10 @@ async function notifyBindingChanged(
  */
 export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler {
   async function listClients(): Promise<AdminResponse> {
-    const [bindings, sessions] = await Promise.all([
+    const [bindings, sessions, oauthAuthorizations] = await Promise.all([
       deps.bindings.list(),
       deps.sessions === undefined ? Promise.resolve<McpSessionRecord[]>([]) : deps.sessions.list(),
+      deps.oauthAuthorizations === undefined ? Promise.resolve([]) : deps.oauthAuthorizations(),
     ]);
 
     const counts = new Map<string, number>();
@@ -306,6 +333,7 @@ export function createAdminClientsHandler(deps: AdminClientsDeps): AdminHandler 
       // The unpruned list stays available for troubleshooting; `activeSessions` uses the window.
       sessions: sessions.map(publicSession),
       activeWindowMs: ACTIVE_SESSION_WINDOW_MS,
+      oauthAuthorizations,
     });
   }
 
