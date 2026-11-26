@@ -1,5 +1,7 @@
 /** `tools/call` routing: argument validation, run_script dispatch and the three sync tools. @module */
 
+import { renderEnvelope } from '@zhangliang0115/repl-server-core/src/envelope.ts';
+
 import type { Catalog, ExecutionGateway, RequestIdentity, ScriptRequest } from '../ports.ts';
 import { JsonRpcError, JSON_RPC_INVALID_PARAMS } from '../mcp/errors.ts';
 import type { ReportService } from '../reports/service.ts';
@@ -8,7 +10,9 @@ import { describeTools, type DescribeToolsInput } from './describe.ts';
 import { reportProblemCall } from './report.ts';
 import {
   getToolDefinition,
+  jsonResult,
   toCallToolResult,
+  toolFailure,
   validateToolArguments,
   type CallToolResult,
   type ToolDefinition,
@@ -114,26 +118,6 @@ function splitLegacyScriptId(input: unknown): LegacyScriptIdSplit {
   return { value, scriptId };
 }
 
-function escapeXml(text: string): string {
-  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-}
-
-function escapeXmlAttribute(text: string): string {
-  return escapeXml(text).replaceAll('"', '&quot;');
-}
-
-function jsonResult(value: unknown, isError: boolean): CallToolResult {
-  return {
-    resultType: 'complete',
-    content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }],
-    isError,
-  };
-}
-
-function toolFailure(code: string, message: string): CallToolResult {
-  return jsonResult({ ok: false, error: { code, message } }, true);
-}
-
 /**
  * Pre-execution failures have no evalId yet; `eval="0"` keeps the attribute set frozen by
  * docs/protocol.md §7 while making it obvious that no script ran.
@@ -141,12 +125,7 @@ function toolFailure(code: string, message: string): CallToolResult {
 function runScriptFailure(code: string, message: string): CallToolResult {
   return {
     resultType: 'complete',
-    content: [
-      {
-        type: 'text',
-        text: `<repl-output eval="0"><error>${escapeXml(`${code}: ${message}`)}</error></repl-output>`,
-      },
-    ],
+    content: [{ type: 'text', text: renderEnvelope({ evalId: 0, error: `${code}: ${message}` }) }],
     isError: true,
   };
 }
@@ -154,12 +133,7 @@ function runScriptFailure(code: string, message: string): CallToolResult {
 function asyncAcknowledgement(evalId: number, evalTaskId: string, runId: string): CallToolResult {
   return {
     resultType: 'complete',
-    content: [
-      {
-        type: 'text',
-        text: `<repl-output eval="${evalId}" run="${escapeXmlAttribute(runId)}" async="true" task="${escapeXmlAttribute(evalTaskId)}"></repl-output>`,
-      },
-    ],
+    content: [{ type: 'text', text: renderEnvelope({ evalId, runId, async: true, evalTaskId }) }],
     isError: false,
   };
 }

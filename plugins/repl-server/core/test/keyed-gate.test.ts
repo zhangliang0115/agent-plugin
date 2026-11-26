@@ -38,7 +38,8 @@ test('the same key serializes and different keys do not', async () => {
   await Promise.all([a, b, c]);
   // The slot passes on only after the holder finished, so `b` starts last.
   assert.deepEqual(order, ['a:start', 'c:start', 'a:end', 'b:start']);
-  assert.deepEqual(gate.stats(), { lanes: 2, running: 0, queued: 0 });
+  // All lanes are idle after the run, so the map holds none.
+  assert.deepEqual(gate.stats(), { lanes: 0, running: 0, queued: 0 });
 });
 
 test('a queued call can be cancelled before it starts', async () => {

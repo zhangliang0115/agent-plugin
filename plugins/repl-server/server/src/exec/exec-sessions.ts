@@ -5,10 +5,9 @@
  * `mcpSessionId` records the transport that created the session; it is
  * correlation/diagnostic data only and never identifies a bound session.
  *
- * Each session owns exactly one worker and one serve handle. The registry
- * never spawns or terminates anything itself: the executor installs the handles
- * and receives an `onRemove` callback when a record leaves the registry, so
- * worker/serve teardown stays in the executor.
+ * The registry never spawns or terminates anything itself: the executor owns
+ * the worker and serve handles and receives an `onRemove` callback when a
+ * record leaves the registry, so teardown stays in the executor.
  * @module
  */
 
@@ -30,7 +29,7 @@ export type SessionRemovalReason =
   | 'shutdown'
   | 'crash';
 
-/** One execution session. `worker` and `serve` are opaque handles owned by the executor. */
+/** One execution session. */
 export interface ExecSession<W = unknown, S = unknown> {
   /** `es_...`, unique per process. */
   id: string;
@@ -49,10 +48,6 @@ export interface ExecSession<W = unknown, S = unknown> {
   lastRequestAt: number;
   /** Number of evals currently in flight. */
   inFlightEvals: number;
-  /** 0 before the first worker is attached; +1 on every attach, i.e. every rebuild. */
-  workerEpoch: number;
-  worker: W | null;
-  serve: S | null;
 }
 
 /** Identifies an execution session. `workspace` must already be a realpath. */
@@ -254,9 +249,6 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
       lastEvalAt: now,
       lastRequestAt: now,
       inFlightEvals: 0,
-      workerEpoch: 0,
-      worker: null,
-      serve: null,
     };
 
     this.sessions.set(id, session);
@@ -351,37 +343,6 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
     return this.removeMany([...this.sessions.values()], reason);
   }
 
-  /**
-   * Attaches the initial worker or a rebuilt one. Every call bumps
-   * `workerEpoch`, so messages from a previous generation can be dropped.
-   * Returns the new epoch.
-   */
-  attachWorker(session: ExecSession<W, S>, worker: W): number {
-    const live = this.requireLive(session);
-    live.workerEpoch += 1;
-    live.worker = worker;
-    return live.workerEpoch;
-  }
-
-  /** Clears the worker handle without touching the epoch. */
-  detachWorker(session: ExecSession<W, S>): W | null {
-    const live = this.requireLive(session);
-    const worker = live.worker;
-    live.worker = null;
-    return worker;
-  }
-
-  attachServe(session: ExecSession<W, S>, serve: S): void {
-    this.requireLive(session).serve = serve;
-  }
-
-  detachServe(session: ExecSession<W, S>): S | null {
-    const live = this.requireLive(session);
-    const serve = live.serve;
-    live.serve = null;
-    return serve;
-  }
-
   private collect(ids: Set<string> | undefined): ExecSession<W, S>[] {
     if (ids === undefined) return [];
     const result: ExecSession<W, S>[] = [];
@@ -440,11 +401,5 @@ export class ExecSessionRegistry<W = unknown, S = unknown> {
       if (this.remove(session.id, reason) !== undefined) removed += 1;
     }
     return removed;
-  }
-
-  private requireLive(session: ExecSession<W, S>): ExecSession<W, S> {
-    const live = this.sessions.get(session.id);
-    if (live === undefined) throw new Error(`exec session ${session.id} is not registered`);
-    return live;
   }
 }

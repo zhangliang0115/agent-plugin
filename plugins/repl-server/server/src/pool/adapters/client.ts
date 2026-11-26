@@ -46,9 +46,9 @@ const MAX_TOOL_LIST_PAGES = 100;
  * knows {@link PoolTransport}; the client narrows to this richer shape because
  * it is the owner of the JSON-RPC payloads.
  *
- * A transport emits parsed objects when it already has them (HTTP JSON) and raw
- * text for streamed frames (stdio lines, SSE `data:`), so invalid JSON is
- * detected in one place: {@link McpClient.handleMessage}.
+ * A transport emits parsed objects when it already has them (HTTP JSON and SSE
+ * frames) and raw text for line-framed stdio, so invalid JSON is detected in
+ * one place: {@link McpClient.handleMessage}.
  */
 export interface RpcTransport extends PoolTransport {
   send(

@@ -66,16 +66,6 @@ function parseJsonFrame(text: string): unknown {
   }
 }
 
-function matchesResponseId(data: string, requestId: unknown): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return false;
-  }
-  return isRecord(parsed) && Object.hasOwn(parsed, 'id') && parsed.id === requestId;
-}
-
 export class HttpTransport implements RpcTransport {
   readonly kind = 'http' as const;
   readonly url: string;
@@ -306,8 +296,26 @@ export class HttpTransport implements RpcTransport {
       const data = dataLines.join('\n');
       dataLines = [];
       if (data.trim() === '') return;
-      this.emitMessage(data);
-      if (requestId !== undefined && matchesResponseId(data, requestId)) stop = true;
+      // Parse once and hand the object to the client; a frame that is not JSON
+      // stays a string so the client reports the single framing error.
+      let frame: unknown = data;
+      let parsed = false;
+      try {
+        frame = JSON.parse(data);
+        parsed = true;
+      } catch {
+        // The client's `handleMessage` owns the error text for this case.
+      }
+      this.emitMessage(frame);
+      if (
+        parsed &&
+        requestId !== undefined &&
+        isRecord(frame) &&
+        Object.hasOwn(frame, 'id') &&
+        frame.id === requestId
+      ) {
+        stop = true;
+      }
     };
 
     const processLine = (rawLine: string): void => {

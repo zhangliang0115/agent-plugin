@@ -7,25 +7,18 @@ import {
   type ReportService,
 } from '../reports/service.ts';
 import type { Severity } from '../reports/types.ts';
-import { validateToolArguments, type CallToolResult } from './registry.ts';
+import {
+  jsonResult,
+  toolFailure,
+  validateToolArguments,
+  type CallToolResult,
+} from './registry.ts';
 
 interface ReportProblemArguments {
   title: string;
   detail: string;
   severity: Severity;
   context?: unknown;
-}
-
-function jsonResult(value: unknown, isError: boolean): CallToolResult {
-  return {
-    resultType: 'complete',
-    content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }],
-    isError,
-  };
-}
-
-function toolFailure(code: string, message: string): CallToolResult {
-  return jsonResult({ ok: false, error: { code, message } }, true);
 }
 
 export interface ReportProblemContext {

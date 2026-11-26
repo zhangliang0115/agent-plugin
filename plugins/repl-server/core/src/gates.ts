@@ -398,6 +398,7 @@ interface GateLane {
 }
 
 export interface KeyedGateStats {
+  /** Open lanes; idle lanes are dropped from the map after release. */
   lanes: number;
   running: number;
   queued: number;
@@ -461,7 +462,7 @@ export class KeyedGate {
     try {
       return await fn();
     } finally {
-      this.release(lane);
+      this.release(lane, key);
     }
   }
 
@@ -503,10 +504,13 @@ export class KeyedGate {
     });
   }
 
-  private release(lane: GateLane): void {
+  private release(lane: GateLane, key: string): void {
     const next = lane.waiters.shift();
     if (next === undefined) {
       lane.running = Math.max(0, lane.running - 1);
+      // An idle lane would otherwise live for the life of the process; the next
+      // `run` for this key rebuilds it from zero.
+      if (lane.running === 0 && this.lanes.get(key) === lane) this.lanes.delete(key);
       return;
     }
     // The slot passes straight to the next waiter; `running` does not change.

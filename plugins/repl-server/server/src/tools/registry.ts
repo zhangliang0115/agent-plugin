@@ -481,6 +481,19 @@ export interface CallToolResult {
   readonly isError: boolean;
 }
 
+/** A tool-layer result whose payload is JSON text. */
+export function jsonResult(value: unknown, isError: boolean): CallToolResult {
+  return {
+    resultType: 'complete',
+    content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }],
+    isError,
+  };
+}
+
+export function toolFailure(code: string, message: string): CallToolResult {
+  return jsonResult({ ok: false, error: { code, message } }, true);
+}
+
 /** Media never enters the XML envelope; it follows it as extra content blocks (protocol §3.4). */
 export function toCallToolResult(outcome: ScriptOutcome): CallToolResult {
   const content: ContentBlock[] = [{ type: 'text', text: outcome.content }];

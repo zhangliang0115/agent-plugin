@@ -291,15 +291,6 @@ export class TaskStore {
     return this.tasks.has(taskId);
   }
 
-  /** Ids of the owner's unconsumed, unexpired tasks at call time, in creation order. */
-  unconsumedIds(owner: string): string[] {
-    assertOwner(owner);
-    const now = this.clock.now();
-    return [...this.tasks.values()]
-      .filter((record) => record.owner === owner && !record.consumed && now < record.expiresAt)
-      .map((record) => record.taskId);
-  }
-
   /** Drops one record regardless of status. Returns false for an unknown id. */
   remove(taskId: string): boolean {
     const removed = this.tasks.delete(taskId);

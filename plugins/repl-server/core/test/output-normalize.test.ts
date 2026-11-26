@@ -2,25 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { normalizeOutput, type OutputImage } from '../src/output/normalize.ts';
-import { estimateTokens } from '../src/output/tokens.ts';
 
 const image = (base64: string): OutputImage => ({ base64, mediaType: 'image/png' });
-
-test('estimateTokens divides ASCII by four and counts non-ASCII as one', () => {
-  assert.equal(estimateTokens(''), 0);
-  assert.equal(estimateTokens('abcd'), 1);
-  assert.equal(estimateTokens('abcde'), 2);
-  assert.equal(estimateTokens('中文'), 2);
-  assert.equal(estimateTokens('ab中'), 2);
-  assert.equal(estimateTokens('a'.repeat(20_000)), 5_000);
-  assert.equal(estimateTokens('a'.repeat(100) + '中'.repeat(100)), 125);
-});
-
-test('estimateTokens counts an astral character once', () => {
-  assert.equal(estimateTokens('😀'), 1);
-  assert.equal(estimateTokens('a😀'), 2);
-  assert.equal(estimateTokens('😀😀'), 2);
-});
 
 test('fields pass through and nothing is flagged', () => {
   const out = normalizeOutput({

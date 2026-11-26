@@ -1,6 +1,6 @@
 /** Hand-written MCP tasks layer: dispatch decision, mcpTaskId mapping and get/cancel/update. @module */
 
-import { randomUUID } from 'node:crypto';
+import { newId } from '@zhangliang0115/repl-server-core/src/ids.ts';
 
 import {
   systemClock,
@@ -137,7 +137,7 @@ export class McpTaskStore {
 
   constructor(options: McpTaskStoreOptions = {}) {
     this.clock = options.clock ?? systemClock;
-    this.idFactory = options.idFactory ?? (() => `t_${randomUUID().replaceAll('-', '')}`);
+    this.idFactory = options.idFactory ?? (() => newId('task'));
     this.ttlMs = options.ttlMs ?? TASK_TTL_MS;
     this.pollIntervalMs = options.pollIntervalMs ?? TASK_POLL_INTERVAL_MS;
   }

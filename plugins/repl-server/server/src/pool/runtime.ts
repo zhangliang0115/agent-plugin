@@ -45,6 +45,7 @@ import {
   type PoolServerSpec,
   type PoolToolInfo,
   type PoolTransportFactory,
+  type ServerState,
 } from './pool.ts';
 
 /**
@@ -441,29 +442,21 @@ class PoolRuntimeImpl implements PoolRuntime {
     this.pool = new ConnectionPool({
       transportFactory: options.transportFactory,
       clientFactory: options.clientFactory,
-      ...(options.ledger !== undefined ? { ledger: options.ledger } : {}),
-      ...(options.audit !== undefined ? { audit: options.audit } : {}),
-      ...(options.onStderr !== undefined ? { onStderr: options.onStderr } : {}),
+      ledger: options.ledger,
+      audit: options.audit,
+      onStderr: options.onStderr,
       clock: this.clock,
-      ...(options.random !== undefined ? { random: options.random } : {}),
-      ...(options.connectTimeoutMs !== undefined
-        ? { connectTimeoutMs: options.connectTimeoutMs }
-        : {}),
-      ...(options.callTimeoutMs !== undefined ? { callTimeoutMs: options.callTimeoutMs } : {}),
-      ...(options.pingTimeoutMs !== undefined ? { pingTimeoutMs: options.pingTimeoutMs } : {}),
-      ...(options.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
-      ...(options.circuitThreshold !== undefined
-        ? { circuitThreshold: options.circuitThreshold }
-        : {}),
-      ...(options.circuitCooldownMs !== undefined
-        ? { circuitCooldownMs: options.circuitCooldownMs }
-        : {}),
-      ...(options.autoReconnect !== undefined ? { autoReconnect: options.autoReconnect } : {}),
-      ...(options.envWhitelist !== undefined ? { envWhitelist: options.envWhitelist } : {}),
-      ...(options.baseEnv !== undefined ? { baseEnv: options.baseEnv } : {}),
-      ...(options.stderrChunkChars !== undefined
-        ? { stderrChunkChars: options.stderrChunkChars }
-        : {}),
+      random: options.random,
+      connectTimeoutMs: options.connectTimeoutMs,
+      callTimeoutMs: options.callTimeoutMs,
+      pingTimeoutMs: options.pingTimeoutMs,
+      backoffMs: options.backoffMs,
+      circuitThreshold: options.circuitThreshold,
+      circuitCooldownMs: options.circuitCooldownMs,
+      autoReconnect: options.autoReconnect,
+      envWhitelist: options.envWhitelist,
+      baseEnv: options.baseEnv,
+      stderrChunkChars: options.stderrChunkChars,
     });
     this.gates =
       options.gates ??
@@ -641,49 +634,20 @@ class PoolRuntimeImpl implements PoolRuntime {
 
   snapshot(): PoolRuntimeSnapshot {
     const entries = this.pool.entries();
-    let ready = 0;
-    let reconnecting = 0;
-    let failed = 0;
-    let idle = 0;
-    let starting = 0;
-    let degraded = 0;
-    let disabled = 0;
-
-    for (const entry of entries) {
-      switch (entry.state) {
-        case 'ready':
-          ready += 1;
-          break;
-        case 'reconnecting':
-          reconnecting += 1;
-          break;
-        case 'failed':
-          failed += 1;
-          break;
-        case 'idle':
-          idle += 1;
-          break;
-        case 'starting':
-          starting += 1;
-          break;
-        case 'degraded':
-          degraded += 1;
-          break;
-        case 'disabled':
-          disabled += 1;
-          break;
-      }
-    }
+    const counts: Record<ServerState, number> = {
+      ready: 0,
+      reconnecting: 0,
+      failed: 0,
+      idle: 0,
+      starting: 0,
+      degraded: 0,
+      disabled: 0,
+    };
+    for (const entry of entries) counts[entry.state] += 1;
 
     return {
       total: entries.length,
-      ready,
-      reconnecting,
-      failed,
-      idle,
-      starting,
-      degraded,
-      disabled,
+      ...counts,
       entries,
       inFlight: this.gates.inFlight,
       admissionClosed: this.gates.admissionClosed,
@@ -770,30 +734,26 @@ class PoolRuntimeImpl implements PoolRuntime {
         if (this.pool.entry(id) !== null) await this.pool.disconnect(id);
         this.publishedTools.delete(id);
       },
-      restart: async (id) => {
-        this.specCache.delete(id);
-        // A restart must republish even when the tool names did not change:
-        // descriptions/schemas may have moved, and AI previews must see the
-        // fresh rows.
-        this.publishedTools.delete(id);
-        await this.ensureRegistered(id);
-        await this.pool.disconnect(id);
-        await this.pool.ensureConnected(id);
-        await this.publishTools(id);
-      },
-      refreshTools: async (id) => {
-        this.specCache.delete(id);
-        this.publishedTools.delete(id);
-        await this.ensureRegistered(id);
-        // `PoolClient.listTools` is only reachable through a connection, so a
-        // refresh is a controlled reconnect that re-runs initialize + tools/list.
-        await this.pool.disconnect(id);
-        await this.pool.ensureConnected(id);
-        await this.publishTools(id);
-      },
+      restart: (id) => this.reconnectAndPublish(id),
+      refreshTools: (id) => this.reconnectAndPublish(id),
       test: async (id, testOptions) => this.test(id, testOptions.timeoutMs),
       retire: async (id, retireOptions) => this.retire(id, retireOptions.force),
     };
+  }
+
+  /**
+   * Both restart and refreshTools republish even when the tool names did not
+   * change: descriptions/schemas may have moved, and AI previews must see the
+   * fresh rows. `PoolClient.listTools` is only reachable through a connection,
+   * so this is a controlled reconnect that re-runs initialize + tools/list.
+   */
+  private async reconnectAndPublish(id: string): Promise<void> {
+    this.specCache.delete(id);
+    this.publishedTools.delete(id);
+    await this.ensureRegistered(id);
+    await this.pool.disconnect(id);
+    await this.pool.ensureConnected(id);
+    await this.publishTools(id);
   }
 
   private async state(id: string): Promise<ServerRuntimeState | null> {

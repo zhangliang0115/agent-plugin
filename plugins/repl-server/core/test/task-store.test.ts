@@ -477,15 +477,12 @@ test('rejects an empty owner', () => {
 test('setEvalId patches the placeholder, and the maintenance helpers stay owner-scoped', () => {
   const { store } = newStore();
   const first = store.create(0, 'cb_a');
-  const second = store.create(0, 'cb_a');
-  const foreign = store.create(3, 'cb_b');
+  store.create(0, 'cb_a');
+  store.create(3, 'cb_b');
 
   assert.equal(store.setEvalId(first, 41), true);
   assert.equal(store.get('cb_a', first).evalId, 41);
   assert.equal(store.setEvalId('t_missing', 1), false);
-
-  assert.deepEqual(store.unconsumedIds('cb_a'), [first, second]);
-  assert.deepEqual(store.unconsumedIds('cb_b'), [foreign]);
 
   assert.equal(store.has(first), true);
   assert.equal(store.remove(first), true);

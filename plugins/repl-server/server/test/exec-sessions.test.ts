@@ -54,9 +54,6 @@ test('creates one execution session per (Mcp-Session-Id, workspace) for an unbou
   assert.equal(session.binding, null);
   assert.equal(session.clientLabel, '');
   assert.equal(session.inFlightEvals, 0);
-  assert.equal(session.workerEpoch, 0);
-  assert.equal(session.worker, null);
-  assert.equal(session.serve, null);
   assert.equal(session.createdAt, clock.now());
   assert.equal(session.lastEvalAt, clock.now());
   assert.equal(session.lastRequestAt, clock.now());
@@ -319,17 +316,16 @@ test('caps execution sessions per process at 8 when nothing can be evicted', () 
 
 test('evicts the LRU session past evictIdleMs and reports capacity_evict', () => {
   const clock = new ManualClock();
-  const removed: { id: string; reason: string; worker: string | null }[] = [];
+  const removed: { id: string; reason: string }[] = [];
   const registry = new ExecSessionRegistry<string, string>({
     clock,
     limits: { maxExecSessions: 2, evictIdleMs: 60_000 },
     onRemove: (session, reason) => {
-      removed.push({ id: session.id, reason, worker: session.worker });
+      removed.push({ id: session.id, reason });
     },
   });
 
   const a = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/a' });
-  registry.attachWorker(a, 'worker-a');
   clock.advance(10_000);
   const b = registry.acquire({ mcpSessionId: 'mcp_b', workspace: '/b' });
   clock.advance(50_001); // a idle 60_001ms, b idle 50_001ms
@@ -340,7 +336,7 @@ test('evicts the LRU session past evictIdleMs and reports capacity_evict', () =>
   assert.equal(registry.get(a.id), undefined);
   assert.equal(registry.get(b.id), b);
   assert.equal(registry.get(c.id), c);
-  assert.deepEqual(removed, [{ id: a.id, reason: 'capacity_evict', worker: 'worker-a' }]);
+  assert.deepEqual(removed, [{ id: a.id, reason: 'capacity_evict' }]);
 });
 
 test('never evicts a session with an in-flight eval', () => {
@@ -487,36 +483,6 @@ test('beginEval marks the session active and endEval releases the slot', () => {
   // Unknown (already removed) session references are ignored.
   registry.destroySession(session.id);
   assert.equal(registry.endEval(session), 0);
-});
-
-test('tracks worker and serve handles with a rebuild epoch', () => {
-  const clock = new ManualClock();
-  const registry = new ExecSessionRegistry<string, string>({
-    clock,
-    idFactory: () => 'es_fixed',
-  });
-  const session = registry.acquire({ mcpSessionId: 'mcp_a', workspace: '/a' });
-
-  assert.equal(session.workerEpoch, 0);
-  assert.equal(registry.attachWorker(session, 'worker-1'), 1);
-  assert.equal(session.worker, 'worker-1');
-
-  assert.equal(registry.attachWorker(session, 'worker-2'), 2);
-  assert.equal(registry.detachWorker(session), 'worker-2');
-  assert.equal(session.worker, null);
-  assert.equal(session.workerEpoch, 2);
-
-  assert.equal(registry.attachWorker(session, 'worker-3'), 3);
-  registry.attachServe(session, 'serve-1');
-  assert.equal(session.serve, 'serve-1');
-  assert.equal(registry.detachServe(session), 'serve-1');
-  assert.equal(session.serve, null);
-
-  registry.destroySession(session.id);
-  assert.throws(() => registry.attachWorker(session, 'worker-4'), /not registered/);
-  assert.throws(() => registry.detachWorker(session), /not registered/);
-  assert.throws(() => registry.attachServe(session, 'serve-2'), /not registered/);
-  assert.throws(() => registry.detachServe(session), /not registered/);
 });
 
 test('destroys sessions by id, transport, binding and shutdown', () => {

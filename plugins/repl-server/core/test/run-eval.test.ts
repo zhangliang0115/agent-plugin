@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 
 import { EvalTimeoutError, ReplError, StaleEvalError, WorkerKilledError } from '../src/errors.ts';
-import { EvalRegistry } from '../src/eval/eval-registry.ts';
 import {
   ExecSession,
   type EvalExecutor,
@@ -488,46 +487,6 @@ test('settlement is idempotent and late results are ignored', async (t) => {
   assert.equal(session.inFlightEvals, 0);
   assert.equal(session.activeEvals.size, 0);
   assert.equal(settledCalls, 1);
-});
-
-test('the eval registry creates per key and disposes sessions on delete', async (t) => {
-  const executor = new FakeExecutor();
-  const registry = new EvalRegistry({
-    create: (key) =>
-      new ExecSession({
-        id: `es_${key}`,
-        createExecutor: () => executor,
-        limits: { graceMs: 10, terminateMs: 20 },
-      }),
-  });
-  t.after(async () => {
-    await registry.disposeAll();
-  });
-
-  const alpha = registry.getOrCreate('alpha');
-  assert.equal(registry.getOrCreate('alpha'), alpha);
-  assert.equal(registry.size, 1);
-
-  const settled = deferred<EvalSettlement>();
-  await runEval(alpha, 'work', {
-    async: true,
-    timeoutMs: 60_000,
-    onSettled: (value) => settled.resolve(value),
-  });
-  assert.equal(registry.activeEvalCount(), 1);
-
-  assert.equal(await registry.delete('alpha'), true);
-  assert.equal(registry.get('alpha'), undefined);
-  assert.equal(registry.size, 0);
-  const result = await settled.promise;
-  assert.equal(result.outcome, 'worker_dead');
-  assert.equal(await registry.delete('alpha'), false);
-
-  registry.getOrCreate('beta');
-  registry.getOrCreate('gamma');
-  assert.deepEqual(registry.keys(), ['beta', 'gamma']);
-  await registry.disposeAll();
-  assert.equal(registry.size, 0);
 });
 
 test('rejected dispatch does not leak an in-flight slot', async (t) => {

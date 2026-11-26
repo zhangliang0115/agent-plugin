@@ -18,6 +18,7 @@
 import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
 import { systemClock, type AuditSink, type Clock, type ProcessLedger } from '../ports.ts';
+import { isPingUnsupported } from './health.ts';
 
 /** `idle` = configured and never connected; `disabled` = switched off by the admin. */
 export type ServerState =
@@ -701,7 +702,7 @@ export class ConnectionPool {
         () => unavailableError(entry, 'ping timed out'),
       );
     } catch (error) {
-      if (isPingUnsupportedError(error)) {
+      if (isPingUnsupported(error)) {
         throw new McpToolError(`MCP server ${serverId} does not support ping`, {
           code: 'MCP_PING_UNSUPPORTED',
           server: serverId,
@@ -1279,18 +1280,6 @@ function prepareError(
 function toUnavailableError(entry: PoolEntry, error: unknown): McpToolError {
   if (error instanceof McpToolError && error.code === 'MCP_SERVER_UNAVAILABLE') return error;
   return unavailableError(entry, errorMessage(error), error);
-}
-
-/** `ping` answering JSON-RPC -32601 (`method not found`) means "don't ping me". */
-function isPingUnsupportedError(error: unknown): boolean {
-  if (error === null || typeof error !== 'object') return false;
-  const code = (error as { code?: unknown }).code;
-  return (
-    code === -32601 ||
-    code === 'MCP_PING_UNSUPPORTED' ||
-    code === 'METHOD_NOT_FOUND' ||
-    code === 'MCP_METHOD_NOT_FOUND'
-  );
 }
 
 function errorMessage(error: unknown): string {

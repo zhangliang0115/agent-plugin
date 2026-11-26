@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
   ExecGateway,
   STUCK_EVAL_WARN_MS,
-  stuckEvalOf,
   stuckEvalsOf,
   type ExecGatewayOptions,
 } from '../src/exec/gateway.ts';
@@ -214,26 +213,6 @@ test('cancelEval force-stops a pure-JS stuck eval within the grace', async (t) =
     events: Array<{ status: string }>;
   };
   assert.equal(waited.events[0]?.status, 'failed', 'worker_dead settles as a failed task');
-});
-
-test('stuckEvalOf returns only the oldest eval past the threshold', () => {
-  const now = 10_000_000;
-  assert.equal(stuckEvalOf([]), null, 'no eval means no warning');
-  assert.equal(
-    stuckEvalOf([evalView(1, now - 29 * 60_000, now)]),
-    null,
-    'one minute below the 30-minute threshold stays quiet',
-  );
-  assert.equal(stuckEvalOf([evalView(1, now - 31 * 60_000, now)])?.evalId, 1);
-  assert.equal(
-    stuckEvalOf([
-      evalView(1, now - 1_000, now),
-      evalView(2, now - 40 * 60_000, now),
-      evalView(3, now - 10 * 60_000, now),
-    ])?.evalId,
-    2,
-    'the oldest eval decides, regardless of array order',
-  );
 });
 
 test('stuckEvalsOf returns every eval past the threshold', () => {

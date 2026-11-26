@@ -361,21 +361,6 @@ export const STUCK_EVAL_WARN_MS = 30 * 60_000;
 /** Grace for a cooperative eval cancel before its worker is forcibly stopped. */
 export const EVAL_CANCEL_GRACE_MS = 2_000;
 
-/**
- * The oldest eval in `items` once its age reaches `thresholdMs`, otherwise
- * `null`. Pure so the watchdog threshold is testable without timers.
- */
-export function stuckEvalOf(
-  items: readonly InFlightEvalView[],
-  thresholdMs: number = STUCK_EVAL_WARN_MS,
-): InFlightEvalView | null {
-  let oldest: InFlightEvalView | undefined;
-  for (const item of items) {
-    if (oldest === undefined || item.startedAt < oldest.startedAt) oldest = item;
-  }
-  return oldest !== undefined && oldest.ageMs >= thresholdMs ? oldest : null;
-}
-
 /** Every eval in `items` whose age reaches `thresholdMs`, in the given order. */
 export function stuckEvalsOf(
   items: readonly InFlightEvalView[],
@@ -986,6 +971,11 @@ export class ExecGateway implements ExecutionGateway {
     }
     used.add(name);
     const gate = this.gateOf(call);
+    // Third-party tools report their declared value: `PoolGates` enforces it on
+    // the pool side, and the gateway adds nothing. Official tools have no
+    // meaningful declaration — `claude mcp serve` exports no
+    // `isConcurrencySafe` — so the row reports what this gateway actually did.
+    const mode = call.server === undefined ? gate.policy : (gate.declared ?? gate.policy);
     // Where this call waited. The keyed gate is observed here by elapsed time;
     // the pool's gates report themselves through `observation`.
     let waitReason: ToolWaitReason | undefined;
@@ -1003,7 +993,7 @@ export class ExecGateway implements ExecutionGateway {
       seq: call.callSeq,
       tool: name,
       server: toolServer(call),
-      mode: this.modeOf(call, gate),
+      mode,
       // Honest three-segment timing (`02 §2.4`): arrival here, execution start
       // inside the gate, end in `finish`.
       queuedAt,
@@ -1117,20 +1107,8 @@ export class ExecGateway implements ExecutionGateway {
   }
 
   /**
-   * Mode written to the audit row.
-   *
-   * Third-party tools keep their declared value: `PoolGates` enforces it on the
-   * pool side, and the gateway adds nothing. Official tools have no meaningful
-   * declaration — `claude mcp serve` exports no `isConcurrencySafe` — so the row
-   * reports what this gateway actually did with the call.
-   */
-  private modeOf(call: ToolCallRequest, gate: { policy: ConcurrencyPolicy }): ConcurrencyPolicy {
-    if (call.server !== undefined) return this.toolModeOf(call) ?? gate.policy;
-    return gate.policy;
-  }
-
-  /**
-   * Picks the gate for one call.
+   * Picks the gate for one call and returns the catalog's declared concurrency
+   * alongside it, so the audit row does not query the catalog a second time.
    *
    * Official tools have no exported `isConcurrencySafe`, so the lane key is the
    * *resource* rather than the tool: two `Edit` calls to the same file
@@ -1138,23 +1116,27 @@ export class ExecGateway implements ExecutionGateway {
    * single lane. Third-party tools are already gated by `PoolGates`, so the
    * gateway adds nothing for them.
    */
-  private gateOf(call: ToolCallRequest): { policy: ConcurrencyPolicy; key: string } {
+  private gateOf(call: ToolCallRequest): {
+    policy: ConcurrencyPolicy;
+    key: string;
+    declared: CatalogTool['concurrency'] | undefined;
+  } {
     const declared = this.toolModeOf(call);
-    if (declared === 'exclusive') return { policy: 'exclusive', key: 'exclusive' };
-    if (call.server !== undefined) return { policy: 'parallel', key: '' };
+    if (declared === 'exclusive') return { policy: 'exclusive', key: 'exclusive', declared };
+    if (call.server !== undefined) return { policy: 'parallel', key: '', declared };
 
     const name = canonicalToolName(call);
     if (name === 'Bash') {
       return bashConcurrency(call.args) === 'parallel'
-        ? { policy: 'parallel', key: '' }
-        : { policy: 'serial', key: 'official:Bash' };
+        ? { policy: 'parallel', key: '', declared }
+        : { policy: 'serial', key: 'official:Bash', declared };
     }
     if (FILE_WRITERS.has(name)) {
       const target = call.args['file_path'] ?? call.args['notebook_path'] ?? call.args['path'];
       const key = typeof target === 'string' && target !== '' ? `official:file:${target}` : `official:${name}`;
-      return { policy: 'serial', key };
+      return { policy: 'serial', key, declared };
     }
-    return { policy: 'parallel', key: '' };
+    return { policy: 'parallel', key: '', declared };
   }
 
   private emitAudit(event: Record<string, unknown> & { event: string }): void {
