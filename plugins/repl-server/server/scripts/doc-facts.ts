@@ -65,7 +65,9 @@ const FACTS: readonly Fact[] = [
   {
     id: 'run_script.timeout.minimum',
     doc: 'protocol',
-    pattern: /"timeout": \{ "type": "integer", "minimum": (\d+) \}/,
+    // The schema snippet now carries a description, so the pattern tolerates it
+    // (and line breaks) while still pinning the minimum to the registry.
+    pattern: /"timeout": \{\s*"type": "integer",\s*"minimum": (\d+),\s*"description": "[^"]*"\s*\}/,
     expected: [runScriptTimeout.minimum ?? Number.NaN],
     note: 'run_script schema',
   },

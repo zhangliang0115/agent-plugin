@@ -484,7 +484,7 @@ export class ConnectionPool {
       const result = await withTimeout(
         Promise.race([task, death]),
         this.options.callTimeoutMs,
-        () => controller.abort(new Error('call timeout')),
+        () => controller.abort(callTimeoutError(entry, tool)),
         () => callTimeoutError(entry, tool),
       );
       this.markHealthy(entry);
@@ -698,7 +698,10 @@ export class ConnectionPool {
       await withTimeout(
         Promise.resolve(client.ping({ signal: controller.signal })),
         this.options.pingTimeoutMs,
-        () => controller.abort(new Error('ping timeout')),
+        () => controller.abort(new McpToolError('ping timeout', {
+          code: 'MCP_CALL_TIMEOUT',
+          server: serverId,
+        })),
         () => unavailableError(entry, 'ping timed out'),
       );
     } catch (error) {
@@ -853,14 +856,20 @@ export class ConnectionPool {
       await withTimeout(
         Promise.resolve(client.connect(transport, { signal: controller.signal })),
         this.options.connectTimeoutMs,
-        () => controller.abort(new Error('connect timeout')),
+        () => controller.abort(new McpToolError('connect timeout', {
+          code: 'MCP_CALL_TIMEOUT',
+          server: entry.spec.id,
+        })),
         () => unavailableError(entry, 'connect timed out'),
       );
       // Success means initialize *and* tools/list (design 03 §3.3).
       const tools = await withTimeout(
         Promise.resolve(client.listTools({ signal: controller.signal })),
         this.options.connectTimeoutMs,
-        () => controller.abort(new Error('tools/list timeout')),
+        () => controller.abort(new McpToolError('tools/list timeout', {
+          code: 'MCP_CALL_TIMEOUT',
+          server: entry.spec.id,
+        })),
         () => unavailableError(entry, 'tools/list timed out'),
       );
       if (this.isStale(entry, generation)) {

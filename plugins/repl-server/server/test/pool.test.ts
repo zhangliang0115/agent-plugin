@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
+import { isTransportTimeout, McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
 import { HealthMonitor, type HealthPool, type HealthTarget, type HealthTimerApi } from '../src/pool/health.ts';
 import {
@@ -544,6 +544,30 @@ test('a call timeout rejects with MCP_CALL_TIMEOUT and degrades the entry', asyn
   assert.equal(pool.entry('pg')?.consecutiveFailures, 0);
 });
 
+test("the pool's own call timeout aborts with an MCP_CALL_TIMEOUT reason", async (t) => {
+  const { pool, clients } = makePool({ servers: [spec()], callTimeoutMs: 20 });
+  t.after(() => pool.close());
+  await pool.ensureConnected('pg');
+
+  let reason: unknown;
+  clients.clients[0]!.callImpl = (_name, _args, options) =>
+    new Promise<unknown>(() => {
+      options.signal.addEventListener(
+        'abort',
+        () => {
+          reason = options.signal.reason;
+        },
+        { once: true },
+      );
+    });
+
+  await assert.rejects(
+    pool.callTool('pg', 'slow', {}),
+    (error: unknown) => error instanceof McpToolError && error.code === 'MCP_CALL_TIMEOUT',
+  );
+  assert.equal(isTransportTimeout(reason), true);
+});
+
 test('a per-call cancellation does not close the shared connection', async (t) => {
   const { pool, transports, clients } = makePool({ servers: [spec()] });
   t.after(() => pool.close());
@@ -572,6 +596,7 @@ test('a per-call cancellation does not close the shared connection', async (t) =
   );
 
   assert.equal(pool.entry('pg')?.state, 'ready');
+  assert.equal(pool.entry('pg')?.consecutiveFailures, 0);
   assert.equal(transports.transports[0]?.closed, false);
   assert.deepEqual(await pool.callTool('pg', 'echo', {}), { echo: true });
 });

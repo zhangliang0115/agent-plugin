@@ -174,7 +174,11 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "scriptVersion": { "type": "integer", "minimum": 1 },
     "args": { "type": "object" },
     "activateOnSuccess": { "type": "boolean" },
-    "timeout": { "type": "integer", "minimum": 1 },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds."
+    },
     "async": { "type": "boolean", "default": false },
     "workspace": { "type": "string" },
     "visibleTools": { "type": "array", "items": { "type": "string" } },

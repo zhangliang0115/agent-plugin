@@ -103,7 +103,12 @@ test('the frozen schemas match docs/protocol.md §4', () => {
       scriptVersion: { type: 'integer', minimum: 1 },
       args: { type: 'object' },
       activateOnSuccess: { type: 'boolean' },
-      timeout: { type: 'integer', minimum: 1 },
+      timeout: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds.',
+      },
       async: { type: 'boolean', default: false },
       workspace: { type: 'string' },
       visibleTools: { type: 'array', items: { type: 'string' } },
@@ -111,6 +116,9 @@ test('the frozen schemas match docs/protocol.md §4', () => {
     },
     additionalProperties: false,
   });
+  const runScriptTimeout = getToolDefinition('run_script')?.inputSchema.properties.timeout;
+  assert.ok(runScriptTimeout !== undefined);
+  assert.match(runScriptTimeout.description ?? '', /milliseconds/, 'timeout unit is visible to the model');
   assert.deepEqual(getToolDefinition('search_tools')?.inputSchema, {
     type: 'object',
     properties: {

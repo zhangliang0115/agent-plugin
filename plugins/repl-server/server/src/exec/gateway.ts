@@ -504,9 +504,7 @@ function outcomeOf(
       ...(runId === undefined ? {} : { runId }),
       log,
       result: normalized.result,
-      error: settlement.ok
-        ? undefined
-        : formatUserError(settlement.error ?? settlement.outcome, settlement.stack),
+      error: settlement.ok ? undefined : settlementErrorText(settlement, true),
       reset: settlement.contextReset,
       restored: settlement.stateRestored === 'lastGood' ? 'lastGood' : undefined,
       truncated,
@@ -559,6 +557,26 @@ function withoutMedia(value: unknown): unknown {
   return rest;
 }
 
+/**
+ * User-facing failure text. Timeouts name their caller-supplied budget so the
+ * model can fix the call instead of assuming the MCP server broke.
+ */
+function settlementErrorText(settlement: EvalSettlement, withStack = false): string {
+  if (settlement.outcome === 'timeout') {
+    const timeout = settlement.timeout;
+    if (timeout !== undefined && timeout.layer !== 'sync') {
+      return `eval exceeded the ${timeout.limitMs}ms timeout set by the caller (not an MCP server failure); omit timeout or raise it above 1000ms`;
+    }
+    if (timeout !== undefined) {
+      return `eval exceeded the ${timeout.limitMs}ms synchronous slice limit; split the work or use async: true`;
+    }
+    return 'eval timed out';
+  }
+  if (settlement.outcome === 'cancelled') return 'eval was cancelled by the caller';
+  const message = settlement.error ?? settlement.outcome;
+  return withStack ? formatUserError(message, settlement.stack) : message;
+}
+
 function taskErrorOf(settlement: EvalSettlement): StructuredToolError {
   const code =
     settlement.outcome === 'timeout'
@@ -570,7 +588,7 @@ function taskErrorOf(settlement: EvalSettlement): StructuredToolError {
     code,
     retryable: false,
     detail: {
-      message: settlement.error ?? settlement.outcome,
+      message: settlementErrorText(settlement),
       outcome: settlement.outcome,
       ...(settlement.layer === undefined ? {} : { layer: settlement.layer }),
     },
@@ -1210,7 +1228,7 @@ export class ExecGateway implements ExecutionGateway {
         argsPreview: argsPreviewOf(request.args) ?? null,
         code: settlement.ok && entryMode === 'code' ? request.code : null,
         ok: settlement.ok,
-        error: settlement.ok ? null : (settlement.error ?? settlement.outcome),
+        error: settlement.ok ? null : settlementErrorText(settlement),
         resultBytes: jsonBytes(settlement.result) ?? 0,
         durationMs: settlement.ms,
         toolsUsed,
@@ -1274,7 +1292,7 @@ export class ExecGateway implements ExecutionGateway {
       calls: settlement.budget?.calls ?? 0,
       resultBytes,
       ms: settlement.ms,
-      ...(settlement.error === undefined ? {} : { error: String(settlement.error) }),
+      ...(settlement.error === undefined ? {} : { error: settlementErrorText(settlement) }),
     });
   }
 

@@ -15,6 +15,15 @@
 | Sentry 400 不带上游响应体 | IGNORE | 400 文本 290–328 字符，只有状态行与 MDN 链接；根因在 sentry MCP server | 转 sentry 对应仓库处理，repl-server 不代修 | 不在本仓库责任边界内 | 已忽略 |
 | 是否内置高频库/函数 | INVESTIGATE | 225 份脚本/执行代码中通用库使用近零：`JSON.parse` 183 份（标准内置）、`Promise.all` 31、`Date` 14；`fetch` 可用且 2 次执行均成功；无 lodash/moment 类需求 | 暂不内置，继续观察重复出现的手写模式（分页、重试、并发池） | 缺高频证据，提前加库只增加维护面 | 待观察 |
 
+## 2026-11-26 · timeout 误用与降级误判
+
+| 问题 | 分类 | 证据 | 决策 | 理由 | 状态 |
+|---|---|---|---|---|---|
+| `run_script` 的 `timeout` 被传成 90–280ms，导致 eval 超时 | IMPROVE | 11-26 02:18–02:23 共 16 次 timeout，`timeoutMs` 全为 90–280（120ms 9 次），client 均为 kiro；schema 只有 `integer, minimum 1`，无单位描述 | 给 `timeout` 加英文描述：毫秒、省略不设截止、低于 1000ms 基本是误传；不改校验规则 | 模型读的是 schema，不是文档；已有 16 次实际误用 | 已修 |
+| 调用方取消被计入传输失败，MCP server 误降级 | FIX | live `elasticsearch-app-log` 为 `degraded`，lastError `MCP request tools/call was aborted`；`abortError` 固定返回 `MCP_CALL_TIMEOUT`，该码在传输失败集合里 | `abortError` 按 reason 设置 `transport` 标记：只有 `MCP_CALL_TIMEOUT` 算传输超时，eval 超时/取消不算；pool 自身超时的 reason 改带该码 | 取消不代表服务器故障，误降级干扰运维判断 | 已修 |
+| 超时错误只显示 `eval cancelled`，看不出是调用方预算 | IMPROVE | `<repl-output><error>eval cancelled</error>` 与 eval 14/29 一致 | 超时文案注明调用方预算、毫秒数与调整方式；取消注明由调用方取消；同步用于结果、`wait_tasks`、脚本运行历史与 `eval_end` | agent 能据此自行修改 timeout | 已修 |
+| `gateway-lifecycle` 的 `queueMs === 0` 断言时序脆弱 | IMPROVE | 多次全量偶发 `actual 1, expected 0`，单跑通过 | 断言改为类型 + 非负 | 排除验证噪音，不削弱字段覆盖 | 已修 |
+
 ## 2026-11-25 · 全树代码审查（15 条 important）
 
 | 问题 | 分类 | 证据 | 决策 | 理由 | 状态 |

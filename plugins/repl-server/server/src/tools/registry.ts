@@ -25,6 +25,8 @@ export interface JsonSchemaProperty {
   /** Object shape hint for the published schema; unknown keys are not rejected here. */
   readonly additionalProperties?: boolean;
   readonly default?: string | number | boolean;
+  /** Shown to the calling model in tools/list; affects nothing in validation. */
+  readonly description?: string;
 }
 
 export interface ToolInputSchema {
@@ -68,6 +70,7 @@ export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox ag
 - Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
 - Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
 - Pass async: true for long jobs, then collect the task with wait_tasks.
+- timeout is milliseconds, not seconds; omit it for no deadline. One MCP tool call usually takes tens to hundreds of milliseconds.
 - Instead of code, pass scriptName (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
 - Results carry a run="<id>" attribute; save_script turns a successful run into a reusable script.
 - visibleTools and excludeTags narrow this call only; they cannot widen access.
@@ -100,7 +103,12 @@ const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
     scriptVersion: { type: 'integer', minimum: 1 },
     args: { type: 'object' },
     activateOnSuccess: { type: 'boolean' },
-    timeout: { type: 'integer', minimum: 1 },
+    timeout: {
+      type: 'integer',
+      minimum: 1,
+      description:
+        'Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds.',
+    },
     async: { type: 'boolean', default: false },
     workspace: { type: 'string' },
     visibleTools: { type: 'array', items: { type: 'string' } },

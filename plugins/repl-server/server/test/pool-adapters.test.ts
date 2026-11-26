@@ -8,7 +8,12 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { isRecord } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
-import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
+import {
+  EvalTimeoutError,
+  isTransportTimeout,
+  McpToolError,
+  ReplError,
+} from '@zhangliang0115/repl-server-core/src/errors.ts';
 import { psRow } from '@zhangliang0115/repl-server-core/src/process/tree.ts';
 
 import { McpClient, mcpClientFactory, mcpTransportFactory } from '../src/pool/adapters/client.ts';
@@ -592,7 +597,19 @@ test('an oversized response body rejects the call with MCP_PROTOCOL_ERROR', asyn
   );
 });
 
-test('an aborting signal rejects the pending call with MCP_CALL_TIMEOUT', async (t) => {
+test('isTransportTimeout only treats MCP_CALL_TIMEOUT as a transport timeout', () => {
+  assert.equal(isTransportTimeout(undefined), false);
+  assert.equal(isTransportTimeout({ code: 'EVAL_TIMEOUT' }), false);
+  assert.equal(isTransportTimeout({ code: 'EVAL_CANCELLED' }), false);
+  assert.equal(isTransportTimeout({ code: 'TOOL_TIMEOUT' }), false);
+  assert.equal(isTransportTimeout({ name: 'AbortError' }), false);
+  assert.equal(
+    isTransportTimeout(new McpToolError('call timed out', { code: 'MCP_CALL_TIMEOUT' })),
+    true,
+  );
+});
+
+test('an aborting signal rejects the pending call with MCP_CALL_TIMEOUT and a transport flag from the reason', async (t) => {
   const stub = await startStubServer();
   const { transport, client } = makeStubClient(stub.url);
   t.after(async () => {
@@ -602,16 +619,66 @@ test('an aborting signal rejects the pending call with MCP_CALL_TIMEOUT', async 
   });
 
   await client.connect(transport, { signal: requestSignal() });
-  const started = Date.now();
+  const cases: Array<{ label: string; reason: unknown; transport: boolean }> = [
+    { label: 'EVAL_TIMEOUT', reason: new EvalTimeoutError('worker'), transport: false },
+    {
+      label: 'EVAL_CANCELLED',
+      reason: new ReplError('EVAL_CANCELLED', 'eval was cancelled'),
+      transport: false,
+    },
+    { label: 'AbortError', reason: new DOMException('aborted', 'AbortError'), transport: false },
+    {
+      label: 'MCP_CALL_TIMEOUT',
+      reason: new McpToolError('call timed out', { code: 'MCP_CALL_TIMEOUT' }),
+      transport: true,
+    },
+  ];
+  for (const { label, reason, transport: expected } of cases) {
+    const controller = new AbortController();
+    const started = Date.now();
+    const call = client.callTool('slow', {}, { signal: controller.signal });
+    setTimeout(() => controller.abort(reason), 20);
+    await assert.rejects(call, (error: unknown) => {
+      assert.ok(error instanceof McpToolError, label);
+      assert.equal(error.code, 'MCP_CALL_TIMEOUT', label);
+      assert.equal(error.transport, expected, label);
+      return true;
+    });
+    assert.ok(Date.now() - started < 2_000, 'the abort must settle the call promptly');
+  }
+});
+
+test('the HTTP transport marks aborted sends by their reason', async (t) => {
+  const stub = await startStubServer();
+  const transport = createHttpTransport({ url: stub.url, headers: {} });
+  t.after(async () => {
+    await transport.close();
+    await stub.close();
+  });
+
+  const cancelled = new AbortController();
+  cancelled.abort(new ReplError('EVAL_CANCELLED', 'eval was cancelled'));
   await assert.rejects(
-    client.callTool('slow', {}, { signal: requestSignal(100) }),
+    transport.send({ jsonrpc: '2.0', id: 1, method: 'ping' }, { signal: cancelled.signal }),
     (error: unknown) => {
       assert.ok(error instanceof McpToolError);
       assert.equal(error.code, 'MCP_CALL_TIMEOUT');
+      assert.equal(error.transport, false);
       return true;
     },
   );
-  assert.ok(Date.now() - started < 2_000, 'the abort must settle the call promptly');
+
+  const timedOut = new AbortController();
+  timedOut.abort(new McpToolError('call timed out', { code: 'MCP_CALL_TIMEOUT' }));
+  await assert.rejects(
+    transport.send({ jsonrpc: '2.0', id: 2, method: 'ping' }, { signal: timedOut.signal }),
+    (error: unknown) => {
+      assert.ok(error instanceof McpToolError);
+      assert.equal(error.code, 'MCP_CALL_TIMEOUT');
+      assert.equal(error.transport, true);
+      return true;
+    },
+  );
 });
 
 // -- pool integration ------------------------------------------------------
@@ -662,4 +729,48 @@ test('adapter factories plug into ConnectionPool without changing its interfaces
   await pool.disconnect('fake');
   assert.equal(pool.entry('fake')?.state, 'idle');
   if (typeof pid === 'number') await waitFor(() => !processAlive(pid));
+});
+
+test('caller cancellation keeps a pooled server ready; the pool timeout degrades it', async (t) => {
+  const stub = await startStubServer();
+  const spec: PoolServerSpec = { id: 'stub', cfgVersion: 1, transport: 'http', url: stub.url };
+  const pool = new ConnectionPool({
+    transportFactory: mcpTransportFactory,
+    clientFactory: mcpClientFactory,
+    servers: [spec],
+    autoReconnect: false,
+    callTimeoutMs: 200,
+  });
+  t.after(async () => {
+    await pool.close();
+    await stub.close();
+  });
+  await pool.ensureConnected('stub');
+
+  const reasons: Array<{ label: string; reason: unknown }> = [
+    { label: 'EVAL_TIMEOUT', reason: new EvalTimeoutError('worker') },
+    { label: 'EVAL_CANCELLED', reason: new ReplError('EVAL_CANCELLED', 'eval was cancelled') },
+    { label: 'AbortError', reason: new DOMException('aborted', 'AbortError') },
+  ];
+  for (const { label, reason } of reasons) {
+    const controller = new AbortController();
+    const call = pool.callTool('stub', 'slow', {}, { signal: controller.signal });
+    await tick(20);
+    controller.abort(reason);
+    await assert.rejects(call, (error: unknown) => {
+      assert.ok(error instanceof McpToolError, label);
+      assert.equal(error.code, 'MCP_CALL_TIMEOUT', label);
+      assert.equal(error.transport, false, label);
+      return true;
+    });
+    assert.equal(pool.entry('stub')?.state, 'ready', label);
+    assert.equal(pool.entry('stub')?.consecutiveFailures, 0, label);
+  }
+
+  await assert.rejects(
+    pool.callTool('stub', 'slow', {}),
+    (error: unknown) => error instanceof McpToolError && error.code === 'MCP_CALL_TIMEOUT',
+  );
+  assert.equal(pool.entry('stub')?.state, 'degraded');
+  assert.equal(pool.entry('stub')?.consecutiveFailures, 1);
 });

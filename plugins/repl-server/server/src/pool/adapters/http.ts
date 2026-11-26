@@ -16,7 +16,7 @@
  */
 
 import { isRecord } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
-import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
+import { isTransportTimeout, McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
 import type { HttpTransportOptions } from '../pool.ts';
 import type { RpcTransport } from './client.ts';
@@ -412,6 +412,7 @@ export class HttpTransport implements RpcTransport {
     return new McpToolError('MCP HTTP request was aborted', {
       code: 'MCP_CALL_TIMEOUT',
       retryable: true,
+      transport: isTransportTimeout(reason),
       ...(reason === undefined ? {} : { detail: describeError(reason) }),
     });
   }

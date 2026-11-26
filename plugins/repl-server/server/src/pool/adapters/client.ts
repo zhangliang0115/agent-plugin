@@ -17,7 +17,7 @@ import { VERSION } from '@zhangliang0115/repl-server-core';
 import { mcpToolErrorFromResult } from '@zhangliang0115/repl-server-core/src/bridge/mcp-error.ts';
 import { isRecord } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
 import type { ServeToolResult } from '@zhangliang0115/repl-server-core/src/bridge/normalize-result.ts';
-import { McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
+import { isTransportTimeout, McpToolError } from '@zhangliang0115/repl-server-core/src/errors.ts';
 
 import type {
   PoolClient,
@@ -436,6 +436,7 @@ export class McpClient implements PoolClient {
       server: this.spec.id,
       ...(tool === undefined ? {} : { tool }),
       retryable: true,
+      transport: isTransportTimeout(reason),
       ...(reason === undefined ? {} : { detail: describeError(reason) }),
     });
   }

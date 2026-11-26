@@ -157,7 +157,9 @@ test('eval and tool audits carry the request id and a shared runId', async (t) =
 
   assert.equal(toolResult?.['server'], '__official__');
   assert.equal(toolResult?.['seq'], 1);
-  assert.equal(toolResult?.['queueMs'], 0);
+  // An uncontended call can still cross a millisecond boundary under load.
+  assert.equal(typeof toolResult?.['queueMs'], 'number');
+  assert.ok((toolResult?.['queueMs'] as number) >= 0);
   assert.equal(typeof toolResult?.['ms'], 'number');
   assert.equal(typeof toolResult?.['startedAt'], 'number');
   assert.equal(typeof toolResult?.['endedAt'], 'number');

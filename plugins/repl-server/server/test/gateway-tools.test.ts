@@ -152,7 +152,10 @@ test('the eval deadline aborts the in-flight tool signal', async (t) => {
   );
 
   assert.equal(outcome.isError, true);
-  assert.match(outcome.content, /<error>(eval cancelled|eval stopped at layer soft|Read timed out)/);
+  assert.match(
+    outcome.content,
+    /<error>eval exceeded the 1000ms timeout set by the caller \(not an MCP server failure\)/,
+  );
   assert.equal(signals.length, 1);
   assert.equal(signals[0]?.aborted, true);
 });
