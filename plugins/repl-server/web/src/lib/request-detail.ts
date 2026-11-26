@@ -96,7 +96,46 @@ export function matchesDetailKeys(value: unknown, keys: RequestDetailKeys): bool
   return typeof plainTask === 'string' && keys.taskIds.includes(plainTask);
 }
 
-/** Pads a request/response timestamp pair so the event query covers both boundaries. */export function eventWindow(
+/**
+ * Identity fields of one protocol frame pair. `(mcp, id)` is the server's pairing
+ * key, but ids repeat across sessions, so the request timestamp disambiguates.
+ */
+export interface FramePairIdentity {
+  mcp: string;
+  id: string | number | null;
+  request?: { ts?: string } | null;
+  response?: { ts?: string } | null;
+}
+
+/**
+ * Stable row key for one request row: live reloads rebuild every pair object, and
+ * appended frames shift indexes, so neither object identity nor the index works.
+ */
+export function requestRowKey(pair: FramePairIdentity): string {
+  const id = `${typeof pair.id}\u0000${String(pair.id ?? '')}`;
+  return `${pair.mcp}\u0000${id}\u0000${pair.request?.ts ?? pair.response?.ts ?? ''}`;
+}
+
+/** True when two list snapshots describe the same request, not another with a reused id. */
+export function sameRequest(
+  left: FramePairIdentity | null,
+  right: FramePairIdentity | null,
+): boolean {
+  return left !== null && right !== null && requestRowKey(left) === requestRowKey(right);
+}
+
+/**
+ * Identity of one audit row: `loadRequestDetailEvents` dedupes on it, so it is
+ * also the only key the events table can use without duplicates.
+ */
+export function eventDedupeKey(event: Record<string, unknown>): string {
+  return [event['event'], event['ts'], event['exec'], event['evalId'], event['seq'], event['mcp'], event['id']]
+    .map((part) => (part === undefined ? '' : String(part)))
+    .join('|');
+}
+
+/** Pads a request/response timestamp pair so the event query covers both boundaries. */
+export function eventWindow(
   requestTs: unknown,
   responseTs: unknown,
   openEnded = false,

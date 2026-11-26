@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  eventDedupeKey,
   eventWindow,
   isAsyncResponse,
   isProtocolFrame,
   matchesDetailKeys,
   requestDetailKeys,
+  requestRowKey,
   requestRunIds,
+  sameRequest,
   toolCallOutcome,
 } from '../src/lib/request-detail.ts';
 
@@ -122,4 +125,51 @@ test('matchesDetailKeys follows the open panel by runId or task id', () => {
   assert.equal(matchesDetailKeys({ event: 'task_settle', evalTaskId: 'task_a' }, keys), true);
   assert.equal(matchesDetailKeys({ event: 'tool_result', runId: 'r-1' }, { runIds: [], taskIds: [] }), false);
   assert.equal(matchesDetailKeys(null, keys), false);
+});
+
+test('requestRowKey survives a reload and separates reused ids by request time', () => {
+  const at = '2026-11-20T10:00:00.000Z';
+  const pair = { mcp: 'default', id: 7, request: { ts: at }, response: null };
+  const reloaded = {
+    ...pair,
+    response: { ts: '2026-11-20T10:00:00.300Z' },
+  };
+  assert.equal(requestRowKey(pair), requestRowKey(reloaded), 'same frame, later response');
+  assert.notEqual(
+    requestRowKey(pair),
+    requestRowKey({ ...pair, request: { ts: '2026-11-20T10:05:00.000Z' } }),
+    'reused JSON-RPC id in a later session',
+  );
+  assert.notEqual(requestRowKey(pair), requestRowKey({ ...pair, mcp: 'other' }));
+  assert.notEqual(
+    requestRowKey(pair),
+    requestRowKey({ ...pair, id: '7' }),
+    'string and number ids are typed differently',
+  );
+  assert.equal(
+    requestRowKey({ mcp: 'default', id: null, request: { ts: at }, response: null }),
+    requestRowKey({ mcp: 'default', id: null, request: { ts: at }, response: null }),
+    'notifications have no id but still a timestamp',
+  );
+});
+
+test('sameRequest separates a refresh from opening another request', () => {
+  const at = '2026-11-20T10:00:00.000Z';
+  const pair = { mcp: 'default', id: 7, request: { ts: at }, response: null };
+  assert.equal(sameRequest(pair, { ...pair, response: { ts: at } }), true);
+  assert.equal(sameRequest(pair, { ...pair, request: { ts: '2026-11-20T10:05:00.000Z' } }), false);
+  assert.equal(sameRequest(pair, { ...pair, id: 8 }), false);
+  assert.equal(sameRequest(null, pair), false);
+  assert.equal(sameRequest(pair, null), false);
+});
+
+test('eventDedupeKey is stable for copies and distinct per audit row', () => {
+  const event = { event: 'tool_call', ts: '2026-11-20T10:00:00.000Z', exec: 'e1', evalId: 1, seq: 1 };
+  assert.equal(eventDedupeKey({ ...event }), eventDedupeKey(event));
+  assert.notEqual(eventDedupeKey({ ...event, seq: 2 }), eventDedupeKey(event));
+  assert.notEqual(
+    eventDedupeKey({ ...event, ts: '2026-11-20T10:00:00.001Z' }),
+    eventDedupeKey(event),
+  );
+  assert.notEqual(eventDedupeKey({ ...event, mcp: 'fs' }), eventDedupeKey(event));
 });

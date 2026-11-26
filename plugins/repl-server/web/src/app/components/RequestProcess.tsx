@@ -45,7 +45,8 @@ export function RequestProcess({
   );
   // One card at a time: the waterfall stays readable while a step is open.
   const [openKey, setOpenKey] = useState<string | null>(null);
-  if (loading) return <Spin size="small" />;
+  // Spin only before the first payload arrives; a refresh keeps the previous process mounted.
+  if (loading && events === null) return <Spin size="small" />;
   if (error !== null) return <Alert type="error" showIcon message="过程读取失败" description={error} />;
   if (process === null) return <Empty description="本次请求没有可展示的过程数据。" />;
 

@@ -35,6 +35,8 @@ import { formatBytes, formatDuration, formatId, formatNumber, formatTimestamp } 
 import {
   isProtocolFrame,
   matchesDetailKeys,
+  requestRowKey,
+  sameRequest,
   toolCallOutcome,
   type RequestDetailKeys,
 } from '../../lib/request-detail.ts';
@@ -141,11 +143,22 @@ export function RequestsPage(): React.ReactElement {
   const filtersRef = useRef(filters);
   const reloadTimerRef = useRef<number | null>(null);
   const eventTicketRef = useRef(0);
-  /** Identifiers of the work behind the open detail panel, for live refresh. */
-  const detailRef = useRef<{ pair: ProtocolFramePair | null; keys: RequestDetailKeys; timer: number | null }>({
+  /** Only the newest frames response may land; filter changes and live ticks overlap. */
+  const loadTokenRef = useRef(0);
+  /**
+   * Identifiers of the work behind the open detail panel, for live refresh.
+   * `loaded` means the events on screen already belong to `pair`.
+   */
+  const detailRef = useRef<{
+    pair: ProtocolFramePair | null;
+    keys: RequestDetailKeys;
+    timer: number | null;
+    loaded: boolean;
+  }>({
     pair: null,
     keys: { runIds: [], taskIds: [] },
     timer: null,
+    loaded: false,
   });
 
   useEffect(() => {
@@ -199,6 +212,7 @@ export function RequestsPage(): React.ReactElement {
 
   const load = useCallback(
     async (next: RequestFilters, silent = false): Promise<void> => {
+      const token = ++loadTokenRef.current;
       if (!silent) setLoading(true);
       setError(null);
       try {
@@ -214,13 +228,15 @@ export function RequestsPage(): React.ReactElement {
         const response = await api.get<FramesResponse<ProtocolFramePair>>('/logs/frames', {
           query,
         });
+        if (token !== loadTokenRef.current) return;
         rememberOptionsFromFrames(response.frames);
         // The endpoint returns oldest-first; the table shows the newest request first.
         setFrames({ ...response, frames: [...response.frames].reverse() });
       } catch (failure) {
+        if (token !== loadTokenRef.current) return;
         setError(failureText(failure));
       } finally {
-        if (!silent) setLoading(false);
+        if (token === loadTokenRef.current) setLoading(false);
       }
     },
     [api],
@@ -339,21 +355,34 @@ export function RequestsPage(): React.ReactElement {
     rememberOptions(delta);
   }
 
+  /**
+   * Loads one request into the drawer. Re-opening the request already on screen
+   * keeps its events until the new ones arrive, so the process tab is not
+   * unmounted (scroll position, card heights) on every live update.
+   */
   async function openRequest(pair: ProtocolFramePair): Promise<void> {
+    const detail = detailRef.current;
+    const keepPrevious = sameRequest(detail.pair, pair) && detail.loaded;
+    if (!keepPrevious) {
+      setEvents(null);
+      setEventsError(null);
+      setEventsLoading(true);
+    }
     setSelected(pair);
-    setEvents(null);
-    setEventsError(null);
-    setEventsLoading(true);
     const ticket = ++eventTicketRef.current;
-    detailRef.current.pair = pair;
+    detail.pair = pair;
+    detail.loaded = keepPrevious;
     try {
-      const detail = await loadRequestDetailEvents(api, pair);
+      const loaded = await loadRequestDetailEvents(api, pair);
       if (ticket !== eventTicketRef.current) return;
-      detailRef.current.keys = detail.keys;
-      setEvents(detail.events);
+      detail.keys = loaded.keys;
+      detail.loaded = true;
+      setEvents(loaded.events);
+      setEventsError(null);
     } catch (failure) {
       if (ticket !== eventTicketRef.current) return;
-      setEventsError(failureText(failure));
+      // A failed background refresh keeps the last good events; the next frame retries.
+      if (!keepPrevious) setEventsError(failureText(failure));
     } finally {
       if (ticket === eventTicketRef.current) setEventsLoading(false);
     }
@@ -577,14 +606,14 @@ export function RequestsPage(): React.ReactElement {
       <Card size="small" title="请求" extra={<Text type="secondary">{summary}</Text>}>
         <Table<ProtocolFramePair>
           size="small"
-          rowKey={(pair, index) => `${pair.mcp}-${String(pair.id ?? '')}-${index ?? 0}`}
+          rowKey={requestRowKey}
           dataSource={visibleFrames}
           columns={columns}
           loading={loading}
           pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
           scroll={{ x: 'max-content' }}
           onRow={(pair) => ({
-            className: selected === pair ? 'row-clickable row-selected' : 'row-clickable',
+            className: sameRequest(selected, pair) ? 'row-clickable row-selected' : 'row-clickable',
             onClick: () => void openRequest(pair),
           })}
           locale={{
@@ -605,6 +634,7 @@ export function RequestsPage(): React.ReactElement {
           // Stop following the eval: a closed panel must not keep refetching.
           detailRef.current.pair = null;
           detailRef.current.keys = { runIds: [], taskIds: [] };
+          detailRef.current.loaded = false;
           setSelected(null);
           setEvents(null);
         }}

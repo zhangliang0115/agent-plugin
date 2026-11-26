@@ -17,7 +17,12 @@ import type { ApiClient } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
 import { formatDuration, formatTimestamp } from '../../lib/format.ts';
 import { payloadView, type PayloadView } from '../../lib/payload-view.ts';
-import { eventWindow, requestDetailKeys, type RequestDetailKeys } from '../../lib/request-detail.ts';
+import {
+  eventDedupeKey,
+  eventWindow,
+  requestDetailKeys,
+  type RequestDetailKeys,
+} from '../../lib/request-detail.ts';
 import {
   mergeScriptInfo,
   scriptInfoFromEvents,
@@ -53,13 +58,6 @@ export interface DetailAuditEvent {
   elapsedMs?: number;
   error?: string;
   [key: string]: unknown;
-}
-
-/** Identity of one audit row, used to merge the runId and taskId lookups. */
-function eventDedupeKey(event: DetailAuditEvent): string {
-  return [event.event, event.ts, event.exec, event.evalId, event['seq'], event['mcp'], event['id']]
-    .map((part) => (part === undefined ? '' : String(part)))
-    .join('|');
 }
 
 function timeOf(event: DetailAuditEvent): number {
@@ -228,7 +226,7 @@ export function RequestDetailDrawer({
                     )}
                     <Table<DetailAuditEvent>
                       size="small"
-                      rowKey={(event, index) => `${event.ts ?? ''}-${event.event ?? ''}-${index ?? 0}`}
+                      rowKey={eventDedupeKey}
                       loading={loading}
                       dataSource={events ?? []}
                       pagination={false}
