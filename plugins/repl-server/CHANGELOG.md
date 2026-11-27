@@ -1,5 +1,9 @@
 # 变更记录
 
+## 0.3.4（2026-11-27）
+### 变更
+- `resources/list` 固定返回空数组：技能清单统一由 `skills/list` 发布，同一批 URI 不再在两处重复出现。文件内容仍按扩展规范用 `resources/read` 读取，URI 取自 `skills/list` 的 `resources` 字段。
+
 ## 0.3.3（2026-11-27）
 ### 修复
 - 新增 `resources/templates/list`，返回空的 `resourceTemplates`。此前该方法落到 `-32601`，server 声明了 resources 能力却不响应模板列表，Kiro 等客户端会记一条错误。

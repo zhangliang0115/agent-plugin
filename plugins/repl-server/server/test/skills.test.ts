@@ -138,34 +138,20 @@ test('resources/templates/list answers an empty list instead of Method not found
   });
 });
 
-test('resources/list exposes SKILL.md metadata and basenames for other files', async () => {
+test('resources/list stays empty because skills/list owns the manifest', async () => {
   const listed = (await call('skills/list')) as SkillsListResult;
   const result = (await call('resources/list')) as ResourcesListResult;
   const skill: Skill | undefined = listed.skills[0];
   if (skill === undefined) assert.fail('expected one skill');
 
-  assert.equal(result.resultType, 'complete');
-  assert.equal(result.ttlMs, SKILL_TTL_MS);
-  assert.equal(result.cacheScope, SKILL_CACHE_SCOPE);
-  assert.equal(result.resources.length, skill.resources.length);
-
-  const first = result.resources[0];
-  assert.deepEqual(first, {
-    uri: SKILL_URI,
-    name: skill.frontmatter['name'],
-    description: skill.frontmatter['description'],
-    mimeType: 'text/markdown',
+  assert.deepEqual(result, {
+    resultType: 'complete',
+    resources: [],
+    ttlMs: SKILL_TTL_MS,
+    cacheScope: SKILL_CACHE_SCOPE,
   });
-
-  const files = scanFiles();
-  for (const [index, file] of files.entries()) {
-    if (file === 'SKILL.md') continue;
-    const resource: Resource | undefined = result.resources[index];
-    if (resource === undefined) assert.fail(`missing resource for ${file}`);
-    assert.equal(resource.uri, `skill://${SKILL_NAME}/${file}`);
-    assert.equal(resource.name, basename(file));
-    assert.equal(resource.description, undefined);
-  }
+  // The manifest a client needs lives on the skill, not in resources/list.
+  assert.equal(skill.resources.length, scanFiles().length);
 });
 
 test('resources/read returns SKILL.md text byte-for-byte', async () => {

@@ -246,29 +246,13 @@ export function skillsGetHandler(params: Record<string, unknown>): SkillsGetResu
   return { resultType: 'complete', skill, ttlMs: SKILL_TTL_MS, cacheScope: SKILL_CACHE_SCOPE };
 }
 
-/** `resources/list`: SKILL.md carries the skill frontmatter; other files use their basename. */
+/**
+ * `resources/list`: empty on purpose. Every file here belongs to a skill, and
+ * `skills/list` already publishes that manifest; listing the same URIs again
+ * would only make clients see each file twice.
+ */
 export function resourcesListHandler(): ResourcesListResult {
-  const { skill, files } = catalog();
-  if (skill === null) {
-    return { resultType: 'complete', resources: [], ttlMs: SKILL_TTL_MS, cacheScope: SKILL_CACHE_SCOPE };
-  }
-  const resources = files.map(
-    (file): Resource =>
-      file.relativePath === 'SKILL.md'
-        ? {
-            uri: file.uri,
-            name: skill.frontmatter['name'] ?? SKILL_NAME,
-            description: skill.frontmatter['description'] ?? '',
-            mimeType: file.mimeType,
-          }
-        : { uri: file.uri, name: basename(file.relativePath), mimeType: file.mimeType },
-  );
-  return {
-    resultType: 'complete',
-    resources,
-    ttlMs: SKILL_TTL_MS,
-    cacheScope: SKILL_CACHE_SCOPE,
-  };
+  return { resultType: 'complete', resources: [], ttlMs: SKILL_TTL_MS, cacheScope: SKILL_CACHE_SCOPE };
 }
 
 /** `resources/templates/list`: no URI templates are served, so the list is always empty. */

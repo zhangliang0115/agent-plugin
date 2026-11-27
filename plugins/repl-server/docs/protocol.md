@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.3" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.4" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -214,7 +214,9 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自己的使用说明，只服务内置的 `skills/zl-repl-server/SKILL.md`：不聚合上游 server 的技能，不做目录配置，`resources/directory/read` 不实现，扩展对象为空 `{}`。该扩展只属于 modern `server/discover`；legacy `initialize` 不声明。
 
-构建把整个 `skills/` 目录复制到 `dist/skills/`；运行时从模块所在目录向上逐级查找 `<dir>/skills/zl-repl-server/SKILL.md`，找到即用。找不到时 catalog 为空：`skills/list`、`resources/list` 返回空数组，`skills/get` 与 `resources/read` 一律 `-32602`，server 照常启动。
+构建把整个 `skills/` 目录复制到 `dist/skills/`；运行时从模块所在目录向上逐级查找 `<dir>/skills/zl-repl-server/SKILL.md`，找到即用。找不到时 catalog 为空：`skills/list` 返回空数组，`skills/get` 与 `resources/read` 一律 `-32602`，server 照常启动。
+
+技能清单只由 `skills/list` 发布，`resources/list` 固定返回空数组：这里的每个文件都属于某个技能，再列一遍只会让客户端把同一批 URI 看到两次。文件内容仍按扩展规范用 `resources/read` 读，URI 取自 `skills/list` 的 `resources` 字段。
 
 这些方法的结果都带 `resultType: "complete"`、`ttlMs: 300000`、`cacheScope: "public"`：
 
@@ -222,14 +224,13 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 |---|---|---|
 | `skills/list` | 任意（忽略 `cursor`） | `{ "resultType", "skills": Skill[], "ttlMs", "cacheScope" }` |
 | `skills/get` | `{ "uri": string }` | `{ "resultType", "skill": Skill, "ttlMs", "cacheScope" }` |
-| `resources/list` | 任意 | `{ "resultType", "resources": Resource[], "ttlMs", "cacheScope" }` |
+| `resources/list` | 任意 | `{ "resultType", "resources": [], "ttlMs", "cacheScope" }`（清单在 `skills/list`，这里不重复） |
 | `resources/templates/list` | 任意 | `{ "resultType", "resourceTemplates": [], "ttlMs", "cacheScope" }`（不支持 URI 模板，返回空数组而不是 `-32601`） |
 | `resources/read` | `{ "uri": string }` | `{ "resultType", "contents": [{ "uri", "mimeType", "text"?, "blob"? }], "ttlMs", "cacheScope" }` |
 
 - `Skill`：`{ "uri", "frontmatter", "resources": [{ "uri", "digest", "size" }] }`。本 server 的唯一技能 uri 是 `skill://zl-repl-server/SKILL.md`；支持文件用 `skill://zl-repl-server/<相对路径>`。
 - `frontmatter` 保留 SKILL.md 的全部字段（当前 `name`、`description`、`argument-hint`）。解析器只支持单行 `key: value` 标量（成对引号会被去掉）；出现缩进续行或多行/嵌套字段时报错，需要换 YAML 解析器。
 - `resources` 是完整文件清单：SKILL.md 加目录内全部支持文件，递归扫描、跳过隐藏文件、SKILL.md 排第一。`digest` 为 `sha256:<64 位小写 hex>`，`size` 为原始字节数。构建会复制整个目录，所以清单必须覆盖目录内所有文件。
-- `resources/list` 每项：SKILL.md 为 `{ "uri", "name": frontmatter.name, "description": frontmatter.description, "mimeType": "text/markdown" }`；其他文件为 `{ "uri", "name": basename, "mimeType" }`。
 - `resources/read`：UTF-8 文本返回 `text`，非 UTF-8 返回 `blob`（base64）。`mimeType` 按扩展名：`.md` → `text/markdown`、`.json` → `application/json`、`.py` → `text/x-python`、`.sh` → `text/x-sh`、`.ts` → `text/typescript`；其余 UTF-8 用 `text/plain`，非 UTF-8 用 `application/octet-stream`。
 - `uri` 缺失、空字符串或不是字符串：`skills/get` 与 `resources/read` 返回 `-32602`，消息为 `<method> requires a non-empty uri string`。
 - `uri` 合法但不是本 server 服务的技能/资源：`skills/get` 返回 `-32602`（`No skill is served at <uri>`），`resources/read` 返回 `-32602`（`No resource is served at <uri>`）。`resources/directory/read` 仍是未知方法 `-32601`。
