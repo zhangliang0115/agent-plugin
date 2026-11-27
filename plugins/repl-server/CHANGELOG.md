@@ -1,5 +1,9 @@
 # 变更记录
 
+## 0.3.1（2026-11-27）
+### 变更
+- 插件启动器修复：健康检查比对 `version`，与插件版本不一致时停掉占用端口的旧进程再起新的（只针对 LISTEN 进程，不再误伤连着管理端的浏览器）；下载改为优先 `curl`，走系统代理，node fetch 作兜底；启动等待从 8s 提到 20s。
+
 ## 0.3.0（2026-11-27）
 ### 新增
 - 本地 OAuth 2.1 授权服务器（`docs/protocol.md` §2.1）：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/register`（动态注册）、`/authorize`（授权页）、`/token`（授权码 + PKCE S256、refresh 轮换）；`/mcp` 的 401 带 `resource_metadata`，MCP 客户端可以自动发现并完成授权。授权页可从 `client_bindings` 选择归属，token 继承完整绑定配置；选择不绑定时为 `unbound`。
