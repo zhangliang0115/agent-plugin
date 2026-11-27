@@ -198,16 +198,18 @@ test('over-budget server lists are truncated from the tail and guidance survives
   assert.ok(description.includes('search_tools({ query, server?, category?, tags? })'));
 });
 
-test('instructions stay short and point at run_script for the server list', () => {
-  assert.ok([...INSTRUCTIONS].length <= 1_200, `instructions are ${[...INSTRUCTIONS].length} chars`);
+test('instructions stay a pointer, with the usage guide in the skill', () => {
+  assert.ok([...INSTRUCTIONS].length <= 400, `instructions are ${[...INSTRUCTIONS].length} chars`);
   const bytes = Buffer.byteLength(INSTRUCTIONS, 'utf8');
-  assert.ok(bytes <= 1_200, `instructions are ${bytes} bytes`);
-  assert.ok(INSTRUCTIONS.includes('Promise.all'), 'independent calls point at Promise.all');
-  assert.ok(INSTRUCTIONS.includes('Independent tool calls can overlap'));
-  assert.ok(INSTRUCTIONS.includes("Visible built-in tools and MCP servers are listed in run_script's description."));
-  assert.ok(INSTRUCTIONS.includes('Do not guess tool names. Unknown names fail.'));
-  assert.ok(INSTRUCTIONS.includes('MCP results are { text, images?, documents? } with raw text'));
+  assert.ok(bytes <= 400, `instructions are ${bytes} bytes`);
+  assert.ok(INSTRUCTIONS.includes('skills/list'));
+  // Everything below lives in the skill or the tool descriptions; repeating it
+  // here would ship the same text twice.
+  for (const moved of ['Promise.all', 'search_tools', 'JSON.parse', 'wait_tasks']) {
+    assert.ok(!INSTRUCTIONS.includes(moved), `${moved} should only live in the skill or tool descriptions`);
+  }
   assert.ok(RUN_SCRIPT_DESCRIPTION.includes('JSON.parse(result.text)'));
+  assert.ok(RUN_SCRIPT_DESCRIPTION.includes('Promise.all'));
   assert.ok(!INSTRUCTIONS.includes('30000'));
   assert.ok(!INSTRUCTIONS.includes('50000'));
   assert.ok(!INSTRUCTIONS.includes('7200000'));

@@ -85,9 +85,9 @@ test('server/discover returns the shape frozen in protocol.md §3.1', async () =
   assert.equal(SERVER_NAME, 'repl-server');
   assert.equal(SERVER_VERSION, VERSION);
   assert.ok(INSTRUCTIONS.includes('persistent sandbox'));
-  assert.ok(INSTRUCTIONS.includes('tools.mcp.<server>.<tool>'));
-  assert.ok(INSTRUCTIONS.includes('search_tools'));
-  assert.ok(INSTRUCTIONS.includes('Promise.all'));
+  // The usage guide lives in the skill, not in instructions; only the pointer stays.
+  assert.ok(INSTRUCTIONS.includes('skills/list'));
+  assert.ok(!INSTRUCTIONS.includes('Promise.all'));
 });
 
 test('legacy initialize echoes each accepted protocol version', async () => {

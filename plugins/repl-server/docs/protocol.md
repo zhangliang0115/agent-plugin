@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.4" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.5" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -423,7 +423,9 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 
 ## 5. `instructions`
 
-`instructions` 是静态短提示（≤1200 字符）：执行模型、工作流、错误约定，以及“不要猜工具名”；执行模型与 `run_script` 描述同样提示独立工具调用可用 `Promise.all` 并行。末尾只留指针“可见 MCP server 列表在 `run_script` 的 description 里”。具体 server 列表只在 `run_script.description`（≤2KB，见 §3.3），两者不重复。分类/标签过滤值见 `search_tools` 的 schema。
+`instructions` 只有两行（≤400 字符）：一句定位，加一句指针「用法见 MCP skill，先 `skills/list`，再读它列出的文件」。
+
+其余内容不在任何两处重复：脚本内调用、`Promise.all` 并行、结果与错误语义、异步任务都在技能正文（§3.5）；每个工具自身的约束在工具 description 里；本次可见的 MCP server 列表只在 `run_script` 的 description（≤2KB，见 §3.3）。不支持技能扩展的客户端只能拿到 `instructions` 与工具 schema，完整指南需要用户在本地单独安装技能。
 
 ## 6. 任务方法
 

@@ -1,6 +1,6 @@
 {
   "name": "@zhangliang0115/repl-server-core",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "description": "Host-independent runtime for repl-server: eval executor, tool bridge, process ledger.",

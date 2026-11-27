@@ -25,31 +25,13 @@ export const DISCOVER_CACHE_SCOPE = 'public';
 
 /**
  * Prompt sent through discover/initialize `instructions`.
- * Kept short because clients truncate instructions (Kiro at 2048 characters);
- * the per-request server list lives only in `run_script`'s description.
+ * Deliberately two lines: the usage guide is a skill (`skills/list`), and the
+ * per-tool rules live in the tool descriptions. Repeating either here would put
+ * the same text in context twice.
  */
 export const INSTRUCTIONS = [
   'repl-server executes JavaScript in a persistent sandbox with the tools available to this client.',
-  '',
-  'Execution:',
-  '- Top-level await works. Declarations persist across calls in the same workspace.',
-  '- Changing workspace starts a new session. reset="1" means the context was rebuilt; keep cross-rebuild data in state.',
-  '- Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).',
-  '- Independent tool calls can overlap: const [a, b] = await Promise.all([tools.mcp.<server>.<tool>(x), tools.mcp.<server>.<tool>(y)]).',
-  '',
-  'Workflow:',
-  '- Outside the script: search_tools finds canonical names, describe_tools returns schemas. Inside: only tools.* and tools.mcp.*.',
-  '- Long jobs: async:true; tasks-aware clients poll the task, others use wait_tasks.',
-  '- Do not guess tool names. Unknown names fail.',
-  '',
-  'Results:',
-  '- Official tool JSON is parsed automatically; MCP results are { text, images?, documents? } with raw text (JSON.parse it).',
-  '',
-  'Errors:',
-  '- Built-in tool failures return { error }; MCP tool failures throw. Check exitCode explicitly.',
-  '- Return a short result; use log() only for needed output.',
-  '',
-  "Visible built-in tools and MCP servers are listed in run_script's description.",
+  'The usage guide is published as an MCP skill: call skills/list, then read the files it lists.',
 ].join('\n');
 
 export interface ServerInfo {
