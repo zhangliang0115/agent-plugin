@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.2" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.3" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -135,7 +135,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 - `annotations`：`run_script`、`report_problem` 与 `save_script` 不设；`search_tools`、`describe_tools`、`search_scripts` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks`（仅无有效 tasks 声明的客户端可见）只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
 - 结果顶层带 `ttlMs: 0`、`cacheScope: "private"`：2026-07-28 的列表结果必须带缓存提示；工具可见性按 binding 与目录变化，不做客户端缓存
 
-**方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/read`、`skills/list`、`skills/get`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。`resources/*` 只发布本 server 的技能文件（见 §3.5），不支持 prompts/logging/subscriptions；`resources/directory/read` 不实现；未知方法 `-32601`；批量请求不支持。
+**方法表（v1）**：`server/discover`、`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`、`resources/list`、`resources/templates/list`、`resources/read`、`skills/list`、`skills/get`、`tasks/get`、`tasks/cancel`、`tasks/update`。除 legacy `initialize` 外，modern 结果都带 `resultType`；`ping` 返回 `{ "resultType": "complete" }`。`resources/*` 只发布本 server 的技能文件（见 §3.5），不支持 prompts/logging/subscriptions；`resources/directory/read` 不实现；未知方法 `-32601`；批量请求不支持。
 
 ### 3.4 `tools/call`
 
@@ -216,13 +216,14 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 
 构建把整个 `skills/` 目录复制到 `dist/skills/`；运行时从模块所在目录向上逐级查找 `<dir>/skills/zl-repl-server/SKILL.md`，找到即用。找不到时 catalog 为空：`skills/list`、`resources/list` 返回空数组，`skills/get` 与 `resources/read` 一律 `-32602`，server 照常启动。
 
-四个方法的结果都带 `resultType: "complete"`、`ttlMs: 300000`、`cacheScope: "public"`：
+这些方法的结果都带 `resultType: "complete"`、`ttlMs: 300000`、`cacheScope: "public"`：
 
 | 方法 | params | result |
 |---|---|---|
 | `skills/list` | 任意（忽略 `cursor`） | `{ "resultType", "skills": Skill[], "ttlMs", "cacheScope" }` |
 | `skills/get` | `{ "uri": string }` | `{ "resultType", "skill": Skill, "ttlMs", "cacheScope" }` |
 | `resources/list` | 任意 | `{ "resultType", "resources": Resource[], "ttlMs", "cacheScope" }` |
+| `resources/templates/list` | 任意 | `{ "resultType", "resourceTemplates": [], "ttlMs", "cacheScope" }`（不支持 URI 模板，返回空数组而不是 `-32601`） |
 | `resources/read` | `{ "uri": string }` | `{ "resultType", "contents": [{ "uri", "mimeType", "text"?, "blob"? }], "ttlMs", "cacheScope" }` |
 
 - `Skill`：`{ "uri", "frontmatter", "resources": [{ "uri", "digest", "size" }] }`。本 server 的唯一技能 uri 是 `skill://zl-repl-server/SKILL.md`；支持文件用 `skill://zl-repl-server/<相对路径>`。

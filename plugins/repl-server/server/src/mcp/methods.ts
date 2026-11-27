@@ -6,6 +6,7 @@ import { JsonRpcDispatcher, type JsonRpcHandler } from './jsonrpc.ts';
 import {
   resourcesListHandler,
   resourcesReadHandler,
+  resourcesTemplatesListHandler,
   skillsGetHandler,
   skillsListHandler,
 } from './skills.ts';
@@ -19,6 +20,7 @@ export const METHOD_TABLE = [
   'tools/list',
   'tools/call',
   'resources/list',
+  'resources/templates/list',
   'resources/read',
   'skills/list',
   'skills/get',
@@ -66,6 +68,7 @@ export function createMethodTable<Context = undefined>(
   dispatcher.register('tools/call', options.toolsCall ?? notWired('tools/call'));
   // Static skill content: wired directly, not through MethodTableOptions.
   dispatcher.register('resources/list', resourcesListHandler);
+  dispatcher.register('resources/templates/list', resourcesTemplatesListHandler);
   dispatcher.register('resources/read', resourcesReadHandler);
   dispatcher.register('skills/list', skillsListHandler);
   dispatcher.register('skills/get', skillsGetHandler);

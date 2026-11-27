@@ -202,6 +202,7 @@ test('the method table exposes exactly the frozen v1 methods in order', () => {
     'tools/list',
     'tools/call',
     'resources/list',
+    'resources/templates/list',
     'resources/read',
     'skills/list',
     'skills/get',

@@ -271,6 +271,16 @@ export function resourcesListHandler(): ResourcesListResult {
   };
 }
 
+/** `resources/templates/list`: no URI templates are served, so the list is always empty. */
+export function resourcesTemplatesListHandler(): {
+  resultType: 'complete';
+  resourceTemplates: [];
+  ttlMs: number;
+  cacheScope: string;
+} {
+  return { resultType: 'complete', resourceTemplates: [], ttlMs: SKILL_TTL_MS, cacheScope: SKILL_CACHE_SCOPE };
+}
+
 export function resourcesReadHandler(params: Record<string, unknown>): ResourcesReadResult {
   const uri = requireUri(params, 'resources/read');
   const file = catalog().files.find((candidate) => candidate.uri === uri);

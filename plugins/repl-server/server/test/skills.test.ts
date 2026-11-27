@@ -128,6 +128,16 @@ test('skills/get returns the listed skill and rejects unknown, missing or non-st
   }
 });
 
+test('resources/templates/list answers an empty list instead of Method not found', async () => {
+  const result = await call('resources/templates/list');
+  assert.deepEqual(result, {
+    resultType: 'complete',
+    resourceTemplates: [],
+    ttlMs: SKILL_TTL_MS,
+    cacheScope: SKILL_CACHE_SCOPE,
+  });
+});
+
 test('resources/list exposes SKILL.md metadata and basenames for other files', async () => {
   const listed = (await call('skills/list')) as SkillsListResult;
   const result = (await call('resources/list')) as ResourcesListResult;
