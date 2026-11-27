@@ -32,16 +32,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.tsx';
 import { PageHeader, StateTag } from '../components/common.tsx';
 import { CategorySelect, useCategoryDictionary } from '../components/CategorySelect.tsx';
+import { EnvHeaderEditor, useSecretNames } from '../components/EnvHeaderEditor.tsx';
 import { CategoryPillEditor, TagPillEditor } from '../components/PillEditors.tsx';
 import { TagPicker, tagLabel, useTagDictionary, type TagDefinition } from '../components/TagPicker.tsx';
 import {
   AI_INPUT_MAX_BYTES,
   argsForEditing,
   buildProposalApplyBody,
+  draftRows,
   nullIfEmpty,
   parseArgs,
   proposalInputError,
-  splitList,
   utf8ByteLength,
   type ProposalArg,
   type ProposalDraftValues,
@@ -49,6 +50,12 @@ import {
   type ProposalServerDraft,
 } from '../../lib/ai-proposal.ts';
 import { dictionaryLabel } from '../../lib/dictionary.ts';
+import {
+  rowsFromServer,
+  rowsProblem,
+  rowsToValues,
+  type EnvHeaderRow,
+} from '../../lib/env-header.ts';
 import { ApiError, isTimeoutError, timeoutSignal } from '../../lib/api.ts';
 import {
   formatDuration,
@@ -77,6 +84,8 @@ interface ServerView {
   headerKeys: string[];
   envSecrets: Record<string, string>;
   headerSecrets: Record<string, string>;
+  envLiterals: Record<string, string>;
+  headerLiterals: Record<string, string>;
   secretArgs: Array<{ index: number; secret: string }>;
   enabled: boolean;
   connectMode: ConnectMode;
@@ -113,8 +122,8 @@ interface ServerFormValues {
   args?: string;
   cwd?: string;
   url?: string;
-  envKeys?: string;
-  headerKeys?: string;
+  env?: EnvHeaderRow[];
+  headers?: EnvHeaderRow[];
   connectMode: ConnectMode;
   summary?: string;
   category?: string;
@@ -138,14 +147,13 @@ interface BusyState {
 type ServerAction = 'connect' | 'disconnect' | 'restart';
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export function ServersPage(): React.ReactElement {
   const api = useApi();
   const { message, modal } = AntApp.useApp();
   const dictionary = useTagDictionary();
   const categoryDictionary = useCategoryDictionary();
+  const secretNames = useSecretNames();
   const [servers, setServers] = useState<ServerView[]>([]);
   const [revision, setRevision] = useState(0);
   // Counts, not flags: two queued edits on the same field must not clear the
@@ -408,8 +416,8 @@ export function ServersPage(): React.ReactElement {
             args: '',
             cwd: '',
             url: '',
-            envKeys: '',
-            headerKeys: '',
+            env: [],
+            headers: [],
             connectMode: 'eager',
             summary: '',
             category: '',
@@ -426,8 +434,8 @@ export function ServersPage(): React.ReactElement {
             args: server.args.join('\n'),
             cwd: server.cwd ?? '',
             url: server.url ?? '',
-            envKeys: server.envKeys.join('\n'),
-            headerKeys: server.headerKeys.join('\n'),
+            env: rowsFromServer(server, 'env'),
+            headers: rowsFromServer(server, 'headers'),
             connectMode: server.connectMode,
             summary: server.summary ?? '',
             category: server.category ?? '',
@@ -492,8 +500,8 @@ export function ServersPage(): React.ReactElement {
           tags: values.tags ?? [],
           timeoutMs,
           maxConcurrency,
-          envKeys: splitList(values.envKeys),
-          headerKeys: splitList(values.headerKeys),
+          env: rowsToValues(values.env ?? []),
+          headers: rowsToValues(values.headers ?? []),
         };
         if (values.transport === 'stdio') {
           body['command'] = nullIfEmpty(values.command);
@@ -530,8 +538,8 @@ export function ServersPage(): React.ReactElement {
               tags: values.tags ?? [],
               timeoutMs,
               maxConcurrency,
-              envKeys: splitList(values.envKeys),
-              headerKeys: splitList(values.headerKeys),
+              env: rowsToValues(values.env ?? []),
+              headers: rowsToValues(values.headers ?? []),
               ...(values.transport === 'stdio'
                 ? {
                     command: nullIfEmpty(values.command),
@@ -590,8 +598,8 @@ export function ServersPage(): React.ReactElement {
       args: argsForEditing(draft.args),
       cwd: draft.cwd ?? '',
       url: draft.url ?? '',
-      envKeys: draft.envKeys.join('\n'),
-      headerKeys: draft.headerKeys.join('\n'),
+      env: draftRows(draft, 'env'),
+      headers: draftRows(draft, 'headers'),
       enabled: draft.enabled,
       connectMode: draft.connectMode,
       category: draft.category ?? '',
@@ -1036,7 +1044,7 @@ export function ServersPage(): React.ReactElement {
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={editing === null ? '新增 server' : `编辑 ${editing.id}`}
-        width={600}
+        width={820}
         extra={
           <Space>
             <Button onClick={() => setEditorOpen(false)}>取消</Button>
@@ -1145,46 +1153,35 @@ export function ServersPage(): React.ReactElement {
                 </Form.Item>
               )}
               <Form.Item
-                name="envKeys"
-                label="env 键名（每行一个）"
-                extra="只填写键名；值到“密钥”页写入，不会随配置保存。"
+                name="env"
+                label="env"
+                extra="普通值作为配置直接保存；密钥引用只保存名称，值到“密钥”页写入。"
                 rules={[
                   {
-                    validator: async (_rule, value?: string) => {
-                      for (const key of splitList(value)) {
-                        if (!ENV_KEY_PATTERN.test(key)) {
-                          throw new Error(`env 键名 ${key} 不合法：需以字母或下划线开头，只含字母、数字与下划线`);
-                        }
-                      }
+                    validator: async (_rule, value?: EnvHeaderRow[]) => {
+                      const problem = rowsProblem(value ?? [], 'env');
+                      if (problem !== null) throw new Error(problem);
                     },
                   },
                 ]}
               >
-                <Input.TextArea rows={2} placeholder={'DATABASE_URL\nAPI_TOKEN'} />
+                <EnvHeaderEditor kind="env" secretNames={secretNames} />
               </Form.Item>
               <Form.Item
-                name="headerKeys"
-                label="header 名（每行一个）"
-                extra="只填写 header 名；值到“密钥”页写入。"
+                name="headers"
+                label="headers"
+                extra="普通值作为配置直接保存；密钥引用只保存名称，值到“密钥”页写入。"
                 rules={[
                   {
-                    validator: async (_rule, value?: string) => {
-                      for (const key of splitList(value)) {
-                        if (!HEADER_KEY_PATTERN.test(key)) {
-                          throw new Error(`header 名 ${key} 不合法：只能包含字母、数字、点、下划线与短横线`);
-                        }
-                      }
+                    validator: async (_rule, value?: EnvHeaderRow[]) => {
+                      const problem = rowsProblem(value ?? [], 'headers');
+                      if (problem !== null) throw new Error(problem);
                     },
                   },
                 ]}
               >
-                <Input.TextArea rows={2} placeholder={'Authorization\nX-Api-Key'} />
+                <EnvHeaderEditor kind="headers" secretNames={secretNames} />
               </Form.Item>
-              {editing === null ? null : (
-                <Form.Item label="密钥引用（只读）">
-                  <SecretRefTags server={editing} />
-                </Form.Item>
-              )}
               <Form.Item name="connectMode" label="connectMode">
                 <Select
                   options={[
@@ -1437,42 +1434,38 @@ export function ServersPage(): React.ReactElement {
                     </Form.Item>
                   )}
                   <Form.Item
-                    name="envKeys"
-                    label="env 键名（每行一个）"
-                    extra="只填写键名；值到“密钥”页写入，不会随配置保存。"
+                    name="env"
+                    label="env"
+                    extra="普通值直接写入；密钥引用按同名密钥绑定，密钥名需与键名一致。"
                     rules={[
                       {
-                        validator: async (_rule, value?: string) => {
-                          for (const key of splitList(value)) {
-                            if (!ENV_KEY_PATTERN.test(key)) {
-                              throw new Error(
-                                `env 键名 ${key} 不合法：需以字母或下划线开头，只含字母、数字与下划线`,
-                              );
-                            }
-                          }
+                        validator: async (_rule, value?: EnvHeaderRow[]) => {
+                          const problem = rowsProblem(value ?? [], 'env', {
+                            secretNameMustMatchKey: true,
+                          });
+                          if (problem !== null) throw new Error(problem);
                         },
                       },
                     ]}
                   >
-                    <Input.TextArea rows={2} placeholder={'DATABASE_URL\nAPI_TOKEN'} />
+                    <EnvHeaderEditor kind="env" secretNames={secretNames} />
                   </Form.Item>
                   <Form.Item
-                    name="headerKeys"
-                    label="header 名（每行一个）"
-                    extra="只填写 header 名；值到“密钥”页写入。"
+                    name="headers"
+                    label="headers"
+                    extra="普通值直接写入；密钥引用按同名密钥绑定，密钥名需与键名一致。"
                     rules={[
                       {
-                        validator: async (_rule, value?: string) => {
-                          for (const key of splitList(value)) {
-                            if (!HEADER_KEY_PATTERN.test(key)) {
-                              throw new Error(`header 名 ${key} 不合法：只能包含字母、数字、点、下划线与短横线`);
-                            }
-                          }
+                        validator: async (_rule, value?: EnvHeaderRow[]) => {
+                          const problem = rowsProblem(value ?? [], 'headers', {
+                            secretNameMustMatchKey: true,
+                          });
+                          if (problem !== null) throw new Error(problem);
                         },
                       },
                     ]}
                   >
-                    <Input.TextArea rows={2} placeholder={'Authorization\nX-Api-Key'} />
+                    <EnvHeaderEditor kind="headers" secretNames={secretNames} />
                   </Form.Item>
                   <Form.Item name="connectMode" label="connectMode">
                     <Select

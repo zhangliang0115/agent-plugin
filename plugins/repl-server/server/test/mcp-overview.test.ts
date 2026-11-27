@@ -127,7 +127,7 @@ test('run_script description appends the visible servers and fixed guidance', ()
   const description = buildRunScriptDescription(RUN_SCRIPT_DESCRIPTION, servers);
 
   assert.ok(description.startsWith(RUN_SCRIPT_DESCRIPTION));
-  assert.ok(description.includes('Promise.all'), 'parallel guidance survives assembly');
+  assert.ok(description.includes('repl-server skill'), 'the skill pointer survives assembly');
   assert.ok(
     Buffer.byteLength(description, 'utf8') <= DESCRIPTION_MAX_BYTES,
     `description is ${Buffer.byteLength(description, 'utf8')} bytes`,
@@ -208,8 +208,7 @@ test('instructions stay a pointer, with the usage guide in the skill', () => {
   for (const moved of ['Promise.all', 'search_tools', 'JSON.parse', 'wait_tasks']) {
     assert.ok(!INSTRUCTIONS.includes(moved), `${moved} should only live in the skill or tool descriptions`);
   }
-  assert.ok(RUN_SCRIPT_DESCRIPTION.includes('JSON.parse(result.text)'));
-  assert.ok(RUN_SCRIPT_DESCRIPTION.includes('Promise.all'));
+  assert.ok(RUN_SCRIPT_DESCRIPTION.includes('repl-server skill'));
   assert.ok(!INSTRUCTIONS.includes('30000'));
   assert.ok(!INSTRUCTIONS.includes('50000'));
   assert.ok(!INSTRUCTIONS.includes('7200000'));

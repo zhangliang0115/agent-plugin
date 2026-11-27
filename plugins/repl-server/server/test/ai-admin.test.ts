@@ -35,6 +35,8 @@ const SERVER_VIEW: ServerView = {
   headerKeys: [],
   envSecrets: { GITHUB_TOKEN: 'GITHUB_TOKEN' },
   headerSecrets: {},
+  envLiterals: {},
+  headerLiterals: {},
   secretArgs: [],
   enabled: true,
   connectMode: 'lazy',

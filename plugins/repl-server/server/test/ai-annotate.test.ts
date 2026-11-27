@@ -189,7 +189,7 @@ test('preview returns proposed metadata without writing', async (t) => {
   assert.deepEqual(preview.proposed.tagSuggestions, []);
   assert.equal(preview.proposed.toolOverrides?.[0]?.name, 'query');
   assert.equal(preview.omittedTools, 0);
-  assert.equal(preview.meta.promptVersion, 9);
+  assert.equal(preview.meta.promptVersion, 10);
 
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'pg')?.summary, null);
@@ -279,7 +279,7 @@ test('annotate prompt hides literal args and keeps secret names', async (t) => {
   seedTool(fixture.db);
 
   const preview = await fixture.service.annotatePreview('pg');
-  assert.equal(preview.meta.promptVersion, 9);
+  assert.equal(preview.meta.promptVersion, 10);
   assert.equal(prompts.length, 1);
   const prompt = prompts[0] ?? '';
   assert.ok(!prompt.includes(skToken));

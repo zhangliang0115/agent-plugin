@@ -95,7 +95,7 @@ wait_tasks({ taskIds: ['t_...'], timeoutMs: 270000 })
 - `run_script` 有副作用：脚本会写文件、跑命令、调外部工具，不是只读操作。失败重试前先确认上一次没有已经产生写入，避免重复下单、重复提交。
 - 不要因为工具报错就整段重跑有写操作的脚本；把有副作用的步骤拆出来单独重试。
 - 密钥、令牌不写进 `code`、`log()`、返回值，也不放进 `report_problem`。保存脚本时的密钥扫描只告警，不会拦截，所以不能依赖它兜底。
-- `report_problem` 只报 repl-server 或其暴露工具的问题，`title` / `detail` / `severity`（low / medium / high / critical）都必填；同一 owner 每小时最多 20 条。
+- `report_problem` 只报 repl-server 或其暴露工具的问题，`title` / `detail` / `severity`（low / medium / high / critical）都必填，`detail` 写清现象、预期与实际、复现步骤；同一 owner 每小时最多 20 条。
 
 ## 标准流程
 

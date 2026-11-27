@@ -61,39 +61,42 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * Summary only; the full prompt lives in `server/discover` `instructions`.
- * The visible MCP server list is appended per request by
+ * Summary only; usage and orchestration live in the `zl-repl-server` skill.
+ * The visible MCP server list and call syntax are appended per request by
  * `buildRunScriptDescription`, so no server or built-in example is hardcoded here.
  */
-export const RUN_SCRIPT_DESCRIPTION = `Run JavaScript in a persistent sandbox against the tools available to this client. Batch independent calls with Promise.all; return only what the answer needs.
-
-- Tools are async: await tools.<name>(args); MCP tools: await tools.mcp.<server>.<tool>(args).
-- Top-level await works. Declarations persist across calls in the same workspace; changing workspace starts a new session.
-- Pass async: true for long jobs: with MCP tasks support the client polls the task; otherwise collect it with wait_tasks.
-- timeout is milliseconds, not seconds; omit it for no deadline. One MCP tool call usually takes tens to hundreds of milliseconds.
-- Instead of code, pass scriptName (plus scriptVersion/args for saved scripts) to rerun a script; use search_scripts to find one.
-- Results carry a run="<id>" attribute; save_script turns a successful run into a reusable script.
-- visibleTools and excludeTags narrow this call only; they cannot widen access.
-- Results: official tool JSON is parsed automatically; MCP tools return { text, images?, documents? } with raw text, so call JSON.parse(result.text) when the payload is JSON.
-- Use the MCP tools search_tools/describe_tools (outside the script) to find canonical names and input schemas. Do not guess tool names.`;
+export const RUN_SCRIPT_DESCRIPTION =
+  'Run JavaScript in a persistent sandbox against the tools available to this client. visibleTools and excludeTags can only narrow this call, never widen access. Usage and orchestration: see the repl-server skill.';
 
 const SEARCH_TOOLS_DESCRIPTION =
-  'Search this client\'s visible tools and return canonical names for run_script or describe_tools. An empty query without server returns the server overview plus the __official__ group of bare-name tools; an empty query with server (including __official__) returns that group\'s tools. A non-empty query matches tool names, effective tags and descriptions; server, category and tags only narrow, and tags is all-of. Filter values must come from this request\'s schema enums.';
+  'Find the tools available to this client and return their canonical names.';
 
 const DESCRIBE_TOOLS_DESCRIPTION =
-  'Return full input schemas for 1 to 10 canonical tool names. Unknown or invisible names are listed in unknown; known tools still return. More than 10 names fails validation. Get names from search_tools.';
+  'Return the input schemas for canonical tool names. Invisible names are returned in unknown.';
 
 const WAIT_TASKS_DESCRIPTION =
-  'Wait until the given tasks started by run_script with async: true finish, consume their results, and return events plus a pending count. taskIds is required: pass the taskId values returned by run_script; the call never collects other tasks of the session.';
+  'Collect the results of tasks started by run_script with async: true.';
 
 const REPORT_PROBLEM_DESCRIPTION =
-  'Record a problem report about repl-server or the tools it exposes. The server stores it and may notify the administrator. Describe the failure, expected vs actual behavior, and reproduction steps. Never include credentials or secret values.';
+  'Report a problem with repl-server. Never include credentials or secret values.';
 
 const SAVE_SCRIPT_DESCRIPTION =
-  'Save a successful run_script execution as a reusable script, or update an existing one. Pass runId plus mode=exact to store that run\'s code as an active zero-argument script. Pass mode=parameterized with rewritten code and an inputSchema to store a draft; test it with run_script({ scriptName, scriptVersion, args }) and activate on success. With scriptName, the existing script\'s name/description/tags update in place; code, inputSchema or mode changes need baseVersion and append a draft.';
+  'Save a run_script execution as a reusable script, or update an existing one.';
 
 const SEARCH_SCRIPTS_DESCRIPTION =
-  'Find saved scripts in the global library. Returns each script\'s scriptName, active version, inputSchema and exampleArgs; execute one with run_script({ scriptName, args }). Only active scripts are returned. Use save_script to create or update.';
+  'Find saved scripts in the library.';
+
+const SEARCH_QUERY_DESCRIPTION =
+  "Matches tool names, effective tags and descriptions. An empty query returns the server overview without server, or that group's tools with server.";
+
+const SEARCH_SERVER_DESCRIPTION =
+  "Narrows results only; values must come from this schema's enum when present.";
+
+const SEARCH_CATEGORY_DESCRIPTION =
+  "Narrows results only; values must come from this schema's enum when present.";
+
+const SEARCH_TAGS_DESCRIPTION =
+  "Narrows results only; every tag must match (all-of); values must come from this schema's enum when present.";
 
 const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
@@ -107,7 +110,7 @@ const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
       type: 'integer',
       minimum: 1,
       description:
-        'Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds.',
+        'Deadline in milliseconds, not seconds. Omit it for no deadline; values above the cap (600000 sync, 7200000 async) are clamped, not rejected.',
     },
     async: { type: 'boolean', default: false },
     workspace: { type: 'string' },
@@ -120,10 +123,14 @@ const RUN_SCRIPT_SCHEMA: ToolInputSchema = deepFreeze({
 const SEARCH_TOOLS_SCHEMA: ToolInputSchema = deepFreeze({
   type: 'object',
   properties: {
-    query: { type: 'string', maxLength: 200 },
-    server: { type: 'string' },
-    category: { type: 'string' },
-    tags: { type: 'array', items: { type: 'string' } },
+    query: { type: 'string', maxLength: 200, description: SEARCH_QUERY_DESCRIPTION },
+    server: { type: 'string', description: SEARCH_SERVER_DESCRIPTION },
+    category: { type: 'string', description: SEARCH_CATEGORY_DESCRIPTION },
+    tags: {
+      type: 'array',
+      items: { type: 'string' },
+      description: SEARCH_TAGS_DESCRIPTION,
+    },
     max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
   },
   additionalProperties: false,
@@ -261,18 +268,26 @@ export function buildSearchToolsDefinition(
   servers: readonly string[] = [],
 ): ToolDefinition {
   const server: JsonSchemaProperty =
-    servers.length === 0 ? { type: 'string' } : { type: 'string', enum: [...servers] };
+    servers.length === 0
+      ? { type: 'string', description: SEARCH_SERVER_DESCRIPTION }
+      : { type: 'string', enum: [...servers], description: SEARCH_SERVER_DESCRIPTION };
   const category: JsonSchemaProperty =
-    categories.length === 0 ? { type: 'string' } : { type: 'string', enum: [...categories] };
+    categories.length === 0
+      ? { type: 'string', description: SEARCH_CATEGORY_DESCRIPTION }
+      : { type: 'string', enum: [...categories], description: SEARCH_CATEGORY_DESCRIPTION };
   const tagItems: JsonSchemaProperty =
     tags.length === 0 ? { type: 'string' } : { type: 'string', enum: [...tags] };
   const inputSchema = deepFreeze<ToolInputSchema>({
     type: 'object',
     properties: {
-      query: { type: 'string', maxLength: 200 },
+      query: { type: 'string', maxLength: 200, description: SEARCH_QUERY_DESCRIPTION },
       server,
       category,
-      tags: { type: 'array', items: tagItems },
+      tags: {
+        type: 'array',
+        items: tagItems,
+        description: SEARCH_TAGS_DESCRIPTION,
+      },
       max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
     },
     additionalProperties: false,

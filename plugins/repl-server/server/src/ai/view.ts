@@ -15,10 +15,19 @@ function secretRefs(values: Record<string, SecretValue>): Record<string, string>
   return refs;
 }
 
+function literalValues(values: Record<string, SecretValue>): Record<string, string> {
+  const literals: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === 'string') literals[key] = value;
+  }
+  return literals;
+}
+
 /**
- * Mirrors `viewServer` for the AI routes: args keep `$secret` placeholders and
- * env/header values become key lists. Runtime state is not available here, so
- * the same fallback as the admin view is used.
+ * Mirrors `viewServer` for the AI routes: args keep `$secret` placeholders,
+ * secret env/header values become key lists, literals stay readable as plain
+ * config. Runtime state is not available here, so the same fallback as the
+ * admin view is used.
  */
 export function renderServerView(record: ServerRecord): ServerView {
   const fallback = record.enabled
@@ -38,6 +47,8 @@ export function renderServerView(record: ServerRecord): ServerView {
     headerKeys: Object.keys(record.headers).sort(),
     envSecrets: secretRefs(record.env),
     headerSecrets: secretRefs(record.headers),
+    envLiterals: literalValues(record.env),
+    headerLiterals: literalValues(record.headers),
     secretArgs: record.args.flatMap((arg, index) =>
       isSecretRef(arg) ? [{ index, secret: arg.$secret }] : [],
     ),

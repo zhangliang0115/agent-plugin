@@ -368,7 +368,7 @@ function dictionaryKeys(dictionaries: AnnotationDictionaries): AnnotationDiction
   };
 }
 
-/** Body shape accepted by `parseCreateServer` (env/header values stay as `$secret`). */
+/** Body shape accepted by `parseCreateServer`; literal env/header values pass through. */
 function serverToCreateBody(server: ProposalServer): Record<string, unknown> {
   return {
     id: server.id,
@@ -378,6 +378,8 @@ function serverToCreateBody(server: ProposalServer): Record<string, unknown> {
     args: server.args,
     cwd: server.cwd,
     url: server.url,
+    env: server.env,
+    headers: server.headers,
     envKeys: server.envKeys,
     headerKeys: server.headerKeys,
     enabled: server.enabled,

@@ -6,10 +6,12 @@ import {
   AI_INPUT_MAX_BYTES,
   argsForEditing,
   buildProposalApplyBody,
+  draftRows,
   parseArgs,
   proposalInputError,
   utf8ByteLength,
   type ProposalDraftValues,
+  type ProposalServerDraft,
 } from '../src/lib/ai-proposal.ts';
 import { formatNumber } from '../src/lib/format.ts';
 
@@ -21,8 +23,8 @@ const base: ProposalDraftValues = {
   args: '-y\n@modelcontextprotocol/server-github\n<secret:GITHUB_TOKEN>',
   cwd: '/Users/me/work',
   url: '',
-  envKeys: 'GITHUB_TOKEN\n',
-  headerKeys: '',
+  env: [{ key: 'GITHUB_TOKEN', source: 'secret', value: 'GITHUB_TOKEN' }],
+  headers: [],
   enabled: true,
   connectMode: 'lazy',
   category: 'devtools',
@@ -63,6 +65,8 @@ test('buildProposalApplyBody sends the full stdio draft with confirmStdio', () =
     args: ['-y', '@modelcontextprotocol/server-github', { $secret: 'GITHUB_TOKEN' }],
     cwd: '/Users/me/work',
     url: null,
+    env: {},
+    headers: {},
     envKeys: ['GITHUB_TOKEN'],
     headerKeys: [],
     enabled: true,
@@ -87,4 +91,52 @@ test('buildProposalApplyBody drops stdio fields for http and omits confirmStdio'
   assert.deepEqual(server['args'], []);
   assert.equal(server['cwd'], null);
   assert.equal(server['url'], 'https://example.com/mcp');
+});
+
+test('buildProposalApplyBody sends literal env/headers and secret rows as key lists', () => {
+  const body = buildProposalApplyBody('proposal-3', {
+    ...base,
+    env: [
+      { key: 'GHIDRA_INSTALL_DIR', source: 'literal', value: '/Users/me/tools/ghidra' },
+      { key: 'GITHUB_TOKEN', source: 'secret', value: 'GITHUB_TOKEN' },
+    ],
+    headers: [{ key: 'X-Env', source: 'literal', value: 'dev' }],
+  });
+  const server = body['server'] as Record<string, unknown>;
+  assert.deepEqual(server['env'], { GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra' });
+  assert.deepEqual(server['headers'], { 'X-Env': 'dev' });
+  assert.deepEqual(server['envKeys'], ['GITHUB_TOKEN']);
+  assert.deepEqual(server['headerKeys'], []);
+});
+
+test('draftRows splits key lists and literal env/headers', () => {
+  const draft: ProposalServerDraft = {
+    id: 'github',
+    label: 'GitHub',
+    transport: 'stdio',
+    command: 'npx',
+    args: [],
+    cwd: null,
+    url: null,
+    envKeys: ['GITHUB_TOKEN'],
+    headerKeys: [],
+    enabled: true,
+    connectMode: 'lazy',
+    tags: [],
+    category: null,
+    summary: null,
+  };
+  assert.deepEqual(
+    draftRows(
+      { ...draft, env: { GHIDRA_INSTALL_DIR: '/opt/ghidra' }, headers: { 'X-Env': 'dev' } },
+      'env',
+    ),
+    [
+      { key: 'GITHUB_TOKEN', source: 'secret', value: 'GITHUB_TOKEN' },
+      { key: 'GHIDRA_INSTALL_DIR', source: 'literal', value: '/opt/ghidra' },
+    ],
+  );
+  assert.deepEqual(draftRows({ ...draft, envKeys: [], headers: { 'X-Env': 'dev' } }, 'headers'), [
+    { key: 'X-Env', source: 'literal', value: 'dev' },
+  ]);
 });

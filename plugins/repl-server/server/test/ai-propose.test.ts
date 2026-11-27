@@ -172,7 +172,7 @@ test('GET /ai/config returns defaults and prompt versions', async (t) => {
   assert.equal(response.ai.claudeBin, null);
   assert.equal(response.ai.effectiveClaudeBin, 'claude');
   assert.equal(response.ai.claudeBinSource, 'default');
-  assert.deepEqual(response.prompts, { propose: 9, annotate: 9 });
+  assert.deepEqual(response.prompts, { propose: 10, annotate: 10 });
   assert.equal(response.revision, 0);
 });
 
@@ -270,7 +270,7 @@ test('propose previews a draft without writing servers or revision', async (t) =
   assert.match(response.proposalId ?? '', /^prop_[0-9a-f]+$/);
   assert.equal((response.server as { id: string }).id, 'github');
   assert.equal(response.idConflict, false);
-  assert.equal(response.meta.promptVersion, 9);
+  assert.equal(response.meta.promptVersion, 10);
   assert.ok(typeof response.meta.expiresAt === 'string');
   assert.equal(getRevision(fixture.db), before);
   assert.equal(getServer(fixture.db, 'github'), null);
@@ -562,7 +562,7 @@ test('apply revalidates a client-edited server', async (t) => {
     fixture.service.applyProposal({
       proposalId: proposal.proposalId,
       confirmStdio: true,
-      server: okServer({ env: { GITHUB_TOKEN: 'plain-value' } }),
+      server: okServer({ env: { GITHUB_TOKEN: { $secret: 'GITHUB_TOKEN' } } }),
     }),
     'AI_PROPOSAL_INVALID',
     422,
@@ -584,6 +584,31 @@ test('apply revalidates a client-edited server', async (t) => {
     confirmStdio: true,
   });
   assert.equal(applied.server.id, 'github');
+});
+
+test('apply stores literal env/header values and binds key lists to same-named secrets', async (t) => {
+  const fixture = await makeFixture(t);
+  const proposal = await fixture.service.propose({ input: 'x' });
+  const applied = await fixture.service.applyProposal({
+    proposalId: proposal.proposalId,
+    confirmStdio: true,
+    server: okServer({
+      env: { GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra' },
+      headers: { 'X-Env': 'dev' },
+    }),
+  });
+
+  assert.deepEqual(applied.server.envLiterals, {
+    GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra',
+  });
+  assert.deepEqual(applied.server.headerLiterals, { 'X-Env': 'dev' });
+  assert.deepEqual(applied.server.envSecrets, { GITHUB_TOKEN: 'GITHUB_TOKEN' });
+  const stored = getServer(fixture.db, 'github');
+  assert.deepEqual(stored?.env, {
+    GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra',
+    GITHUB_TOKEN: { $secret: 'GITHUB_TOKEN' },
+  });
+  assert.deepEqual(stored?.headers, { 'X-Env': 'dev' });
 });
 
 test('propose emits one ai_run audit event without prompt or result text', async (t) => {

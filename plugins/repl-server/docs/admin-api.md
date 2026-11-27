@@ -116,8 +116,9 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 {
   "id": "pg", "label": "PostgreSQL", "transport": "stdio",
   "command": "npx", "args": ["-y", "@mcp/pg"],
-  "envKeys": ["DATABASE_URL"],        // 值走 secrets
-  "headerKeys": ["Authorization"],    // 远程 HTTP 的鉴权头同样只声明键名
+  "env": { "PGSSLMODE": "disable" },   // 普通配置直接写值
+  "envKeys": ["DATABASE_URL"],         // 值走 secrets
+  "headerKeys": ["Authorization"],     // 远程 HTTP 的鉴权头同样只声明键名
   "enabled": true, "connectMode": "eager",
   "summary": "database — query, list, insert, migrate",
   "tags": ["db", "sql"], "timeoutMs": 60000, "maxConcurrency": 8
@@ -127,7 +128,13 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 
 键名规则：`envKeys` / `env` 匹配 `[A-Za-z_][A-Za-z0-9_]*`；`headerKeys` / `headers` 匹配 `[A-Za-z0-9._-]+`（HTTP token 子集，`IJ_MCP_SERVER_PROJECT_PATH` 这类下划线名合法），含空格、冒号等字符返回 400 `INVALID_FIELD`。同一规则用于 `POST /servers`、`PATCH /servers/:id`、发现页注册与 AI 草稿校验；管理端表单在提交前做同样检查。
 
-`envKeys` / `headerKeys` 的含义是「这个键的值从密钥存储取」：新键绑定到同名密钥（`env.KEY ← KEY`），已有字面量也改为 `$secret`；**已有 `$secret` 引用的键保持原目标不变**（发现导入的 `disc.<serverId>.*` 绑定不会因编辑表单整体重提交而被改写）。`PATCH` 只新增/覆盖列出的键，不删除未列出的键；要移除某个 env/header，提交不含该键的完整 `env` / `headers` 对象（`null` 不是合法值，按 400 `INVALID_FIELD` 处理）。
+`env` / `headers` 的每个值可以是字面量字符串，或 `{ "$secret": "<name>" }` 引用。字面量是普通配置（安装路径、非敏感开关等），按原值保存并返回；只有 `$secret` 的值从密钥库解析。`envKeys` / `headerKeys` 是「这个键的值从密钥存储取」的简写：新键绑定到同名密钥（`env.KEY ← KEY`），已有字面量也改为 `$secret`；**已有 `$secret` 引用的键保持原目标不变**（发现导入的 `disc.<serverId>.*` 绑定不会因编辑表单整体重提交而被改写）。
+
+server 的返回形状里，`envKeys` / `headerKeys` 始终是全部键名；`envSecrets` / `headerSecrets` 给出 `$secret` 引用的目标名，`envLiterals` / `headerLiterals` 给出字面量值。密钥值不返回。管理端编辑表单提交完整的 `env` / `headers`（字面量传字符串，密钥传 `{ "$secret": "name" }`），不再发送 `envKeys` / `headerKeys`。
+
+`PATCH` 带 `env` / `headers` 时整份替换该对象（未列出的键被删除）；只带 `envKeys` / `headerKeys` 时按上面的绑定规则在现有值上合并。`null` 不是合法值，按 400 `INVALID_FIELD` 处理。
+
+AI 草稿（`POST /ai/propose` 返回的 `server`，以及 `/ai/propose/apply` 提交的 `server`）同样接受 `env` / `headers`，但只允许字面量字符串值；任何值命中凭据特征返回 422 `AI_SECRET_LITERAL`。凭据仍用 `envKeys` / `headerKeys`，落库时绑定同名密钥；同一个键同时出现在字面量和键名列表返回 422 `AI_PROPOSAL_INVALID`。
 
 改工具：
 
@@ -529,6 +536,7 @@ type ReportCursor = { v: 1; ca: string; id: string };
 | `INVALID_SEVERITY` / `UNKNOWN_EVENT` / `WEBHOOK_URL_INVALID` | 422 | PUT 告警配置 |
 | `INVALID_TAGS` | 422 | PUT `/tags`：条目格式、重复 key、动作键或系统托管项被改动 |
 | `TAG_POLICY_VIOLATION` | 422 | 创建/PATCH server、写工具标签、AI 标注 apply：违反 server 0–2 / 工具叠加 1–4 / 不重复 / 禁动作键 |
+| `AI_PROPOSAL_INVALID` / `AI_SECRET_LITERAL` | 422 | AI 草稿：结构不合法，或 `env`/`headers`/`args`/`url` 含疑似字面凭据 |
 | `SERVER_NOT_FOUND` / `TOOL_NOT_FOUND` | 404 | 工具目录写端点与工具测试端点 |
 | `TOOL_TEST_UNSUPPORTED` | 400 | `POST /tools/:serverId/:name/test`：`__builtin__` 中非只读工具没有管理端测试路径（只读测试仅限 `search_tools` / `describe_tools` / `search_scripts`） |
 | `TOOL_TEST_UNAVAILABLE` | 503 | 同上：服务端未接线测试执行器 |

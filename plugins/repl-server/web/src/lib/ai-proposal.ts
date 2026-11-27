@@ -7,6 +7,12 @@
  */
 
 import { formatNumber } from './format.ts';
+import {
+  rowsToLiterals,
+  rowsToSecretKeys,
+  type EnvHeaderKind,
+  type EnvHeaderRow,
+} from './env-header.ts';
 
 /** Mirrors `AI_INPUT_MAX_BYTES` in `server/src/ai/constants.ts`. */
 export const AI_INPUT_MAX_BYTES = 16_384;
@@ -22,6 +28,9 @@ export interface ProposalServerDraft {
   args: ProposalArg[];
   cwd: string | null;
   url: string | null;
+  /** Plain config only; secret references live in `envKeys`/`headerKeys`. */
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
   envKeys: string[];
   headerKeys: string[];
   enabled: boolean;
@@ -50,8 +59,8 @@ export interface ProposalDraftValues {
   args?: string;
   cwd?: string;
   url?: string;
-  envKeys?: string;
-  headerKeys?: string;
+  env?: EnvHeaderRow[];
+  headers?: EnvHeaderRow[];
   enabled: boolean;
   connectMode: 'lazy' | 'eager';
   category?: string;
@@ -99,6 +108,17 @@ export function nullIfEmpty(value: string | undefined): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+/** Draft env/header rows: key lists become secret rows, literals stay readable. */
+export function draftRows(draft: ProposalServerDraft, kind: EnvHeaderKind): EnvHeaderRow[] {
+  const keys = kind === 'env' ? draft.envKeys : draft.headerKeys;
+  const literals = (kind === 'env' ? draft.env : draft.headers) ?? {};
+  const rows: EnvHeaderRow[] = keys.map((key) => ({ key, source: 'secret', value: key }));
+  for (const [key, value] of Object.entries(literals)) {
+    if (!keys.includes(key)) rows.push({ key, source: 'literal', value });
+  }
+  return rows;
+}
+
 /** Wire body for `POST /ai/propose/apply`, with the edited draft in full. */
 export function buildProposalApplyBody(
   proposalId: string,
@@ -107,6 +127,8 @@ export function buildProposalApplyBody(
   const id = values.id.trim();
   const label = (values.label ?? '').trim();
   const stdio = values.transport === 'stdio';
+  const env = values.env ?? [];
+  const headers = values.headers ?? [];
   const body: Record<string, unknown> = {
     proposalId,
     server: {
@@ -117,8 +139,10 @@ export function buildProposalApplyBody(
       args: stdio ? parseArgs(values.args) : [],
       cwd: stdio ? nullIfEmpty(values.cwd) : null,
       url: stdio ? null : nullIfEmpty(values.url),
-      envKeys: splitList(values.envKeys),
-      headerKeys: splitList(values.headerKeys),
+      env: rowsToLiterals(env),
+      headers: rowsToLiterals(headers),
+      envKeys: rowsToSecretKeys(env),
+      headerKeys: rowsToSecretKeys(headers),
       enabled: values.enabled,
       connectMode: values.connectMode,
       category: nullIfEmpty(values.category),

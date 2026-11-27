@@ -285,6 +285,8 @@ export interface ProposalServer {
   args: CommandArg[];
   cwd: string | null;
   url: string | null;
+  env: Record<string, string>;
+  headers: Record<string, string>;
   envKeys: string[];
   headerKeys: string[];
   enabled: boolean;
@@ -316,6 +318,8 @@ const PROPOSAL_SERVER_FIELDS: ReadonlySet<string> = new Set([
   'args',
   'cwd',
   'url',
+  'env',
+  'headers',
   'envKeys',
   'headerKeys',
   'enabled',
@@ -325,38 +329,77 @@ const PROPOSAL_SERVER_FIELDS: ReadonlySet<string> = new Set([
   'summary',
 ]);
 
-function readEnvOrHeaderLiteral(
-  value: Record<string, unknown>,
+/**
+ * Plain config for AI drafts: string values only. Credential-shaped values stay
+ * rejected; references must use `envKeys`/`headerKeys`, so a draft never carries
+ * secret material itself.
+ */
+function readLiteralRecord(
+  value: unknown,
   key: 'env' | 'headers',
-): void {
+): Record<string, string> {
   const field = `server.${key}`;
-  const raw = value[key];
-  if (!isPlainObject(raw)) {
+  const keyList = key === 'env' ? 'envKeys' : 'headerKeys';
+  const pattern = key === 'env' ? ENV_KEY_PATTERN : HEADER_KEY_PATTERN;
+  if (!isPlainObject(value)) {
     throw proposalInvalid([`${field} must be an object`], [field]);
   }
-  let secretFound = false;
-  for (const entry of Object.values(raw)) {
-    if (typeof entry === 'string' && scanSecretLiterals(entry).length > 0) secretFound = true;
+  const entries = Object.entries(value);
+  if (entries.length > MAX_KEYS) {
+    throw proposalInvalid([`${field} must have at most ${MAX_KEYS} keys`], [field]);
   }
-  if (secretFound) {
-    throw new AdminApiError(
-      422,
-      'AI_SECRET_LITERAL',
-      'literal credentials are not accepted here; use envKeys/headerKeys',
-      { fields: [field] },
-    );
+  const result: Record<string, string> = {};
+  for (const [name, entry] of entries) {
+    // `__proto__` would hit the prototype setter instead of creating an own key.
+    if (name === '__proto__' || name.length > 256 || !pattern.test(name)) {
+      throw proposalInvalid([`${field}.${name} is not a valid key name`], [`${field}.${name}`]);
+    }
+    if (typeof entry !== 'string') {
+      throw proposalInvalid(
+        [`${field}.${name} must be a literal string; use ${keyList} for secret references`],
+        [`${field}.${name}`],
+      );
+    }
+    if (entry.length > MAX_ARG_LENGTH) {
+      throw proposalInvalid(
+        [`${field}.${name} must be at most ${MAX_ARG_LENGTH} characters`],
+        [`${field}.${name}`],
+      );
+    }
+    if (scanSecretLiterals(entry).length > 0) {
+      throw new AdminApiError(
+        422,
+        'AI_SECRET_LITERAL',
+        'literal credentials are not accepted; use envKeys/headerKeys',
+        { fields: [`${field}.${name}`] },
+      );
+    }
+    result[name] = entry;
   }
-  throw proposalInvalid([`${field} is not accepted; use envKeys/headerKeys`], [field]);
+  return result;
+}
+
+/** One key in both the literal object and the key list has no unambiguous value. */
+function assertNoLiteralKeyOverlap(
+  literals: Record<string, string>,
+  keys: readonly string[],
+  key: 'env' | 'headers',
+): void {
+  const keyList = key === 'env' ? 'envKeys' : 'headerKeys';
+  const overlap = keys.filter((name) => Object.hasOwn(literals, name));
+  if (overlap.length === 0) return;
+  throw proposalInvalid(
+    overlap.map(
+      (name) => `server.${key}.${name} is both a literal and listed in server.${keyList}`,
+    ),
+    overlap.map((name) => `server.${key}.${name}`),
+  );
 }
 
 export function normalizeProposalServer(value: unknown): ProposalServer {
   if (!isPlainObject(value)) {
     throw proposalInvalid(['server must be an object or null'], ['server']);
   }
-  // `env`/`headers` get the dedicated literal-vs-secret rejection; without this
-  // ordering the generic unknown-field check would mask `AI_SECRET_LITERAL`.
-  if ('env' in value) readEnvOrHeaderLiteral(value, 'env');
-  if ('headers' in value) readEnvOrHeaderLiteral(value, 'headers');
   unknownFields(value, PROPOSAL_SERVER_FIELDS, 'server.', proposalInvalid);
 
   const rawId = value['id'];
@@ -408,6 +451,9 @@ export function normalizeProposalServer(value: unknown): ProposalServer {
   }
 
   const args = value['args'] === undefined ? [] : readArgs(value['args']);
+  const env = value['env'] === undefined ? {} : readLiteralRecord(value['env'], 'env');
+  const headers =
+    value['headers'] === undefined ? {} : readLiteralRecord(value['headers'], 'headers');
   const envKeys =
     value['envKeys'] === undefined
       ? []
@@ -421,6 +467,8 @@ export function normalizeProposalServer(value: unknown): ProposalServer {
           HEADER_KEY_PATTERN,
           'server.headerKeys',
         );
+  assertNoLiteralKeyOverlap(env, envKeys, 'env');
+  assertNoLiteralKeyOverlap(headers, headerKeys, 'headers');
 
   const enabled =
     value['enabled'] === undefined ? true : readBoolean(value['enabled'], 'server.enabled');
@@ -481,6 +529,8 @@ export function normalizeProposalServer(value: unknown): ProposalServer {
     args,
     cwd,
     url,
+    env,
+    headers,
     envKeys,
     headerKeys,
     enabled,
@@ -571,9 +621,15 @@ function defineOwn(target: Record<string, SecretValue>, key: string, value: Secr
 /** Converts a normalized proposal into the shape `ServerStore.create` accepts. */
 export function toServerConfig(server: ProposalServer): ServerConfig {
   const env: Record<string, SecretValue> = {};
-  for (const key of server.envKeys) defineOwn(env, key, { $secret: key });
+  for (const [key, value] of Object.entries(server.env)) defineOwn(env, key, value);
+  for (const key of server.envKeys) {
+    if (!Object.hasOwn(env, key)) defineOwn(env, key, { $secret: key });
+  }
   const headers: Record<string, SecretValue> = {};
-  for (const key of server.headerKeys) defineOwn(headers, key, { $secret: key });
+  for (const [key, value] of Object.entries(server.headers)) defineOwn(headers, key, value);
+  for (const key of server.headerKeys) {
+    if (!Object.hasOwn(headers, key)) defineOwn(headers, key, { $secret: key });
+  }
 
   return {
     id: server.id,

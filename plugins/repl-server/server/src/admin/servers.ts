@@ -526,8 +526,10 @@ export interface ServerRuntimeState {
 }
 
 /**
- * Serialized server shape. Env/header values never leave the process: only key names
- * cross the admin boundary, and secret-backed args are rendered as `<secret:name>`.
+ * Serialized server shape. Secret-backed env/header values never leave the process:
+ * `envSecrets`/`headerSecrets` carry only reference names. Literal values are plain
+ * config and returned in `envLiterals`/`headerLiterals`; secret-backed args are
+ * rendered as `<secret:name>`.
  */
 export interface ServerView
   extends Omit<ServerRecord, 'args' | 'env' | 'headers'> {
@@ -538,6 +540,10 @@ export interface ServerView
   envSecrets: Record<string, string>;
   /** header key → secret name. */
   headerSecrets: Record<string, string>;
+  /** env key → literal value, for keys stored as plain config. */
+  envLiterals: Record<string, string>;
+  /** header key → literal value. */
+  headerLiterals: Record<string, string>;
   /** `args` positions backed by a `$secret` reference. */
   secretArgs: Array<{ index: number; secret: string }>;
   /** Rendered by this module's `viewServer` (`null` for static). */
@@ -1126,13 +1132,22 @@ function renderArg(arg: CommandArg): string {
   return typeof arg === 'string' ? arg : `<secret:${arg.$secret}>`;
 }
 
-/** Maps only the keys whose value is a `$secret` reference; literals stay hidden. */
+/** Maps only the keys whose value is a `$secret` reference. */
 function secretRefs(values: Record<string, SecretValue>): Record<string, string> {
   const refs: Record<string, string> = {};
   for (const [key, value] of Object.entries(values)) {
     if (isSecretRef(value)) refs[key] = value.$secret;
   }
   return refs;
+}
+
+/** Maps only plain string values; `$secret` references are exposed by `secretRefs`. */
+function literalValues(values: Record<string, SecretValue>): Record<string, string> {
+  const literals: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === 'string') literals[key] = value;
+  }
+  return literals;
 }
 
 /** Projects a record into the value-free admin view. */
@@ -1158,6 +1173,8 @@ function viewServer(
     headerKeys: Object.keys(record.headers).sort(),
     envSecrets: secretRefs(record.env),
     headerSecrets: secretRefs(record.headers),
+    envLiterals: literalValues(record.env),
+    headerLiterals: literalValues(record.headers),
     secretArgs: record.args.flatMap((arg, index) =>
       isSecretRef(arg) ? [{ index, secret: arg.$secret }] : [],
     ),

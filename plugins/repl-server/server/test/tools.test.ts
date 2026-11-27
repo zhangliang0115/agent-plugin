@@ -80,27 +80,21 @@ test('every tool is alwaysLoad and only run_script, report_problem and save_scri
   assert.deepEqual(byName.get('wait_tasks')?.annotations, { readOnlyHint: true });
 });
 
-test('run_script description stays within the 2KB ceiling and mentions the async path', () => {
+test('run_script description stays within the 2KB ceiling and points at the skill', () => {
   const tool = getToolDefinition('run_script');
   assert.ok(tool !== undefined);
   const bytes = Buffer.byteLength(tool.description, 'utf8');
   assert.ok(bytes <= 2048, `description is ${bytes} bytes`);
-  assert.match(tool.description, /async/);
-  assert.match(tool.description, /scriptName/, 'saved scripts are callable by name');
+  assert.match(tool.description, /persistent sandbox/);
+  assert.match(tool.description, /only narrow/, 'the permission boundary stays on the tool');
+  assert.match(tool.description, /repl-server skill/, 'usage and orchestration live in the skill');
   assert.doesNotMatch(tool.description, /scriptId/, 'the system id stays out of the model surface');
-  assert.match(tool.description, /wait_tasks/);
-  assert.match(tool.description, /Promise\.all/, 'independent calls point at Promise.all');
-  assert.match(tool.description, /independent calls/);
-  assert.match(tool.description, /await tools\.<name>\(args\)/);
-  assert.match(tool.description, /tools\.mcp\.<server>\.<tool>\(args\)/);
-  assert.doesNotMatch(tool.description, /await Read\(/);
 });
 
-test('save_script and search_scripts descriptions use scriptName, never scriptId', () => {
+test('save_script and search_scripts descriptions never expose scriptId', () => {
   for (const name of ['save_script', 'search_scripts'] as const) {
     const tool = getToolDefinition(name);
     assert.ok(tool !== undefined);
-    assert.match(tool.description, /scriptName/);
     assert.doesNotMatch(tool.description, /scriptId/);
     assert.ok(Buffer.byteLength(tool.description, 'utf8') <= 2048);
   }
@@ -119,7 +113,7 @@ test('the frozen schemas match docs/protocol.md §4', () => {
         type: 'integer',
         minimum: 1,
         description:
-          'Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds.',
+          'Deadline in milliseconds, not seconds. Omit it for no deadline; values above the cap (600000 sync, 7200000 async) are clamped, not rejected.',
       },
       async: { type: 'boolean', default: false },
       workspace: { type: 'string' },
@@ -134,10 +128,28 @@ test('the frozen schemas match docs/protocol.md §4', () => {
   assert.deepEqual(getToolDefinition('search_tools')?.inputSchema, {
     type: 'object',
     properties: {
-      query: { type: 'string', maxLength: 200 },
-      server: { type: 'string' },
-      category: { type: 'string' },
-      tags: { type: 'array', items: { type: 'string' } },
+      query: {
+        type: 'string',
+        maxLength: 200,
+        description:
+          "Matches tool names, effective tags and descriptions. An empty query returns the server overview without server, or that group's tools with server.",
+      },
+      server: {
+        type: 'string',
+        description:
+          "Narrows results only; values must come from this schema's enum when present.",
+      },
+      category: {
+        type: 'string',
+        description:
+          "Narrows results only; values must come from this schema's enum when present.",
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          "Narrows results only; every tag must match (all-of); values must come from this schema's enum when present.",
+      },
       max: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
     },
     additionalProperties: false,
@@ -631,18 +643,26 @@ test('dynamic search_tools schema carries the visible server, category and tag e
   assert.deepEqual(definition.inputSchema.properties.server, {
     type: 'string',
     enum: ['github', 'pg'],
+    description:
+      "Narrows results only; values must come from this schema's enum when present.",
   });
   assert.deepEqual(definition.inputSchema.properties.category, {
     type: 'string',
     enum: ['database', 'vcs'],
+    description:
+      "Narrows results only; values must come from this schema's enum when present.",
   });
   assert.deepEqual(definition.inputSchema.properties.tags, {
     type: 'array',
     items: { type: 'string', enum: ['db', 'read'] },
+    description:
+      "Narrows results only; every tag must match (all-of); values must come from this schema's enum when present.",
   });
   assert.deepEqual(definition.inputSchema.properties.query, {
     type: 'string',
     maxLength: 200,
+    description:
+      "Matches tool names, effective tags and descriptions. An empty query returns the server overview without server, or that group's tools with server.",
   });
   assert.deepEqual(definition.inputSchema.properties.max, {
     type: 'integer',
@@ -650,20 +670,28 @@ test('dynamic search_tools schema carries the visible server, category and tag e
     maximum: 50,
     default: 10,
   });
-  assert.match(definition.description, /empty query without server returns the server overview/i);
-  assert.match(definition.description, /empty query with server \(including __official__\) returns that group's tools/i);
-  assert.match(definition.description, /tool names, effective tags and descriptions/i);
-  assert.match(definition.description, /only narrow/i);
-  assert.match(definition.description, /all-of/);
-  assert.match(definition.description, /schema enums/);
+  assert.match(String(definition.inputSchema.properties.query.description), /empty query/i);
+  assert.match(String(definition.inputSchema.properties.server.description), /only/i);
+  assert.match(String(definition.inputSchema.properties.tags.description), /all-of/);
+  assert.match(String(definition.inputSchema.properties.tags.description), /enum/);
   assert.equal(Object.isFrozen(definition.inputSchema.properties.category), true);
 
   const bare = buildSearchToolsDefinition([], []);
-  assert.deepEqual(bare.inputSchema.properties.server, { type: 'string' });
-  assert.deepEqual(bare.inputSchema.properties.category, { type: 'string' });
+  assert.deepEqual(bare.inputSchema.properties.server, {
+    type: 'string',
+    description:
+      "Narrows results only; values must come from this schema's enum when present.",
+  });
+  assert.deepEqual(bare.inputSchema.properties.category, {
+    type: 'string',
+    description:
+      "Narrows results only; values must come from this schema's enum when present.",
+  });
   assert.deepEqual(bare.inputSchema.properties.tags, {
     type: 'array',
     items: { type: 'string' },
+    description:
+      "Narrows results only; every tag must match (all-of); values must come from this schema's enum when present.",
   });
 });
 
@@ -704,7 +732,12 @@ test('listTools applies per-request run_script and search_tools overrides only',
   assert.equal(byName.get('run_script')?.description, 'dynamic run_script');
   assert.deepEqual(
     byName.get('search_tools')?.inputSchema.properties.category,
-    { type: 'string', enum: ['database'] },
+    {
+      type: 'string',
+      enum: ['database'],
+      description:
+        "Narrows results only; values must come from this schema's enum when present.",
+    },
   );
   for (const name of ['describe_tools', 'wait_tasks', 'report_problem'] as const) {
     assert.equal(byName.get(name), getToolDefinition(name), `${name} stays frozen`);

@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.3.5" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.4.1" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -129,7 +129,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
 
 返回 6 或 7 个工具，顺序固定：**有效声明** tasks 的客户端看不到 `wait_tasks`（6 个），其余客户端 7 个。有效声明 = 本次请求在 `_meta` 里声明了 `io.modelcontextprotocol/tasks`，且该客户端绑定的 `agent` 不是 `kiro`。完整顺序是 `run_script`、`search_tools`、`describe_tools`、`wait_tasks`、`report_problem`、`save_script`、`search_scripts`，有效声明时只去掉 `wait_tasks`。结果固定带 `resultType: "complete"`（与 `tools` 同级）；协议修订 `2026-07-28` 要求 modern 结果必须带该字段，缺省不再视为 complete。每个工具带：
 
-- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。固定核心提示独立工具调用可用 `Promise.all` 并行。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
+- `description`：`run_script` 按本次请求可见的 MCP server 动态拼接，UTF-8 ≤2048 字节。静态部分只写工具做什么、`visibleTools`/`excludeTags` 的权限边界，用法与编排指向 MCP skill；`## MCP servers (server id, category, visible tool count)` 段每行 `<id>  [<category>]  <N> tools`，数字是该客户端当前可见/已发现的工具数，0 表示暂无可见工具；不打印 summary、工具名或 env 标签。固定核心与末尾 `Call` 与发现指引优先保留，server 行从列表尾部截断。其余工具一句话。可见 server 列表只在这一处，`instructions` 只留指针。
 - `inputSchema`：见 §4
 - `_meta: { "anthropic/alwaysLoad": true }`
 - `annotations`：`run_script`、`report_problem` 与 `save_script` 不设；`search_tools`、`describe_tools`、`search_scripts` 设 `readOnlyHint: true`、`idempotentHint: true`；`wait_tasks`（仅无有效 tasks 声明的客户端可见）只设 `readOnlyHint: true`——它消费结果，重试返回 `ALREADY_CONSUMED` 而不是同一份结果，不能声称幂等
@@ -251,7 +251,7 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
     "timeout": {
       "type": "integer",
       "minimum": 1,
-      "description": "Deadline in milliseconds, not seconds. Omit it to run without a deadline. Values above the cap are clamped, not rejected: 600000 for a synchronous call and 7200000 with async: true. Values below 1000 are almost always a mistake, because one MCP tool call usually takes tens to hundreds of milliseconds."
+      "description": "Deadline in milliseconds, not seconds. Omit it for no deadline; values above the cap (600000 sync, 7200000 async) are clamped, not rejected."
     },
     "async": { "type": "boolean", "default": false },
     "workspace": { "type": "string" },
@@ -282,10 +282,22 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 {
   "type": "object",
   "properties": {
-    "query": { "type": "string", "maxLength": 200 },
-    "server": { "type": "string", "enum": ["<可见 MCP server id>"] },
-    "category": { "type": "string", "enum": ["<可见分类>"] },
-    "tags": { "type": "array", "items": { "type": "string", "enum": ["<可见标签>"] } },
+    "query": {
+      "type": "string", "maxLength": 200,
+      "description": "Matches tool names, effective tags and descriptions. An empty query returns the server overview without server, or that group's tools with server."
+    },
+    "server": {
+      "type": "string", "enum": ["<可见 MCP server id>"],
+      "description": "Narrows results only; values must come from this schema's enum when present."
+    },
+    "category": {
+      "type": "string", "enum": ["<可见分类>"],
+      "description": "Narrows results only; values must come from this schema's enum when present."
+    },
+    "tags": {
+      "type": "array", "items": { "type": "string", "enum": ["<可见标签>"] },
+      "description": "Narrows results only; every tag must match (all-of); values must come from this schema's enum when present."
+    },
     "max": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
   },
   "additionalProperties": false
@@ -425,7 +437,7 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 
 `instructions` 只有两行（≤400 字符）：一句定位，加一句指针「用法见 MCP skill，先 `skills/list`，再读它列出的文件」。
 
-其余内容不在任何两处重复：脚本内调用、`Promise.all` 并行、结果与错误语义、异步任务都在技能正文（§3.5）；每个工具自身的约束在工具 description 里；本次可见的 MCP server 列表只在 `run_script` 的 description（≤2KB，见 §3.3）。不支持技能扩展的客户端只能拿到 `instructions` 与工具 schema，完整指南需要用户在本地单独安装技能。
+其余内容不在任何两处重复：脚本内调用、`Promise.all` 并行、结果与错误语义、异步任务都在技能正文（§3.5）；工具 description 只写工具做什么、权限边界和本次请求的数据；本次可见的 MCP server 列表只在 `run_script` 的 description（≤2KB，见 §3.3）。不支持技能扩展的客户端只能拿到 `instructions` 与工具 schema，完整指南需要用户在本地单独安装技能。
 
 ## 6. 任务方法
 

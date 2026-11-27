@@ -731,6 +731,67 @@ test('POST /servers resolves envKeys/headerKeys to $secret references', async ()
   assert.equal(errorCode(duplicate), 'SERVER_EXISTS');
 });
 
+test('GET /servers returns literal env/header values but never $secret values', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, {
+    id: 'ghidra',
+    env: {
+      GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra',
+      API_TOKEN: { $secret: 'disc.ghidra.env.API_TOKEN' },
+    },
+    headers: {
+      'X-Env': 'dev',
+      Authorization: { $secret: 'AUTH' },
+    },
+  });
+
+  const response = await call(handler, makeRequest('GET', '/servers/ghidra'));
+  assert.equal(response.status, 200);
+  const server = bodyOf(response)['server'] as Record<string, unknown>;
+  assert.deepEqual(server['envKeys'], ['API_TOKEN', 'GHIDRA_INSTALL_DIR']);
+  assert.deepEqual(server['headerKeys'], ['Authorization', 'X-Env']);
+  assert.deepEqual(server['envLiterals'], { GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra' });
+  assert.deepEqual(server['headerLiterals'], { 'X-Env': 'dev' });
+  assert.deepEqual(server['envSecrets'], { API_TOKEN: 'disc.ghidra.env.API_TOKEN' });
+  assert.deepEqual(server['headerSecrets'], { Authorization: 'AUTH' });
+  assert.equal(Object.hasOwn(server['envLiterals'] as object, 'API_TOKEN'), false);
+  assert.equal(Object.hasOwn(server['headerLiterals'] as object, 'Authorization'), false);
+});
+
+test('PATCH /servers replaces the whole env object, keeping literals as literals', async () => {
+  const env = testEnv();
+  const handler = createServerHandler(env);
+  await addServer(env.serverStore, {
+    id: 'ghidra',
+    env: {
+      GHIDRA_INSTALL_DIR: '/Users/me/tools/ghidra',
+      API_TOKEN: { $secret: 'TOKEN' },
+    },
+  });
+
+  const patched = await call(
+    handler,
+    makeRequest('PATCH', '/servers/ghidra', {
+      body: {
+        env: {
+          GHIDRA_INSTALL_DIR: '/opt/ghidra',
+          NEW_FLAG: '1',
+        },
+      },
+      ifMatch: await env.serverStore.revision(),
+    }),
+  );
+  assert.equal(patched.status, 200);
+  const server = bodyOf(patched)['server'] as Record<string, unknown>;
+  assert.deepEqual(server['envKeys'], ['GHIDRA_INSTALL_DIR', 'NEW_FLAG']);
+  assert.deepEqual(server['envLiterals'], {
+    GHIDRA_INSTALL_DIR: '/opt/ghidra',
+    NEW_FLAG: '1',
+  });
+  assert.deepEqual(server['envSecrets'], {});
+});
+
 test('parseCreateServer accepts header names with underscores and dots', () => {
   const config = parseCreateServer({
     id: 'idea-os',
