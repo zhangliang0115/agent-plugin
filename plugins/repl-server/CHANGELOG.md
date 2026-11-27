@@ -14,6 +14,7 @@
 - `reports` 表保留策略：90 天 / 10000 行，只清 `closed` 且告警不在 `pending`/`sending` 的行，随生命周期 sweep 每小时执行（设计 06 §十 #3）。
 - 显式 `timeout` 增加 L2 上限：同步 600s、异步 7200s，超出钳到上限；省略仍表示不设截止。
 ### 变更
+- 分发方式改为 GitHub Release：`server/scripts/release.mjs` 把 `dist` 打成 `repl-server-<版本>.tar.gz` 并上传同名 `.sha256`，tag 为 `v<server 版本>`。Claude Code 插件（learn-ai 的 `cc-plugins/repl-server`）首次启动时下载并校验该资产，删掉了写死的本机仓库路径，换机器后无需本地构建。
 - 异步派发统一使用 MCP task id：`run_script` 的所有异步路径都创建 MCP task，`wait_tasks` 的 `taskIds` 元素改为传 `t_...`（原为 core 的 eval 任务 id），事件里的 `taskId` 也映射回对应的 `t_...`；core 的 eval 任务 id 不再出现在客户端可见字段里。
 - 有效声明 MCP tasks 的客户端（请求声明且 binding 的 `agent` 不是 `kiro`），`run_script({ async: true })` 返回 `CreateTaskResult`，由客户端自己 `tasks/get` 轮询；其余客户端得到字段相同的 `resultType: "complete"` 结果（含 `content`），用 `wait_tasks` 收取。`wait_tasks` 只对无有效声明的客户端暴露，有效声明方调用返回 `-32602`。
 - `client_bindings` 新增 `agent`（`claude-code` / `kiro` / null，schema v10），管理 API 与客户端页面可编辑；迁移按 label 回填。`agent = kiro` 用于否决请求里的 tasks 声明，因为 Kiro 会拒绝 `resultType: "task"`，且其 complete 校验要求 `content`。

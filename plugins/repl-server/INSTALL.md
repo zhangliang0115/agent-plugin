@@ -4,26 +4,29 @@
 
 ## Claude Code
 
-### 前置条件
+### 安装（推荐：Claude Code 插件）
 
-- Node `>= 22.19`（检查：`node -v`）
-- repl-server 已发布到 npm，或用本地 tgz
-
-### 安装
-
-在任意目录执行：
+插件在 learn-ai 仓库的 `cc-plugins/repl-server`：
 
 ```bash
-npm install -g @zhangliang0115/repl-server
+claude plugin install repl-server@learn-ai
 ```
 
-本地开发时，在仓库根目录构建后用 `node plugins/repl-server/server/dist/index.js --port 8787` 启动。
+每次会话启动时插件检查 `http://127.0.0.1:8787/health`；没在跑就从 GitHub Release 下载预构建的 `dist`（`repl-server-<版本>.tar.gz`），校验同目录的 `.sha256` 后解压到 `$CLAUDE_PLUGIN_DATA/server/<版本>/`，再以 `--strict-auth` 后台启动，然后用 HTTP 连 `/mcp`。首次连接时在 `/mcp` 面板完成一次 OAuth 授权（见 `docs/protocol.md` §2.1）。
 
-### 启动
+- 前置条件：Node `>= 22.19`；首次启动需要能访问 `github.com` 下载 release 资产。
+- 版本由插件的 `scripts/ensure-server.mjs` 里 `SERVER_VERSION` 决定，需与本文件同仓库的 `server/package.json` 一致；可用 `REPL_SERVER_VERSION` 临时覆盖。
+- 本地开发时设 `REPL_SERVER_DIST=/abs/path/to/dist/index.js` 指向本地构建，跳过下载。
+
+### 手动安装与启动
+
+从本仓库构建后直接运行：
 
 ```bash
-repl-server --port 8787
+node plugins/repl-server/server/dist/index.js --port 8787
 ```
+
+发版时用 `node server/scripts/release.mjs` 把 `dist` 打成 release 资产（tag 为 `v<server 版本>`），插件据此下载。
 
 ### 远程访问（Tailscale 等）
 
@@ -49,7 +52,7 @@ repl-server --host 0.0.0.0 \
 
 ### 配置 MCP
 
-在 Claude Code 的用户级或项目级 MCP 配置里加：
+用上面的插件安装时不需要这一步（插件的 `.mcp.json` 已经连好，鉴权走 OAuth）。手动配置时，在用户级或项目级 MCP 配置里加：
 
 ```json
 {
