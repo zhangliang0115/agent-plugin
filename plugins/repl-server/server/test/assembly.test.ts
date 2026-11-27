@@ -192,6 +192,36 @@ test('run_script executes JavaScript end to end', async (t) => {
   );
 });
 
+test('scripts call protocol tools by bare name, except run_script', async (t) => {
+  const app = await start();
+  t.after(app.close);
+  const discover = await rpc(app.base, { jsonrpc: '2.0', id: 1, method: 'server/discover' });
+  const session = discover.headers.get('mcp-session-id') ?? '';
+  const run = async (id: number, code: string) => {
+    const call = await rpc(
+      app.base,
+      { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'run_script', arguments: { code } } },
+      session,
+    );
+    const body = (await call.json()) as {
+      result: { isError: boolean; content: Array<{ text: string }> };
+    };
+    return body.result;
+  };
+
+  const found = await run(2, 'const r = await tools.search_tools({ query: "" }); return Array.isArray(r)');
+  assert.equal(found.isError, false, found.content[0]?.text);
+  assert.match(found.content[0]?.text ?? '', /<result>true<\/result>/);
+
+  const scripts = await run(3, 'const r = await tools.search_scripts({}); return Array.isArray(r.scripts)');
+  assert.equal(scripts.isError, false, scripts.content[0]?.text);
+  assert.match(scripts.content[0]?.text ?? '', /<result>true<\/result>/);
+
+  const nested = await run(4, 'await tools.run_script({ code: "1" })');
+  assert.match(nested.content[0]?.text ?? '', /run_script/);
+  assert.match(nested.content[0]?.text ?? '', /not callable|TOOL_NOT_VISIBLE|nested/i);
+});
+
 test('tool_result events accumulate lifetime usage; denied calls do not', async (t) => {
   let calls = 0;
   const app = await start({

@@ -98,7 +98,13 @@ import type { AuditEvent, RequestIdentity } from './ports.ts';
 import { systemClock } from './ports.ts';
 import { TransportSessionRegistry } from './sessions/transport.ts';
 import { McpTaskStore, cancelMcpTask, getMcpTask, ownerOf, updateMcpTask } from './tasks/mcp-tasks.ts';
-import { callTool, type ToolCallResponse } from './tools/call.ts';
+import {
+  SCRIPT_CALLABLE_TOOLS,
+  callProtocolToolFromScript,
+  callTool,
+  type ToolCallContext,
+  type ToolCallResponse,
+} from './tools/call.ts';
 import {
   buildSearchToolsDefinition,
   listTools,
@@ -688,6 +694,39 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
   };
 
   /**
+   * Context for a protocol tool called from inside a script. The caller is the
+   * client that owns the execution session, so binding visibility and task
+   * ownership match a top-level call by that client.
+   */
+  const scriptToolContext = (execSessionId: string | undefined): ToolCallContext => {
+    const session = execSessionId === undefined ? undefined : gateway.sessions.get(execSessionId);
+    if (session === undefined) throw new Error('protocol tools need an execution session');
+    const identity: RequestIdentity = {
+      identity: session.binding === null ? 'unbound' : 'bound',
+      binding: session.binding,
+      client: session.clientLabel,
+      mcp: session.mcpSessionId,
+      exec: session.id,
+    };
+    const surface = toolSurfaceFor(identity);
+    return {
+      identity,
+      gateway,
+      catalog,
+      tasks,
+      tasksDeclared: false,
+      reports,
+      scripts,
+      visibility: surface.visibility,
+      searchToolsDefinition: surface.searchToolsDefinition,
+      toolTextSearch,
+      audit: (event) => {
+        audit.recordTask({ ...event, ts: new Date().toISOString() });
+      },
+    };
+  };
+
+  /**
    * One call through the real transport: third-party tools go to the pool, bare
    * tools (official) go to `claude mcp serve`. Shared by the eval gateway and
    * the admin tool test so the routing exists once.
@@ -702,6 +741,12 @@ export async function assemble(options: AssemblyOptions = {}): Promise<Assembly>
           ...(deadline === undefined ? {} : { deadline }),
           ...(observation === undefined ? {} : { observation }),
         });
+      }
+      if (call.tool === 'run_script') {
+        throw new Error('run_script is not callable from a script; nested evals are not supported');
+      }
+      if (SCRIPT_CALLABLE_TOOLS.has(call.tool)) {
+        return await callProtocolToolFromScript(call.tool, call.args, scriptToolContext(execSessionId));
       }
       const key = workspace === undefined || workspace === '' || workspace === '.' ? process.cwd() : workspace;
       const client = await serveRuntime.acquire(

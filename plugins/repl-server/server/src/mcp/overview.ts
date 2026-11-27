@@ -50,7 +50,7 @@ const BUILTIN_CALL = '\nCall: tools.<name>(args)';
 const MCP_HEADER = '\n\n## MCP servers (server id, category, visible tool count)\n\n';
 const FIXED_GUIDANCE = [
   'Call: tools.mcp.<server>.<tool>(args)',
-  'MCP-level discovery (not tools.*): search_tools({ query, server?, category?, tags? }) for names; describe_tools({ names }) for schemas. Call them before run_script.',
+  'Discovery: search_tools({ query, server?, category?, tags? }) for names; describe_tools({ names }) for schemas. Call them before run_script, or inside a script as tools.search_tools(...) / tools.describe_tools(...) (also save_script, search_scripts, report_problem, wait_tasks; not run_script).',
 ].join('\n');
 const ID_MAX_CHARS = 48;
 const CATEGORY_MAX_CHARS = 24;

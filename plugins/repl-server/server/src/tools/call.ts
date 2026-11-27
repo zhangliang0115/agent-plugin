@@ -559,3 +559,41 @@ export async function callTool(
   ctx.onUsage?.(name, response.resultType === 'task' || response.isError !== true);
   return response;
 }
+
+/**
+ * Protocol tools a script may call by bare name (`tools.search_tools(...)`).
+ * `run_script` is excluded: a script starting another script nests evals
+ * without a bound on depth.
+ */
+export const SCRIPT_CALLABLE_TOOLS: ReadonlySet<string> = new Set([
+  'search_tools',
+  'describe_tools',
+  'wait_tasks',
+  'report_problem',
+  'save_script',
+  'search_scripts',
+]);
+
+/**
+ * Runs one protocol tool for a script. Success returns the parsed JSON body,
+ * which is what the model would have read from a top-level call; a tool-level
+ * failure throws so the script can catch it like any other tool error.
+ */
+export async function callProtocolToolFromScript(
+  name: string,
+  input: unknown,
+  ctx: ToolCallContext,
+): Promise<unknown> {
+  const response = await callTool(name, input, ctx);
+  if (response.resultType === 'task') {
+    throw new Error(`${name} returned a task, which a script cannot consume`);
+  }
+  const text = response.content.find((block) => block.type === 'text');
+  const body = text !== undefined && 'text' in text ? text.text : '';
+  if (response.isError === true) throw new Error(body === '' ? `${name} failed` : body);
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return body;
+  }
+}
