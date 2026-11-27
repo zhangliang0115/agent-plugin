@@ -15,7 +15,7 @@ claude plugin install repl-server@learn-ai
 每次会话启动时插件检查 `http://127.0.0.1:8787/health`；没在跑就从 GitHub Release 下载预构建的 `dist`（`repl-server-<版本>.tar.gz`），校验同目录的 `.sha256` 后解压到 `$CLAUDE_PLUGIN_DATA/server/<版本>/`，再以 `--strict-auth` 后台启动，然后用 HTTP 连 `/mcp`。首次连接时在 `/mcp` 面板完成一次 OAuth 授权（见 `docs/protocol.md` §2.1）。
 
 - 前置条件：Node `>= 22.19`；首次启动需要能访问 `github.com` 下载 release 资产。
-- 版本由插件的 `scripts/ensure-server.mjs` 里 `SERVER_VERSION` 决定，需与本文件同仓库的 `server/package.json` 一致；可用 `REPL_SERVER_VERSION` 临时覆盖。
+- 版本：插件的 `plugin.json` 版本与本仓库的 `server/package.json` 版本必须相同，插件据此拼 release URL；`REPL_SERVER_VERSION` 可临时覆盖。
 - 本地开发时设 `REPL_SERVER_DIST=/abs/path/to/dist/index.js` 指向本地构建，跳过下载。
 
 ### 手动安装与启动
@@ -74,7 +74,7 @@ repl-server --host 0.0.0.0 \
 curl -s http://127.0.0.1:8787/health
 ```
 
-预期：`{"ok":true,"version":"0.2.0"}`
+预期：`{"ok":true,"version":"0.3.0"}`
 
 （未实测）
 

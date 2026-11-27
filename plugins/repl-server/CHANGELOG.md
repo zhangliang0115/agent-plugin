@@ -1,6 +1,6 @@
 # 变更记录
 
-## 未发布
+## 0.3.0（2026-11-27）
 ### 新增
 - 本地 OAuth 2.1 授权服务器（`docs/protocol.md` §2.1）：`/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/register`（动态注册）、`/authorize`（授权页）、`/token`（授权码 + PKCE S256、refresh 轮换）；`/mcp` 的 401 带 `resource_metadata`，MCP 客户端可以自动发现并完成授权。授权页可从 `client_bindings` 选择归属，token 继承完整绑定配置；选择不绑定时为 `unbound`。
 - OAuth 授权持久化（`oauth_authorizations`，schema v11）：token 在服务重启后仍有效，access 与 refresh 均为 365 天；管理端 `GET /admin/api/clients` 的 `oauthAuthorizations` 字段列出在线授权的客户端、绑定与到期时间。

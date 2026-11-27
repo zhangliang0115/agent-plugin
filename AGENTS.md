@@ -47,6 +47,7 @@ git status && git diff
 - 涉及多个目录、删除文件、新增依赖或修改 portable 契约的改动：先用不超过 5 行列出改哪些文件、各改什么、怎么验证，等用户确认。单文件的小改动可以直接做。
 - 先写会失败的测试，再写实现。提交前跑 `pnpm test`。
 - 改动影响插件的安装方式（包名、入口、manifest、配置项、宿主版本、支持的宿主）时，同一个提交里更新 `plugins/<id>/INSTALL.md`，交付时贴出它的验证命令输出。规则见 `docs/conventions.md`「安装文档」。
+- server 类插件的可分发产物（`dist`）改完要发布：`pnpm build && pnpm release`，只 build 不 release 等于没交付。规则见 `docs/conventions.md`「发布产物」。
 - 报错贴原文：命令、完整输出（堆栈前 20 行）、期望结果。
 
 ## 记录规则
