@@ -73,7 +73,18 @@ export function App(): React.ReactElement {
   const [mode, setMode] = useState<AdminTheme>(initialTheme);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [lost, setLost] = useState(false);
+  /** Read from /health so the badge never drifts from the running binary. */
+  const [version, setVersion] = useState('');
   const route = useRoute();
+
+  useEffect(() => {
+    void fetch('/health')
+      .then((response) => response.json())
+      .then((body: { version?: unknown }) => {
+        if (typeof body.version === 'string') setVersion(body.version);
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = mode;
@@ -169,7 +180,7 @@ export function App(): React.ReactElement {
               }}
             />
             <div className="sidebar-foot">
-              <span>v0.2.0</span>
+              <span>{version === '' ? '' : `v${version}`}</span>
               <span className="conn-dot" /> 已连接
             </div>
           </Sider>
