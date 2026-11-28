@@ -1,5 +1,9 @@
 # 变更记录
 
+## 0.6.0（2026-11-28）
+### 新增
+- 管理端请求详情：工具结果里的 `images` / `documents` 不再显示成 base64 长串，改为在「结构化」视图上方渲染缩略图（点击新标签页看大图）和 PDF 下载链接，JSON 树里只留 `mediaType` 与字节数。「原始报文」模式与协议帧脱敏（`{mimeType, bytes, sha256}`）保持不变。
+
 ## 0.5.0（2026-11-28）
 ### 新增
 - 脚本沙箱新增 7 个纯数据全局：`URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`structuredClone`、`atob`、`btoa`，取自宿主 realm。`fetch`、`Buffer`、`process` 仍不提供，所有副作用继续走 `tools`。注意这些类来自宿主，与宿主返回的同名类对象做 `instanceof` 可能不一致。

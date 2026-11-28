@@ -22,6 +22,7 @@ import { VirtualText } from './VirtualText.tsx';
 import {
   downloadSlice,
   fetchPayloadSlice,
+  extractMedia,
   formatBytes,
   parseRaw,
   payloadSummary,
@@ -37,9 +38,42 @@ import {
 
 const { Text } = Typography;
 
+/** Images and PDFs found in a parsed body, drawn above the tree that no longer carries their base64. */
+function MediaStrip({ media }: { media: ReturnType<typeof extractMedia> }): React.ReactElement | null {
+  if (media.images.length === 0 && media.documents.length === 0) return null;
+  return (
+    <Space size={8} wrap style={{ margin: '6px 0' }}>
+      {media.images.map((image, index) => (
+        <a key={`i${String(index)}`} href={image.src} target="_blank" rel="noreferrer" title={`${image.mediaType} · ${formatBytes(image.bytes)}`}>
+          <img
+            src={image.src}
+            alt={`图片 ${String(index + 1)}`}
+            style={{ maxHeight: 180, maxWidth: 320, border: '1px solid var(--border)', borderRadius: 4 }}
+          />
+        </a>
+      ))}
+      {media.documents.map((doc, index) => (
+        <a key={`d${String(index)}`} href={doc.href} download={`document-${String(index + 1)}.pdf`}>
+          {`PDF ${String(index + 1)}（${formatBytes(doc.bytes)}）`}
+        </a>
+      ))}
+    </Space>
+  );
+}
+
 type RawMode = 'parsed' | 'raw';
 /** Above this many lines the raw pane switches to the windowed renderer. */
 const VIRTUAL_MIN_LINES = 300;
+
+function ParsedBody({ value, maxHeight }: { value: unknown; maxHeight: number | string }): React.ReactElement {
+  const media = useMemo(() => extractMedia(value), [value]);
+  return (
+    <>
+      <MediaStrip media={media} />
+      <JsonView value={media.rest} maxHeight={maxHeight} />
+    </>
+  );
+}
 
 export function PayloadViewer({
   label,
@@ -237,7 +271,7 @@ export function PayloadViewer({
           }
         />
       ) : parsed !== null && parsed.ok ? (
-        <JsonView value={parsed.value} maxHeight={maxHeight} />
+        <ParsedBody value={parsed.value} maxHeight={maxHeight} />
       ) : (
         <>
           {parsed !== null && !parsed.ok && loaded !== null ? (

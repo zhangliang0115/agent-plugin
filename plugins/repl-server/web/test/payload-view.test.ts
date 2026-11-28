@@ -104,3 +104,25 @@ test('summary tells the reader what to expect before they click', () => {
     '全文 60.0 MB（仅存首尾各 1 MiB）',
   );
 });
+
+test('extractMedia pulls images and PDFs out and leaves no base64 in the rest', async () => {
+  const { extractMedia } = await import('../src/lib/payload-view.ts');
+  const body = {
+    text: 'ok',
+    images: [{ base64: 'AAAA', mediaType: 'image/jpeg' }],
+    documents: [{ base64: 'BBBBBBBB' }],
+  };
+  const media = extractMedia(body);
+  assert.equal(media.images[0]?.src, 'data:image/jpeg;base64,AAAA');
+  assert.equal(media.images[0]?.bytes, 3);
+  assert.equal(media.documents[0]?.href, 'data:application/pdf;base64,BBBBBBBB');
+  assert.equal(JSON.stringify(media.rest).includes('AAAA'), false);
+  assert.deepEqual((media.rest as { text: string }).text, 'ok');
+});
+
+test('extractMedia returns the same object when the body has no media', async () => {
+  const { extractMedia } = await import('../src/lib/payload-view.ts');
+  const body = { text: 'x', images: [] };
+  assert.equal(extractMedia(body).rest, body);
+  assert.equal(extractMedia('plain').rest, 'plain');
+});

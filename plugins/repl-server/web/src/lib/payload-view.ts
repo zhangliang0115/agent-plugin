@@ -199,3 +199,60 @@ export function payloadSummary(view: PayloadView): string {
   if (view.inline !== undefined) return `内联 ${formatBytes(view.bytes)}`;
   return '无正文';
 }
+
+export interface MediaImage {
+  src: string;
+  mediaType: string;
+  bytes: number;
+}
+
+export interface MediaDocument {
+  href: string;
+  bytes: number;
+}
+
+export interface ExtractedMedia {
+  /** The body with base64 swapped for `{ mediaType, bytes }`; every other field is untouched. */
+  rest: unknown;
+  images: MediaImage[];
+  documents: MediaDocument[];
+}
+
+const base64Bytes = (data: string): number => Math.floor((data.length * 3) / 4);
+
+/**
+ * Pulls the top-level `images` / `documents` out of a tool result (the shape
+ * `mediaOf` in exec/gateway.ts reads) so the viewer can draw them instead of
+ * dumping base64. Anything that does not match is left in place, so a body
+ * without media comes back as the same object.
+ */
+export function extractMedia(value: unknown): ExtractedMedia {
+  const none: ExtractedMedia = { rest: value, images: [], documents: [] };
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return none;
+  const record = value as Record<string, unknown>;
+  const images: MediaImage[] = [];
+  const documents: MediaDocument[] = [];
+  const rest: Record<string, unknown> = { ...record };
+
+  if (Array.isArray(record.images)) {
+    rest.images = record.images.map((item) => {
+      if (typeof item !== 'object' || item === null) return item;
+      const { base64, mediaType, ...others } = item as Record<string, unknown>;
+      if (typeof base64 !== 'string') return item;
+      const type = typeof mediaType === 'string' && mediaType.startsWith('image/') ? mediaType : 'image/png';
+      images.push({ src: `data:${type};base64,${base64}`, mediaType: type, bytes: base64Bytes(base64) });
+      return { ...others, mediaType: type, bytes: base64Bytes(base64) };
+    });
+  }
+  if (Array.isArray(record.documents)) {
+    rest.documents = record.documents.map((item) => {
+      if (typeof item !== 'object' || item === null) return item;
+      const { base64, ...others } = item as Record<string, unknown>;
+      if (typeof base64 !== 'string') return item;
+      documents.push({ href: `data:application/pdf;base64,${base64}`, bytes: base64Bytes(base64) });
+      return { ...others, mediaType: 'application/pdf', bytes: base64Bytes(base64) };
+    });
+  }
+  if (images.length === 0 && documents.length === 0) return none;
+  return { rest, images, documents };
+}
