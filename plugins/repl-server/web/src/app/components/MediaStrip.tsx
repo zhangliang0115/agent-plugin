@@ -5,9 +5,11 @@
  * base64 in a loaded old body) and the protocol-frame column. Images share one
  * preview group, so a click opens a large view that pages through all of them.
  */
-import { Image, Space } from 'antd';
+import { Image, Space, Typography } from 'antd';
 
 import { formatBytes, type MediaSet } from '../../lib/payload-view.ts';
+
+const { Text } = Typography;
 
 export function MediaStrip({ media }: { media: MediaSet }): React.ReactElement | null {
   if (media.images.length === 0 && media.documents.length === 0) return null;
@@ -15,13 +17,28 @@ export function MediaStrip({ media }: { media: MediaSet }): React.ReactElement |
     <Space size={8} wrap style={{ margin: '6px 0' }}>
       <Image.PreviewGroup>
         {media.images.map((image, index) => (
-          <Image
-            key={`i${String(index)}`}
-            src={image.src}
-            alt={`图片 ${String(index + 1)}`}
-            title={`${image.mediaType} · ${formatBytes(image.bytes)}`}
-            style={{ maxHeight: 180, maxWidth: 320, border: '1px solid var(--border)', borderRadius: 4 }}
-          />
+          <div key={`i${String(index)}`} style={{ display: 'inline-block', verticalAlign: 'top' }}>
+            <Image
+              src={image.src}
+              alt={`图片 ${String(index + 1)}`}
+              // A tiny image would otherwise render as an unnoticeable dot; pixelated keeps upscaled pixels crisp.
+              style={{
+                minWidth: 64,
+                minHeight: 64,
+                maxHeight: 180,
+                maxWidth: 320,
+                objectFit: 'contain',
+                imageRendering: 'pixelated',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+              }}
+            />
+            <div>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {`图片 ${String(index + 1)} · ${image.mediaType} · ${formatBytes(image.bytes)}`}
+              </Text>
+            </div>
+          </div>
         ))}
       </Image.PreviewGroup>
       {media.documents.map((doc, index) => {

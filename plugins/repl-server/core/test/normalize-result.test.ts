@@ -151,3 +151,25 @@ test('MCP success keeps text and media in separate fields', () => {
     },
   );
 });
+
+test('Bash stdout of exactly 30000 chars adds error and keeps the original fields', () => {
+  const stdout = 'a'.repeat(30000);
+  const result = normalizeOfficialResult('Bash', {
+    content: [
+      { type: 'text', text: JSON.stringify({ stdout, stderr: 'w', exitCode: 0 }) },
+      { type: 'image', data: 'aW1n', mimeType: 'image/png' },
+    ],
+  }) as Record<string, unknown>;
+  assert.match(String(result.error), /30000/);
+  assert.equal(result.stdout, stdout);
+  assert.equal(result.stderr, 'w');
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.images, [{ base64: 'aW1n', mediaType: 'image/png' }]);
+});
+
+test('Bash stdout under 30000 chars and non-Bash tools are unchanged', () => {
+  const short = { stdout: 'a'.repeat(29999), stderr: '', exitCode: 0 };
+  assert.deepEqual(normalizeOfficialResult('Bash', textResult(JSON.stringify(short))), short);
+  const long = { stdout: 'a'.repeat(30000) };
+  assert.deepEqual(normalizeOfficialResult('Grep', textResult(JSON.stringify(long))), long);
+});

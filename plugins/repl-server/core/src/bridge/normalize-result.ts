@@ -159,6 +159,20 @@ export function normalizeEditResult(value: unknown): EditToolResult | undefined 
   };
 }
 
+// shortcut: heuristic on an upstream implementation detail; a real output of exactly this length is a false positive. Switch to the upstream truncation marker once serve exposes one.
+const BASH_STDOUT_LIMIT = 30000;
+
+/** Adds `error` when Bash stdout hits the upstream cap, keeping every original field. */
+function flagTruncatedBash(value: unknown): unknown {
+  if (!isRecord(value) || typeof value.stdout !== 'string' || value.stdout.length !== BASH_STDOUT_LIMIT) {
+    return value;
+  }
+  return {
+    error: `Bash stdout reached ${BASH_STDOUT_LIMIT} characters; the upstream tool has most likely truncated it. Filter in the command (grep, head, sed -n) or read the output in segments.`,
+    ...value,
+  };
+}
+
 /**
  * Normalizes one official serve result. Failures resolve `{ error }`; success is
  * the parsed inner JSON (Read and Edit get their dedicated shape) or the raw
@@ -178,6 +192,8 @@ export function normalizeOfficialResult(tool: string, result: ServeToolResult): 
   } else if (parsed.ok && tool === 'Edit') {
     const edit = normalizeEditResult(parsed.value);
     if (edit !== undefined) value = edit;
+  } else if (parsed.ok && tool === 'Bash') {
+    value = flagTruncatedBash(parsed.value);
   }
   return attachMedia(value, content);
 }

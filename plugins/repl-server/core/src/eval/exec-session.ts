@@ -23,6 +23,9 @@ import { ReplError, StaleEvalError } from '../errors.ts';
 import type { TimeoutInfo, TimeoutLayer, ToolCallRequest, TruncationFlags } from '../types.ts';
 import { hardStop, type HardStopReport } from './stop.ts';
 
+const STATE_TOO_LARGE_ERROR =
+  'state exceeds 1 MiB and could not be saved; shrink state and retry. Tool calls made by this eval already took effect.';
+
 /** Terminal classification of one eval, aligned with `eval_end.outcome`. */
 export type EvalOutcome = 'ok' | 'error' | 'timeout' | 'cancelled' | 'worker_dead';
 
@@ -456,12 +459,16 @@ export class ExecSession {
     if (this.inFlight > 0) this.inFlight -= 1;
     this.lastEvalAtValue = this.nowFn();
 
+    // An unsaved state would be silently replaced by the stale lastGood snapshot on the
+    // next worker restart, so a successful eval whose snapshot was skipped fails loudly.
+    const stateLost = fields.ok && fields.stateSnapshot === 'too-large';
+    const ok = fields.ok && !stateLost;
     const settlement: EvalSettlement = {
       evalId: ev.evalId,
       epoch: ev.epoch,
       async: ev.async,
-      ok: fields.ok,
-      outcome: fields.outcome ?? (fields.ok ? 'ok' : 'error'),
+      ok,
+      outcome: fields.outcome ?? (ok ? 'ok' : 'error'),
       stdout: fields.stdout ?? '',
       stderr: fields.stderr ?? '',
       ms: fields.ms ?? Math.max(0, this.nowFn() - ev.startedAt),
@@ -471,7 +478,8 @@ export class ExecSession {
       budget: { calls: ev.calls },
     };
     if (fields.result !== undefined) settlement.result = fields.result;
-    if (fields.error !== undefined) settlement.error = fields.error;
+    if (stateLost) settlement.error = STATE_TOO_LARGE_ERROR;
+    else if (fields.error !== undefined) settlement.error = fields.error;
     if (fields.stack !== undefined) settlement.stack = fields.stack;
     if (fields.stateSnapshot !== undefined) settlement.stateSnapshot = fields.stateSnapshot;
     if (fields.stoppedBy !== undefined) settlement.stoppedBy = fields.stoppedBy;

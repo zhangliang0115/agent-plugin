@@ -238,3 +238,24 @@ test('the async dispatch receipt carries the real evalId', async (t) => {
   assert.equal(events.get(first.taskId)?.evalId, first.evalId);
   assert.equal(events.get(second.taskId)?.evalId, second.evalId);
 });
+
+const BIG_STATE = 'state.blob = "x".repeat(2 * 1024 * 1024); return "done";';
+
+test('sync run fails when state exceeds 1 MiB, normal state still succeeds', async (t) => {
+  const gateway = createGateway(t);
+  const big = await gateway.runScript(request(BIG_STATE, { async: false }));
+  assert.equal(big.isError, true);
+  assert.match(big.content, /<error>[^<]*state[^<]*1 MiB/);
+
+  // The oversized state stays live in that worker, so the control uses a fresh gateway.
+  const ok = await createGateway(t).runScript(request('state.n = 1; return "ok";', { async: false }));
+  assert.equal(ok.isError, false);
+});
+
+test('async task fails when state exceeds 1 MiB', async (t) => {
+  const gateway = createGateway(t);
+  const dispatched = await gateway.dispatchScript(request(BIG_STATE));
+  const waited = (await gateway.waitTasks(IDENTITY.mcp, [dispatched.taskId], 10_000)) as WaitResult;
+  assert.equal(waited.events[0]?.status, 'failed');
+  assert.match(waited.events[0]?.result ?? '', /<error>[^<]*state[^<]*1 MiB/);
+});

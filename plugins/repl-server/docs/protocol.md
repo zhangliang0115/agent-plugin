@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.7.1" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.8.0" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"
@@ -475,6 +475,8 @@ server 通过 MCP Skills 扩展（`io.modelcontextprotocol/skills`）发布自�
 - `truncated="1"`：服务端在返回前按 L5 上限截断字段/日志/媒体后置位。截断必须在 server 内先做——客户端再截断会让模型看到断裂的 JSON 片段（01 §8.1）；媒体超限的数量另由 `imagesOmitted` / `documentsOmitted` 体现
 - 文本中的 `&`、`<`、`>` 转义
 - 失败时出现 `<error>`；`<log>` 含 stdout 与 stderr
+- `state` 序列化后超过 1 MiB 时无法保存，本次执行按失败返回（同步 `isError: true`，异步任务 `failed`），`<error>` 提示缩小 `state`；本次已发生的工具调用不回滚
+- 内置工具 `Bash` 的 `stdout` 恰为 30000 字符时，上游很可能已静默截断，返回对象在原字段外多一个 `error`（启发式，可能误报）
 
 ## 8. 错误码
 
