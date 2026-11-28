@@ -74,7 +74,7 @@ repl-server --host 0.0.0.0 \
 curl -s http://127.0.0.1:8787/health
 ```
 
-预期：`{"ok":true,"version":"0.7.0"}`
+预期：`{"ok":true,"version":"0.7.1"}`
 
 （未实测）
 
