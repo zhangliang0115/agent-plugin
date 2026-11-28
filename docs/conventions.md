@@ -56,7 +56,7 @@ server 类插件的 `dist` 不随宿主插件市场分发，发布成 GitHub Rel
 
 - 资产：`repl-server-<版本>.tar.gz`（内容是 `server/dist`，解压得到 `dist/`），同目录上传同名 `.sha256`。
 - tag：`v<版本>`，等于 `plugins/<id>/server/package.json` 的 `version`。
-- 发布：在 `plugins/<id>/server/` 执行 `pnpm build && pnpm release`。只 build 不 release，版本存在但没有产物。
+- 发布：先 `pnpm -C ../web build`（web 构建会把产物复制进 `server/dist/web`，`server` 的 `pnpm build` 不含这一步），再在 `plugins/<id>/server/` 执行 `pnpm build && pnpm release`。只 build 不 release，版本存在但没有产物。`release.mjs` 会在打包前比较产物与源码的修改时间，产物更旧就拒绝发布并提示该跑哪条构建。
 - **插件版本与 server 版本是同一个数**：插件从自己的 `plugin.json` 读版本拼 release URL，两边不齐就会下载 404。
 - 顺序：**先发布资产，再发插件版本**。反过来做，新安装的用户会拿到尚未存在的 tag。
 - 因此改 server 行为要同时动两处版本，并写进本仓库与插件仓库的 CHANGELOG。

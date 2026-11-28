@@ -6,13 +6,34 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const serverDir = fileURLToPath(new URL('..', import.meta.url));
 const { version } = JSON.parse(readFileSync(join(serverDir, 'package.json'), 'utf8'));
+
+/** Newest mtime of any file below `dir` (node_modules and dist excluded). */
+const newestMtime = (dir) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && !/node_modules|[/\\]dist[/\\]/.test(join(entry.parentPath, entry.name)))
+    .reduce((max, entry) => Math.max(max, statSync(join(entry.parentPath, entry.name)).mtimeMs), 0);
+
+// A bundle older than its sources is how 0.7.0 shipped the 0.6.0 web UI: the
+// server build does not rebuild web, so check each bundle against its inputs.
+const stale = [
+  ['dist/index.js', ['src', '../core/src'], 'pnpm build'],
+  ['dist/web/main.js', ['../web/src'], 'pnpm -C ../web build（先于 pnpm build）'],
+].filter(([bundle, sources]) => {
+  const built = statSync(join(serverDir, bundle)).mtimeMs;
+  return sources.some((source) => newestMtime(join(serverDir, source)) > built);
+});
+if (stale.length > 0) {
+  for (const [bundle, , fix] of stale) console.error(`${bundle} 比源码旧，先执行：${fix}`);
+  process.exit(1);
+}
+
 const tag = `v${version}`;
 const asset = `repl-server-${version}.tar.gz`;
 const work = mkdtempSync(join(tmpdir(), 'repl-server-release-'));
