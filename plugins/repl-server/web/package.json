@@ -1,6 +1,6 @@
 {
   "name": "@zhangliang0115/repl-server-web",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Admin UI for repl-server; built assets are served by the server package.",

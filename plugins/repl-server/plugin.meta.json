@@ -1,6 +1,6 @@
 {
   "id": "repl-server",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "把 Claude Code 内置工具与第三方 MCP 变成脚本可调用的 MCP server，带 Web 管理端",
   "hosts": {}
 }

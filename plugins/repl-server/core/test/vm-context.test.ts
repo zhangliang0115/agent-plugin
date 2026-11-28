@@ -161,3 +161,21 @@ test('timers are available for delays and can be cleared', async () => {
   );
   assert.equal(interrupted, true);
 });
+
+test('pure data globals are available; I/O globals are not', async () => {
+  const { context } = createVmContext({ tools: {}, console: {} });
+  const result = await runEvalScript(
+    context,
+    `return [
+      new URL('https://a.b/c?d=1').searchParams.get('d'),
+      new URLSearchParams({ x: '1' }).toString(),
+      new TextDecoder().decode(new TextEncoder().encode('hi')),
+      structuredClone({ n: 1 }).n,
+      atob(btoa('ok')),
+      typeof fetch, typeof Buffer,
+    ].join(',');`,
+    1,
+    SYNC_MS,
+  );
+  assert.equal(result, '1,x=1,hi,1,ok,undefined,undefined');
+});

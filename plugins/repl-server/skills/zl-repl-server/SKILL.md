@@ -33,9 +33,11 @@ repl-server 是一个 MCP server：模型在持久 JavaScript 沙箱里调用本
 ## 脚本内：调用与结果
 
 ```js
+const { Read, mcp } = tools;          // 解构后少写一级 tools.
+const github = mcp.github;            // server id 带连字符时用 mcp['gitlab-engine']
 const [a, b] = await Promise.all([
-  tools.Read({ file_path: '/tmp/a.txt' }),                 // 内置工具：裸名
-  tools.mcp.github.search_repositories({ query: 'mcp' }),  // MCP：tools.mcp.<server>.<tool>
+  Read({ file_path: '/tmp/a.txt' }),                 // 内置工具：裸名
+  github.search_repositories({ query: 'mcp' }),      // MCP：mcp.<server>.<tool>
 ]);
 if (a.error) throw new Error(a.error);
 const data = JSON.parse(b.text);
@@ -43,6 +45,7 @@ return { count: data.total_count };
 ```
 
 - 每次调用 `code` 与 `scriptName` 恰好给一个。`args` / `scriptVersion` / `activateOnSuccess` 只在脚本模式（给 `scriptName`）合法。
+- 沙箱全局只有 `tools`、`console`、`state`、定时器，以及 `URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`structuredClone`、`atob`、`btoa`。没有 `fetch`、`Buffer`、`process`、`require`。`console` 同样可解构：`const { log } = console`。
 - 所有工具都是 async，可以顶层 `await`；独立调用用 `Promise.all` 并行，有依赖再串行。
 - 内置工具的 JSON 自动解析；MCP 工具返回 `{ text, images?, documents? }`，`text` 是原始文本，通常是 JSON，需要 `JSON.parse(result.text)`，解析前先判断它是不是字符串和 JSON。
 - 失败语义不同：内置工具失败**返回** `{ error }`，要显式检查；MCP 工具失败会 **throw**，用 try/catch 包住。`exitCode` 这类字段也要显式看，不能只看有没有异常。

@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.5.0（2026-11-28）
+### 新增
+- 脚本沙箱新增 7 个纯数据全局：`URL`、`URLSearchParams`、`TextEncoder`、`TextDecoder`、`structuredClone`、`atob`、`btoa`，取自宿主 realm。`fetch`、`Buffer`、`process` 仍不提供，所有副作用继续走 `tools`。注意这些类来自宿主，与宿主返回的同名类对象做 `instanceof` 可能不一致。
+### 变更
+- skill 调用示例改为 `const { Read, mcp } = tools` 解构写法，并列出沙箱全局清单；server id 带连字符时用 `mcp['gitlab-engine']`。
+
 ## 0.4.1（2026-11-27）
 ### 修复
 - 服务端编辑抽屉加宽到 820px，env/header 键值行重排列宽（键名 260px 起），长键名不再被截断；三个控件统一为默认高度，修复「密钥引用」下拉与输入框上下不对齐。

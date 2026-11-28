@@ -41,6 +41,16 @@ export function createVmContext(options: VmContextOptions): VmContext {
     clearTimeout,
     setInterval,
     clearInterval,
+    // Pure data helpers with no I/O; fetch/Buffer/process stay out so every
+    // side effect still goes through `tools`. shortcut: host-realm classes, so
+    // `instanceof` against host objects can differ, only matters if a tool returns them.
+    URL,
+    URLSearchParams,
+    TextEncoder,
+    TextDecoder,
+    structuredClone,
+    atob,
+    btoa,
     queueMicrotask,
   };
 
