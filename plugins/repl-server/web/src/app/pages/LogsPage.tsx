@@ -31,7 +31,7 @@ import { PageHeader, stateLabel } from '../components/common.tsx';
 import { JsonView } from '../components/JsonView.tsx';
 import { PayloadViewer } from '../components/PayloadViewer.tsx';
 import { ScriptInfoCard } from '../components/ScriptInfoCard.tsx';
-import { payloadView } from '../../lib/payload-view.ts';
+import { payloadView, rowMedia } from '../../lib/payload-view.ts';
 import { scriptInfoFromEvent } from '../../lib/script-info.ts';
 import { ApiError, type EventStream, type StreamState } from '../../lib/api.ts';
 import {
@@ -1245,7 +1245,7 @@ function EventIO({ event }: { event: AuditEvent }): React.ReactElement | null {
           )}
         </Descriptions>
         <div style={{ marginTop: 8 }}>
-          <PayloadViewer label="返回内容" view={payloadView(event, 'result')} />
+          <PayloadViewer label="返回内容" view={payloadView(event, 'result')} media={rowMedia(event)} />
         </div>
       </Card>
     );

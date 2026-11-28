@@ -126,3 +126,45 @@ test('extractMedia returns the same object when the body has no media', async ()
   assert.equal(extractMedia(body).rest, body);
   assert.equal(extractMedia('plain').rest, 'plain');
 });
+
+const SHA = 'a'.repeat(64);
+
+test('mediaDate takes the UTC day straight from the ISO ts', async () => {
+  const { mediaDate } = await import('../src/lib/payload-view.ts');
+  // 23:30 UTC is already the next day in UTC+8; the server files it under the UTC day.
+  assert.equal(mediaDate('2026-11-18T23:30:00.000Z'), '2026-11-18');
+  assert.equal(mediaDate('2026-11-18'), null);
+  assert.equal(mediaDate(undefined), null);
+  assert.equal(mediaDate(123), null);
+});
+
+test('mediaUrl builds the /logs/media query', async () => {
+  const { mediaUrl } = await import('../src/lib/payload-view.ts');
+  assert.equal(mediaUrl(SHA, '2026-11-18'), `/admin/api/logs/media?sha=${SHA}&date=2026-11-18`);
+});
+
+test('rowMedia maps row media to image thumbnails and download links', async () => {
+  const { rowMedia, hasMedia } = await import('../src/lib/payload-view.ts');
+  const media = rowMedia({
+    ts: '2026-11-18T06:00:00.000Z',
+    media: [
+      { sha256: SHA, mediaType: 'image/png', bytes: 10 },
+      { sha256: 'b'.repeat(64), mediaType: 'application/pdf', bytes: 20 },
+      { sha256: 'c'.repeat(64), mediaType: 'audio/wav', bytes: 30 },
+      { sha256: '../etc/passwd', mediaType: 'image/png', bytes: 1 },
+      'junk',
+    ],
+  });
+  assert.equal(media.images.length, 1);
+  assert.equal(media.images[0]?.src, `/admin/api/logs/media?sha=${SHA}&date=2026-11-18`);
+  assert.equal(media.documents.length, 2);
+  assert.equal(media.documents[0]?.mediaType, undefined, 'a PDF carries no extra label');
+  assert.equal(media.documents[1]?.mediaType, 'audio/wav');
+  assert.equal(hasMedia(media), true);
+});
+
+test('rowMedia is empty without a media field or a usable ts', async () => {
+  const { rowMedia, hasMedia } = await import('../src/lib/payload-view.ts');
+  assert.equal(hasMedia(rowMedia({ ts: '2026-11-18T06:00:00.000Z' })), false);
+  assert.equal(hasMedia(rowMedia({ media: [{ sha256: SHA, mediaType: 'image/png', bytes: 1 }] })), false);
+});

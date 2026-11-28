@@ -157,7 +157,7 @@ export class PayloadStore {
     this.logRoot = logRoot;
   }
 
-  async write(ref: string, text: string): Promise<void> {
+  async write(ref: string, text: string | Uint8Array): Promise<void> {
     const target = resolveLogRef(this.logRoot, ref);
     if (target === null) throw new RangeError(`invalid payload ref: ${JSON.stringify(ref)}`);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
@@ -165,7 +165,7 @@ export class PayloadStore {
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       handle = await open(tmp, 'wx', 0o600);
-      await handle.writeFile(text, 'utf8');
+      await handle.writeFile(text, typeof text === 'string' ? 'utf8' : undefined);
       await handle.sync();
       await handle.close();
       handle = undefined;

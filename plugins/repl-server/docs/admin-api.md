@@ -73,6 +73,7 @@ Admin 走 `/admin/*`：同源 Cookie 或 Bearer `<admin-token>`，校验 Origin 
 | GET | `/logs/sessions` | 执行会话列表 | 同步 |
 | GET | `/logs/frames` | 协议帧对（请求 + 响应） | 同步 |
 | GET | `/logs/payload` | 按行上的 `*Ref` 读载荷正文 | 同步，单次最多 8 MiB |
+| GET | `/logs/media` | 按 sha256 + 日期读事件行引用的图片/PDF 原始字节 | 同步，响应带 `immutable` 缓存 |
 | GET | `/logs/stats` | 聚合统计 | 同步，结果缓存 10s，后台 worker 扫描 |
 | GET | `/logs/stream` | 审计实时追加（SSE），支持 `Last-Event-ID` 回放 | 长连接 |
 | GET | `/logs/export` | 导出筛选结果（JSONL） | 同步 |
@@ -289,6 +290,8 @@ data: {"id":"op_...","state":"ok"}
 - `/logs/sessions`：按最近活动排序。
 - `/logs/frames?mcp=&id=`：请求与响应配对返回，额外支持 `tool` / `protocol` / `result` 多值筛选。
 - `/logs/payload?ref=&mode=&offset=&limit=`：入参是行上的 `argsRef`/`resultRef`/`paramsRef`/`resultTailRef` 等字段值，`mode` 取 `full|head|tail|range`；返回 `{ ref, mode, total, start, end, truncated, body }`，`body` 是 UTF-8 文本。缺参 400，越界或缺失 404（`PAYLOAD_NOT_FOUND`）。`ref` 只允许落在 `log/` 之内。
+- `/logs/media?sha=&date=`：`sha` 是 `media[].sha256`（64 位小写 hex，解码后字节的哈希），`date` 是事件 `ts` 的 UTC 日期（`YYYY-MM-DD`，即 `ts.slice(0, 10)`，不要转本地时区）。返回二进制本体，`Content-Type` 按存储扩展名给出（jpg/png/gif/webp/pdf，其余 `application/octet-stream`），带 `Cache-Control: private, max-age=86400, immutable` 与 `X-Content-Type-Options: nosniff`。`sha`、`date` 格式不合法 400（`INVALID_ARGUMENT`，不会进文件系统），文件不存在 404（`MEDIA_NOT_FOUND`）。鉴权与 `/logs/payload` 相同，只读。
+- 事件行的 `media` 字段：`tool_result` 行和协议帧行（`proto_in`/`proto_out`）在携带图片/PDF 时多一个 `media: [{ sha256, mediaType, bytes }]`，没有媒体就不带该字段。`tool_result` 取自结果顶层的 `images`/`documents`（文档按 `application/pdf` 记）；协议帧取自脱敏时被替换的 base64 块（帧里仍是 `{mimeType, bytes, sha256}`，格式不变）。字节存在 `log/payload/<日期>/media/<sha256>.<ext>`，按 sha256 去重，不受 4 KiB 内联阈值和 5 MB 渲染上限影响，随 `payload/<日期>` 目录被按天保留一并清理。媒体写失败只会让该条不出现在 `media` 里，行本身照常写入。
 - 载荷阈值（读接口的可见行为）：≤ 4 KiB 内联；更大外置，行上留 2 KiB 预览 + `sha256` + 字节数；单条 > 50 MiB 只留首尾各 1 MiB；`log/` 保留 90 天 / 2 GiB。阈值由 `core/src/audit/payload.ts` 与 `server/src/audit/retention.ts` 拥有，`doc-facts` 会比对这段文字。响应体外置后，帧行上仍保留布尔字段 `resultIsError`，列表与 `result` 筛选据此判定执行结果。
 - `/logs/stats?from=&to=&groupBy=`：工具调用量（仅 `tool_result`）、错误率、p50/p95、排队均值；响应另带 `retention`（上次清理时间、删除天数/文件数、当前 `log/` 体积）。`p50`/`p95` 是**执行时长**（`ms - queueMs`），`queueAvgMs` 单列排队，所以一个堵在闸门上的调用不会把工具本身算成慢。
 - `/logs/stream`：SSE，新增事件实时推送。

@@ -3,7 +3,7 @@ import { Alert, Empty, Spin, Tag, Typography } from 'antd';
 import { useMemo, useState } from 'react';
 
 import { formatBytes, formatDurationFine, formatPercent } from '../../lib/format.ts';
-import { payloadView } from '../../lib/payload-view.ts';
+import { payloadView, rowMedia } from '../../lib/payload-view.ts';
 import {
   buildRequestProcess,
   type ProcessComposition,
@@ -347,7 +347,7 @@ function StepCard({ detail }: { detail: ProcessToolDetail }): React.ReactElement
               </div>
             </>
           ) : (
-            <PayloadViewer label="输出" view={output} maxHeight={200} />
+            <PayloadViewer label="输出" view={output} maxHeight={200} media={rowMedia(detail.result)} />
           )}
         </div>
       </div>

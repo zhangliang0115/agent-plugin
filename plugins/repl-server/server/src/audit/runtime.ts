@@ -18,6 +18,7 @@ import type { LogFn } from '../log.ts';
 
 import {
   AuditWriter,
+  MediaStore,
   PAYLOAD_WRITE_CONCURRENCY,
   PAYLOAD_WRITE_TIMEOUT_MS,
   PayloadStore,
@@ -25,6 +26,8 @@ import {
   planPayload,
   previewOf,
   toolPayloadRef,
+  type MediaInput,
+  type MediaRef,
 } from '@zhangliang0115/repl-server-core';
 
 import {
@@ -173,6 +176,32 @@ async function toAdminResponse(result: AuditEndpointResult): Promise<AdminRespon
   return { status: result.status, headers: result.headers, body: result.body };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Decodes the top-level `images` / `documents` of a tool result (the shape
+ * `mediaOf` in exec/gateway.ts reads). Documents carry no type; they are PDFs.
+ */
+function toolResultMedia(result: unknown): MediaInput[] {
+  if (!isRecord(result)) return [];
+  const out: MediaInput[] = [];
+  const collect = (items: unknown, fallbackType: string | null): void => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      if (!isRecord(item) || typeof item['base64'] !== 'string') continue;
+      const buffer = Buffer.from(item['base64'], 'base64');
+      if (buffer.length === 0) continue;
+      const type = item['mediaType'];
+      out.push({ buffer, mimeType: typeof type === 'string' && type !== '' ? type : fallbackType });
+    }
+  };
+  collect(result['images'], null);
+  collect(result['documents'], 'application/pdf');
+  return out;
+}
+
 /** Builds the audit runtime. The writer directory is created eagerly. */
 export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
   const clock = options.clock ?? systemClock;
@@ -189,6 +218,7 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
     maxTotalBytes: options.maxTotalBytes ?? LOG_MAX_TOTAL_BYTES,
   });
   const payloadStore = new PayloadStore(options.payloadDir ?? options.dir);
+  const mediaStore = new MediaStore(payloadStore);
   const payloadMode = options.payload ?? 'full';
   let payloadWritten = 0;
   let payloadDropped = 0;
@@ -201,12 +231,13 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
   let closed = false;
   let closePromise: Promise<void> | null = null;
   let writeFailureLogged = false;
+  let mediaFailureLogged = false;
 
   // Frames share the events writer, so redaction and flush/close semantics
   // cannot drift between the two.
   const sink: FrameSink = {
-    write(event) {
-      recordFrame(event);
+    write(event, media) {
+      recordFrame(event, media);
     },
   };
 
@@ -276,16 +307,17 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
    * (`09 §四`). Frames and tools share the one FIFO, so the file still reads in
    * arrival order.
    */
-  function recordFrame(event: AuditEvent): void {
+  function recordFrame(event: AuditEvent, media: readonly MediaInput[] = []): void {
     if (closed) return;
     if (!valid(event)) {
       accept(event);
       return;
     }
     const prepared: PreparedEvent =
-      payloadMode === 'off' ? { index: { ...event }, blobs: [] } : prepareFrameEvent(event);
+      payloadMode === 'off' ? { index: { ...event }, blobs: [], media: [] } : prepareFrameEvent(event, media);
     enqueue(async () => {
       await writeBlobs(prepared.blobs, prepared.index);
+      await writeMedia(prepared.media, prepared.index);
       if (accept(prepared.index)) notify(prepared.index);
     });
   }
@@ -300,6 +332,8 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
   interface PreparedEvent {
     index: AuditEvent;
     blobs: PreparedBlob[];
+    /** Decoded images/PDFs; stored by hash, then listed on the row as `media`. */
+    media: readonly MediaInput[];
   }
 
   class PayloadTimeout extends Error {
@@ -309,10 +343,10 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
     }
   }
 
-  async function withPayloadTimeout(write: Promise<void>): Promise<void> {
+  async function withPayloadTimeout<T>(write: Promise<T>): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     try {
-      await Promise.race([
+      return await Promise.race([
         write,
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new PayloadTimeout()), PAYLOAD_WRITE_TIMEOUT_MS);
@@ -410,6 +444,8 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
 
   /** Splits a tool row into an index row plus the blobs it points at. */
   function prepareToolEvent(event: AuditEvent): PreparedEvent {
+    // Taken before `applyPlan` drops `result` from the row.
+    const media = event.event === 'tool_result' ? toolResultMedia(event['result']) : [];
     const index: AuditEvent = { ...event };
     const blobs: PreparedBlob[] = [];
     const date = utcDateOf(index);
@@ -423,7 +459,7 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
     if (index['args'] !== undefined) applyPlan(index, 'args', TOOL_KEYS.args, refOf('call'), blobs);
     if (index['result'] !== undefined) applyPlan(index, 'result', TOOL_KEYS.result, refOf('result'), blobs);
     if (index['error'] !== undefined) addErrorPreview(index);
-    return { index, blobs };
+    return { index, blobs, media };
   }
 
   /**
@@ -433,7 +469,7 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
    */
   let frameSeq = 0;
 
-  function prepareFrameEvent(event: AuditEvent): PreparedEvent {
+  function prepareFrameEvent(event: AuditEvent, media: readonly MediaInput[]): PreparedEvent {
     const index: AuditEvent = { ...event };
     const blobs: PreparedBlob[] = [];
 
@@ -461,7 +497,29 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
         framePayloadRef(date, ordinal, rpcId, phase, 'result', part), blobs);
     }
     if (index['error'] !== undefined) addErrorPreview(index);
-    return { index, blobs };
+    return { index, blobs, media };
+  }
+
+  /**
+   * Stores one row's media and lists what landed as `media`. A failed write
+   * only leaves that entry off the row; it never throws into the FIFO.
+   */
+  async function writeMedia(media: readonly MediaInput[], index: AuditEvent): Promise<void> {
+    if (media.length === 0) return;
+    const date = utcDateOf(index);
+    const stored: MediaRef[] = [];
+    for (const item of media) {
+      try {
+        const ref = await withPayloadTimeout(mediaStore.put(date, item.buffer, item.mimeType));
+        if (!stored.some((known) => known.sha256 === ref.sha256 && known.mediaType === ref.mediaType)) stored.push(ref);
+      } catch (error) {
+        if (!mediaFailureLogged) {
+          mediaFailureLogged = true;
+          log(`audit media write failed: ${error instanceof Error ? error.message : String(error)}`, { level: 'warn', scope: 'audit' });
+        }
+      }
+    }
+    if (stored.length > 0) index['media'] = stored;
   }
 
   /**
@@ -534,6 +592,11 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
         endpoints.payload({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
     ),
     handlerFor(
+      (segments) => matchesRoute(segments, ['logs', 'media']),
+      (request) =>
+        endpoints.media({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
+    ),
+    handlerFor(
       (segments) => matchesRoute(segments, ['logs', 'stats']),
       (request) =>
         endpoints.stats({ identity: ADMIN_IDENTITY, params: searchParamsOf(request) }),
@@ -555,9 +618,10 @@ export function createAuditRuntime(options: AuditRuntimeOptions): AuditRuntime {
         return;
       }
       const prepared: PreparedEvent =
-        payloadMode === 'off' ? { index: { ...event }, blobs: [] } : prepareToolEvent(event);
+        payloadMode === 'off' ? { index: { ...event }, blobs: [], media: [] } : prepareToolEvent(event);
       enqueue(async () => {
         await writeBlobs(prepared.blobs, prepared.index);
+        await writeMedia(prepared.media, prepared.index);
         if (accept(prepared.index)) notify(prepared.index);
       });
     },

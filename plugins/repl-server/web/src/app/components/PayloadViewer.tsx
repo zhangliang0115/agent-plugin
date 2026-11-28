@@ -15,61 +15,51 @@
  * highlighting (`VirtualText`) once it is long enough to matter.
  */
 import { Alert, Button, Input, Segmented, Space, Spin, Tag, Typography } from 'antd';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { JsonView } from './JsonView.tsx';
+import { MediaStrip } from './MediaStrip.tsx';
 import { VirtualText } from './VirtualText.tsx';
 import {
   downloadSlice,
   fetchPayloadSlice,
   extractMedia,
   formatBytes,
+  hasMedia,
   parseRaw,
   payloadSummary,
+  type MediaSet,
   type PayloadSlice,
   type PayloadView,
 } from '../../lib/payload-view.ts';
 import {
   matchLineIndices,
   RENDER_MAX_BYTES,
+  shouldAutoLoad,
   shouldRenderBody,
   textLines,
 } from '../../lib/text-view.ts';
 
 const { Text } = Typography;
 
-/** Images and PDFs found in a parsed body, drawn above the tree that no longer carries their base64. */
-function MediaStrip({ media }: { media: ReturnType<typeof extractMedia> }): React.ReactElement | null {
-  if (media.images.length === 0 && media.documents.length === 0) return null;
-  return (
-    <Space size={8} wrap style={{ margin: '6px 0' }}>
-      {media.images.map((image, index) => (
-        <a key={`i${String(index)}`} href={image.src} target="_blank" rel="noreferrer" title={`${image.mediaType} · ${formatBytes(image.bytes)}`}>
-          <img
-            src={image.src}
-            alt={`图片 ${String(index + 1)}`}
-            style={{ maxHeight: 180, maxWidth: 320, border: '1px solid var(--border)', borderRadius: 4 }}
-          />
-        </a>
-      ))}
-      {media.documents.map((doc, index) => (
-        <a key={`d${String(index)}`} href={doc.href} download={`document-${String(index + 1)}.pdf`}>
-          {`PDF ${String(index + 1)}（${formatBytes(doc.bytes)}）`}
-        </a>
-      ))}
-    </Space>
-  );
-}
-
 type RawMode = 'parsed' | 'raw';
 /** Above this many lines the raw pane switches to the windowed renderer. */
 const VIRTUAL_MIN_LINES = 300;
 
-function ParsedBody({ value, maxHeight }: { value: unknown; maxHeight: number | string }): React.ReactElement {
+function ParsedBody({
+  value,
+  maxHeight,
+  showMedia,
+}: {
+  value: unknown;
+  maxHeight: number | string;
+  /** False when the row's own `media` already drew the thumbnails. */
+  showMedia: boolean;
+}): React.ReactElement {
   const media = useMemo(() => extractMedia(value), [value]);
   return (
     <>
-      <MediaStrip media={media} />
+      {showMedia ? <MediaStrip media={media} /> : null}
       <JsonView value={media.rest} maxHeight={maxHeight} />
     </>
   );
@@ -79,11 +69,15 @@ export function PayloadViewer({
   label,
   view,
   maxHeight = 260,
+  media,
 }: {
   label: string;
   view: PayloadView;
   maxHeight?: number | string;
+  /** From the row's `media` field (`rowMedia`): shown at once, without loading the body. */
+  media?: MediaSet;
 }): React.ReactElement {
+  const rowHasMedia = media !== undefined && hasMedia(media);
   const [loaded, setLoaded] = useState<PayloadSlice | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,16 +112,27 @@ export function PayloadViewer({
     }
   };
 
+  // Bodies up to AUTO_LOAD_BYTES need no click; `truncated` ones keep the manual choice.
+  const autoLoad = view.ref !== null && view.dropped === null && !view.truncated && shouldAutoLoad(view.bytes);
+  useEffect(() => {
+    if (autoLoad) void load('full');
+    // Reload only when the viewer is pointed at another body.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.ref, autoLoad]);
+
   const header = (
-    <Space size={6} wrap>
-      <Text strong>{label}</Text>
-      <Tag>{payloadSummary(view)}</Tag>
-      {view.sha256 === null ? null : (
-        <Text type="secondary" className="mono" style={{ fontSize: 11 }}>
-          {view.sha256.slice(0, 12)}
-        </Text>
-      )}
-    </Space>
+    <>
+      <Space size={6} wrap>
+        <Text strong>{label}</Text>
+        <Tag>{payloadSummary(view)}</Tag>
+        {view.sha256 === null ? null : (
+          <Text type="secondary" className="mono" style={{ fontSize: 11 }}>
+            {view.sha256.slice(0, 12)}
+          </Text>
+        )}
+      </Space>
+      {rowHasMedia ? <MediaStrip media={media} /> : null}
+    </>
   );
 
   if (view.dropped !== null) {
@@ -271,7 +276,7 @@ export function PayloadViewer({
           }
         />
       ) : parsed !== null && parsed.ok ? (
-        <ParsedBody value={parsed.value} maxHeight={maxHeight} />
+        <ParsedBody value={parsed.value} maxHeight={maxHeight} showMedia={!rowHasMedia} />
       ) : (
         <>
           {parsed !== null && !parsed.ok && loaded !== null ? (

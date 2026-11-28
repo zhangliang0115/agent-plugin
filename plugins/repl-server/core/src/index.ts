@@ -29,6 +29,7 @@ export * from './process/residue.ts';
 export * from './process/serve-manager.ts';
 export * from './process/sweep.ts';
 export * from './audit/writer.ts';
+export * from './audit/media.ts';
 export * from './audit/payload.ts';
 export * from './audit/refs.ts';
 export * from './audit/redact.ts';

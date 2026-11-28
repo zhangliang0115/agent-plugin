@@ -136,3 +136,12 @@ test('bodies over the render cap are downloads, not DOM', () => {
   assert.equal(shouldRenderBody(RENDER_MAX_BYTES + 1), false);
   assert.equal(shouldRenderBody(null), true);
 });
+
+test('bodies up to 1 MiB load without a click, larger or unknown sizes wait', async () => {
+  const { AUTO_LOAD_BYTES, shouldAutoLoad } = await import('../src/lib/text-view.ts');
+  assert.equal(AUTO_LOAD_BYTES, 1024 * 1024);
+  assert.equal(shouldAutoLoad(5000), true);
+  assert.equal(shouldAutoLoad(AUTO_LOAD_BYTES), true);
+  assert.equal(shouldAutoLoad(AUTO_LOAD_BYTES + 1), false);
+  assert.equal(shouldAutoLoad(null), false);
+});

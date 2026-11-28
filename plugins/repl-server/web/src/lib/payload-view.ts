@@ -209,6 +209,14 @@ export interface MediaImage {
 export interface MediaDocument {
   href: string;
   bytes: number;
+  /** Set for files that are not PDFs (rows carry any `mediaType`); a PDF leaves it out. */
+  mediaType?: string;
+}
+
+/** Thumbnails and download links of one record, from either source. */
+export interface MediaSet {
+  images: MediaImage[];
+  documents: MediaDocument[];
 }
 
 export interface ExtractedMedia {
@@ -256,3 +264,41 @@ export function extractMedia(value: unknown): ExtractedMedia {
   if (images.length === 0 && documents.length === 0) return none;
   return { rest, images, documents };
 }
+
+/**
+ * UTC day of an event `ts`. The server files media under `payloadDay`, which is
+ * `ts.slice(0, 10)` of the same ISO string (audit/runtime.ts `utcDateOf`), so
+ * the browser must not convert to local time.
+ */
+export function mediaDate(ts: unknown): string | null {
+  return typeof ts === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(ts) ? ts.slice(0, 10) : null;
+}
+
+/** URL of `GET /admin/api/logs/media` for one stored file. */
+export function mediaUrl(sha256: string, date: string): string {
+  return `/admin/api/logs/media?${new URLSearchParams({ sha: sha256, date }).toString()}`;
+}
+
+/**
+ * Media listed on an event row (`media: [{ sha256, mediaType, bytes }]`),
+ * pointed at the media endpoint. Empty for rows without the field, and for rows
+ * whose `ts` gives no day; the caller then falls back to {@link extractMedia}.
+ */
+export function rowMedia(row: Record<string, unknown>): MediaSet {
+  const out: MediaSet = { images: [], documents: [] };
+  const date = mediaDate(row['ts']);
+  if (date === null || !Array.isArray(row['media'])) return out;
+  for (const item of row['media'] as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const { sha256, mediaType, bytes } = item as Record<string, unknown>;
+    if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) continue;
+    const type = typeof mediaType === 'string' ? mediaType : 'application/octet-stream';
+    const size = typeof bytes === 'number' && Number.isFinite(bytes) ? bytes : 0;
+    const url = mediaUrl(sha256, date);
+    if (type.startsWith('image/')) out.images.push({ src: url, mediaType: type, bytes: size });
+    else out.documents.push({ href: url, bytes: size, ...(type === 'application/pdf' ? {} : { mediaType: type }) });
+  }
+  return out;
+}
+
+export const hasMedia = (media: MediaSet): boolean => media.images.length > 0 || media.documents.length > 0;

@@ -16,7 +16,7 @@ import { ScriptInfoCard } from './ScriptInfoCard.tsx';
 import type { ApiClient } from '../../lib/api.ts';
 import { eventLabel, eventSubject } from '../../lib/audit-labels.ts';
 import { formatDuration, formatTimestamp } from '../../lib/format.ts';
-import { payloadView, type PayloadView } from '../../lib/payload-view.ts';
+import { payloadView, rowMedia, type PayloadView } from '../../lib/payload-view.ts';
 import {
   eventDedupeKey,
   eventWindow,
@@ -339,7 +339,7 @@ function EventPayloadDetail({ event }: { event: DetailAuditEvent }): React.React
   return (
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
       {sides.map((side) => (
-        <PayloadViewer key={side.label} label={side.label} view={side.view} maxHeight={220} />
+        <PayloadViewer key={side.label} label={side.label} view={side.view} maxHeight={220} media={rowMedia(event)} />
       ))}
     </Space>
   );

@@ -2,8 +2,9 @@
 import { Space, Tag, Typography } from 'antd';
 
 import { formatBytes, formatJson } from '../../lib/format.ts';
-import { payloadView, type PayloadView } from '../../lib/payload-view.ts';
+import { payloadView, rowMedia, type PayloadView } from '../../lib/payload-view.ts';
 import { JsonView } from './JsonView.tsx';
+import { MediaStrip } from './MediaStrip.tsx';
 import { PayloadViewer } from './PayloadViewer.tsx';
 
 const { Text } = Typography;
@@ -44,6 +45,7 @@ export function FrameColumn({
   // Rows written before the payload split carry a 64 KB head object; rows
   // written after it carry a ref. Both keep this column readable.
   const view = framePayloadView(event);
+  const media = rowMedia(event);
   if (view !== null && head === null) {
     return (
       <div style={{ minWidth: 0 }}>
@@ -59,6 +61,7 @@ export function FrameColumn({
             复制
           </Text>
         </div>
+        <MediaStrip media={media} />
         <PayloadViewer label="" view={view} maxHeight={maxHeight} />
       </div>
     );
@@ -77,6 +80,7 @@ export function FrameColumn({
           复制
         </Text>
       </div>
+      <MediaStrip media={media} />
       {eventTruncation === null && payloadTruncation === null ? null : (
         <Space size={4} wrap>
           {eventTruncation === null ? null : <Tag color="gold">{eventTruncation}</Tag>}

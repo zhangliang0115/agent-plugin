@@ -12,6 +12,7 @@
  * - `auditSessionsEndpoint`       GET /admin/api/logs/sessions
  * - `auditFramesEndpoint`         GET /admin/api/logs/frames
  * - `auditPayloadEndpoint`        GET /admin/api/logs/payload
+ * - `auditMediaEndpoint`          GET /admin/api/logs/media
  * - `auditStatsEndpoint`          GET /admin/api/logs/stats
  * - `auditExportEndpoint`         GET /admin/api/logs/export
  *
@@ -21,7 +22,14 @@
  * @module
  */
 
-import { PAYLOAD_RANGE_LIMIT, readPayload, type PayloadReadMode } from '@zhangliang0115/repl-server-core';
+import {
+  isMediaDate,
+  isMediaSha,
+  PAYLOAD_RANGE_LIMIT,
+  readMedia,
+  readPayload,
+  type PayloadReadMode,
+} from '@zhangliang0115/repl-server-core';
 
 import type { AuditEvent, Clock, RequestIdentity } from '../ports.ts';
 
@@ -102,6 +110,7 @@ export interface AuditEndpoints {
   sessions(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   frames(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   payload(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
+  media(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   stats(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
   export(request: AuditEndpointRequest): Promise<AuditEndpointResult>;
 }
@@ -496,6 +505,45 @@ export async function auditPayloadEndpoint(
   }
 }
 
+/**
+ * GET /admin/api/logs/media?sha=&date=
+ *
+ * Serves one decoded image/PDF stored by content hash. `sha` and `date` are
+ * validated before they reach the filesystem, so neither can carry a path.
+ * The body is a `Buffer`; the admin HTTP adapter sends it as-is.
+ */
+export async function auditMediaEndpoint(
+  options: AuditEndpointsOptions,
+  request: AuditEndpointRequest,
+): Promise<AuditEndpointResult> {
+  try {
+    const sha = param(request.params, 'sha');
+    const date = param(request.params, 'date');
+    if (sha === undefined || !isMediaSha(sha)) {
+      throw new InvalidAuditFilterError('sha must be 64 lowercase hex characters');
+    }
+    if (date === undefined || !isMediaDate(date)) {
+      throw new InvalidAuditFilterError('date must be YYYY-MM-DD');
+    }
+    const media = await readMedia(options.dir, date, sha);
+    if (media === null) {
+      return errorResult(404, 'MEDIA_NOT_FOUND', 'no media stored for this sha and date', { sha, date });
+    }
+    return {
+      status: 200,
+      headers: {
+        'content-type': media.contentType,
+        // Content-addressed: the bytes behind a sha never change.
+        'cache-control': 'private, max-age=86400, immutable',
+        'x-content-type-options': 'nosniff',
+      },
+      body: media.body,
+    };
+  } catch (error) {
+    return endpointError(error);
+  }
+}
+
 /** GET /admin/api/logs/stats?from=&to=&groupBy= */
 export async function auditStatsEndpoint(
   options: AuditEndpointsOptions,
@@ -574,6 +622,7 @@ export function createAuditEndpoints(options: AuditEndpointsOptions): AuditEndpo
     sessions: (request) => auditSessionsEndpoint(options, request),
     frames: (request) => auditFramesEndpoint(options, request),
     payload: (request) => auditPayloadEndpoint(options, request),
+    media: (request) => auditMediaEndpoint(options, request),
     stats: (request) => auditStatsEndpoint(options, request, statsService),
     export: (request) => auditExportEndpoint(options, request),
   };

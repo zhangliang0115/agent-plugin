@@ -10,6 +10,8 @@
 
 /** Bodies above this are downloaded, not rendered. */
 export const RENDER_MAX_BYTES = 5 * 1024 * 1024;
+/** Externalised bodies up to this size load on mount; larger ones wait for the button. */
+export const AUTO_LOAD_BYTES = 1024 * 1024;
 /** One rendered row per source line; must match the CSS line-height. */
 export const VIRTUAL_ROW_HEIGHT = 18;
 /** Rows kept above and below the viewport so fast scrolls stay smooth. */
@@ -225,6 +227,11 @@ export function diffFromArgs(tool: string | null, args: unknown): ToolDiff | nul
   }
 
   return null;
+}
+
+/** True when an externalised body of `bytes` should be fetched without a click. */
+export function shouldAutoLoad(bytes: number | null): boolean {
+  return bytes !== null && bytes <= AUTO_LOAD_BYTES;
 }
 
 /** True when a body of `bytes` may be rendered; oversized bodies are downloads. */

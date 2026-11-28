@@ -109,7 +109,7 @@ repl-server --host 0.0.0.0 --allowed-hosts '*.ts.net,127.0.0.1,localhost' \
     "resultType": "complete",
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "extensions": { "io.modelcontextprotocol/tasks": {}, "io.modelcontextprotocol/skills": {} } },
-    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.6.0" } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "repl-server", "version": "0.7.0" } },
     "instructions": "<静态短提示，见 §5>",
     "ttlMs": 3600000,
     "cacheScope": "public"

@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { AUDIT_SCHEMA_VERSION } from '@zhangliang0115/repl-server-core';
+import { AUDIT_SCHEMA_VERSION, type MediaInput } from '@zhangliang0115/repl-server-core';
 
 import { systemClock, type AuditEvent, type AuditSink, type Clock } from '../ports.ts';
 
@@ -46,7 +46,8 @@ const VALUE_SECRET: readonly RegExp[] = [
 
 /** Sink the recorder writes to. `AuditSink` is assignable to this. */
 export interface FrameSink {
-  write(event: AuditEvent): void | Promise<void>;
+  /** `media` holds the decoded blobs the redaction replaced; the sink stores them. */
+  write(event: AuditEvent, media?: readonly MediaInput[]): void | Promise<void>;
 }
 
 export interface ProtocolFrameRecorderOptions {
@@ -161,8 +162,11 @@ interface BlobReplacement {
   sha256: string;
 }
 
-function replaceBlob(data: string, mimeType: unknown): BlobReplacement {
+function replaceBlob(data: string, mimeType: unknown, media?: MediaInput[]): BlobReplacement {
   const buffer = Buffer.from(data, 'base64');
+  if (media !== undefined && buffer.byteLength > 0) {
+    media.push({ buffer, mimeType: typeof mimeType === 'string' && mimeType !== '' ? mimeType : null });
+  }
   return {
     mimeType: typeof mimeType === 'string' ? mimeType : null,
     bytes: buffer.byteLength,
@@ -180,46 +184,50 @@ function isBlobObject(value: Record<string, unknown>): boolean {
   );
 }
 
-function replaceBlobMembers(value: Record<string, unknown>, depth: number): Record<string, unknown> {
+function replaceBlobMembers(
+  value: Record<string, unknown>,
+  depth: number,
+  media?: MediaInput[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, member] of Object.entries(value)) {
     if (key === 'base64' && typeof member === 'string') {
-      out.base64 = replaceBlob(member, value.mediaType ?? value.mimeType);
+      out.base64 = replaceBlob(member, value.mediaType ?? value.mimeType, media);
     } else if (
       key === 'data' &&
       typeof member === 'string' &&
       typeof value.type === 'string' &&
       BLOB_TYPES.has(value.type)
     ) {
-      out.data = replaceBlob(member, value.mimeType ?? value.mediaType);
+      out.data = replaceBlob(member, value.mimeType ?? value.mediaType, media);
     } else if (
       key === 'blob' &&
       typeof member === 'string' &&
       (typeof value.mimeType === 'string' || typeof value.mediaType === 'string')
     ) {
-      out.blob = replaceBlob(member, value.mimeType ?? value.mediaType);
+      out.blob = replaceBlob(member, value.mimeType ?? value.mediaType, media);
     } else {
-      setOwn(out, key, transformValue(member, depth + 1));
+      setOwn(out, key, transformValue(member, depth + 1, media));
     }
   }
   return out;
 }
 
 /** Redacts keys and values, and rewrites base64 blobs to `{mimeType, bytes, sha256}`. */
-function transformValue(value: unknown, depth = 0): unknown {
+function transformValue(value: unknown, depth = 0, media?: MediaInput[]): unknown {
   if (depth > MAX_DEPTH) return '<depth-limit>';
   if (typeof value === 'string') {
     const dataUri = DATA_URI.exec(value);
     if (dataUri !== null && dataUri[2] !== undefined) {
-      return replaceBlob(dataUri[3] ?? '', dataUri[1]);
+      return replaceBlob(dataUri[3] ?? '', dataUri[1], media);
     }
     return redactText(value);
   }
   if (Array.isArray(value)) {
-    return value.map((member) => transformValue(member, depth + 1));
+    return value.map((member) => transformValue(member, depth + 1, media));
   }
   if (!isRecord(value)) return value;
-  if (isBlobObject(value)) return replaceBlobMembers(value, depth);
+  if (isBlobObject(value)) return replaceBlobMembers(value, depth, media);
   const out: Record<string, unknown> = {};
   for (const [key, member] of Object.entries(value)) {
     if (SECRET_KEY.test(key)) {
@@ -230,7 +238,7 @@ function transformValue(value: unknown, depth = 0): unknown {
       setOwn(out, key, stripUrlQuery(member));
       continue;
     }
-    setOwn(out, key, transformValue(member, depth + 1));
+    setOwn(out, key, transformValue(member, depth + 1, media));
   }
   return out;
 }
@@ -242,9 +250,12 @@ function transformValue(value: unknown, depth = 0): unknown {
  * 300 KB `tools/call` result is captured whole in `payload/` instead of being
  * cut to a 1 MiB head (`09 §四`).
  */
-export function prepareFramePayload(value: unknown): unknown {
-  return transformValue(value);
+export function prepareFramePayload(value: unknown, media?: MediaInput[]): unknown {
+  return transformValue(value, 0, media);
 }
+
+/** Decoded blobs of one frame, handed to the sink next to the (already redacted) event. */
+const frameMedia = new WeakMap<AuditEvent, readonly MediaInput[]>();
 
 /** Pairing key; the id type is part of the key because JSON-RPC ids are typed. */
 export function frameKey(mcp: string, id: string | number): string {
@@ -323,7 +334,9 @@ export class ProtocolFrameRecorder {
     event.method = input.method;
     event.bytes = input.bytes ?? jsonBytes(input.params);
     if (this.mode === 'full' && input.params !== undefined) {
-      event.params = prepareFramePayload(input.params);
+      const media: MediaInput[] = [];
+      event.params = prepareFramePayload(input.params, media);
+      if (media.length > 0) frameMedia.set(event, media);
     }
     if (id !== null) this.remember(id, input, now);
     this.enqueue(event);
@@ -352,8 +365,10 @@ export class ProtocolFrameRecorder {
     const durMs = input.durMs ?? (pending === undefined ? undefined : Math.max(0, now - pending.startedAt));
     if (durMs !== undefined) event.durMs = durMs;
     if (this.mode === 'full') {
-      if (input.result !== undefined) event.result = prepareFramePayload(input.result);
-      if (input.error !== undefined) event.error = prepareFramePayload(input.error);
+      const media: MediaInput[] = [];
+      if (input.result !== undefined) event.result = prepareFramePayload(input.result, media);
+      if (input.error !== undefined) event.error = prepareFramePayload(input.error, media);
+      if (media.length > 0) frameMedia.set(event, media);
     }
     this.enqueue(event);
   }
@@ -375,7 +390,7 @@ export class ProtocolFrameRecorder {
       const event = this.queue.shift();
       if (event === undefined) break;
       try {
-        const outcome = this.sink.write(event);
+        const outcome = this.sink.write(event, frameMedia.get(event));
         const promise = asPromise(outcome);
         if (promise !== null) {
           promise.catch(() => {
